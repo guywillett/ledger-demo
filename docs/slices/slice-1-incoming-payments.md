@@ -71,12 +71,13 @@ ledger-demo/
 
 Amounts are **integer minor units** (cents). No floats anywhere.
 
-**IDs:** primary keys and event IDs are native `uuid` columns holding UUIDv7 (time-ordered, generated in the app). Outside the database — API, events, logs — they appear as TypeIDs with a type prefix (`acct_…`, `pay_…`, `evt_…`). Conversion happens only in the data-access layer and the request/event schemas. Never store IDs as text or cast them in queries.
+**IDs:** entity primary keys and event IDs are native `uuid` columns holding UUIDv7 (time-ordered, generated in the app). Every UUID column has `CHECK (uuid_extract_version(col) = 7)`; entity primary keys also have `DEFAULT uuidv7()` as a fallback for manual inserts only — the app always supplies IDs. Event IDs and references have no default. **Primary key rule:** UUIDv7 for entities that may be referenced or exposed (accounts, payments, balance movements); `bigserial` for internal append-only logs that are never referenced or exposed (`payment_status_history`, `event_deliveries`). Outside the database — API, events, logs — they appear as TypeIDs with a type prefix (`acct_…`, `pay_…`, `evt_…`). Conversion happens only in the data-access layer and the request/event schemas. Never store IDs as text or cast them in queries.
 
 ### `accounts`
 | Column | Type | Notes |
 |---|---|---|
 | id | uuid PK | TypeID prefix `acct` |
+| name | text | `UNIQUE`; human-readable label for demo accounts (e.g. `alice`) |
 | created_at | timestamptz | |
 
 Demo accounts are created by a dedicated seed migration (zero balances). There is no account-creation endpoint in this slice.
@@ -123,17 +124,18 @@ One row per balance movement, written only by `move()`. The ledger's own idempot
 | from_bucket | text | `external`, `pending_in`, `available` |
 | to_bucket | text | same set; `CHECK (from_bucket <> to_bucket)` |
 | amount_minor | bigint | `CHECK (amount_minor > 0)` |
-| reference_id | uuid | the business object causing the movement (here, the payment ID) |
+| reference_type | text | what `reference_id` is: `payment` (later `withdrawal`); also determines its TypeID prefix |
+| reference_id | uuid | the business object causing the movement (here, the payment ID); not a foreign key |
 | reference_step | text | the step within it: `review_start`, `approve`, `reject` |
 | created_at | timestamptz | |
 
-`UNIQUE (reference_id, reference_step)` — a given movement can be applied once, whatever the caller does.
+`UNIQUE (reference_type, reference_id, reference_step)` — a given movement can be applied once, whatever the caller does.
 
 ### `event_deliveries`
 A log, not a guard: one row per message the worker receives. **No unique constraint on `event_id`** — recording repeated deliveries of the same event is the point.
 | Column | Type | Notes |
 |---|---|---|
-| id | uuid PK | UUIDv7 |
+| id | bigserial PK | internal log, never referenced or exposed |
 | event_id | uuid | business event ID (TypeID prefix `evt`); indexed, not unique |
 | nats_msg_id | text null | transport message ID |
 | delivery_attempt | int | from JetStream message metadata |
@@ -171,19 +173,19 @@ Correctness under concurrent or duplicate delivery comes from the database, neve
 - Check the affected row count of every conditional transition.
 - Call `move()` and write the history row **only** when the transition affected exactly one row, in the same transaction.
 - `move()` inserts its movement with `ON CONFLICT DO NOTHING` and touches balances only if a row was inserted.
-- Database backstops: conditional updates (Postgres re-evaluates the `WHERE` after waiting for a row lock), `UNIQUE (reference_id, reference_step)` on movements, and `CHECK (… >= 0)` on balances.
+- Database backstops: conditional updates (Postgres re-evaluates the `WHERE` after waiting for a row lock), `UNIQUE (reference_type, reference_id, reference_step)` on movements, and `CHECK (… >= 0)` on balances.
 
 ## The `move()` function
 
 All balance changes go through one function, called inside the caller's DB transaction:
 
 ```ts
-move(tx, { accountId, from, to, amountMinor, referenceId, referenceStep })
+move(tx, { accountId, from, to, amountMinor, referenceType, referenceId, referenceStep })
   : Promise<'applied' | 'duplicate'>
 // from/to: 'external' | 'pending_in' | 'available'
 ```
 
-1. `INSERT INTO balance_movements … ON CONFLICT (reference_id, reference_step) DO NOTHING`.
+1. `INSERT INTO balance_movements … ON CONFLICT (reference_type, reference_id, reference_step) DO NOTHING`.
 2. If no row was inserted → return `'duplicate'`; balances untouched.
 3. Otherwise update the `account_balances` columns for the non-external side(s) and return `'applied'`.
 
@@ -304,10 +306,10 @@ Prints a per-account table and an overall difference; exit code non-zero if any 
 2. **Tagging:** no tag for slice 1; `v0.1-simple-ledger` after withdrawals.
 3. **`under_review`:** set by the worker when compliance picks the payment up, not by the API.
 4. **Rejections:** modelled as returned to sender in the ledger; the network return itself is out of scope.
-5. **IDs:** UUIDv7 stored as `uuid`; TypeID-prefixed outside the database.
+5. **IDs:** UUIDv7 stored as `uuid`, enforced by `CHECK (uuid_extract_version(…) = 7)`; app-generated, with `DEFAULT uuidv7()` on entity primary keys as a fallback only; TypeID-prefixed outside the database. Typeless references carry a `reference_type`. Primary keys: UUIDv7 for entities that may be referenced or exposed; `bigserial` for internal append-only logs. `balance_movements` counts as an entity because it becomes the double-entry transactions table.
 6. **Incoming idempotency:** `UNIQUE (network, network_transaction_id)`; no client `Idempotency-Key` until withdrawals.
 7. **API is ingestion only:** it never changes balances; all balance movements happen in the worker via the ledger module.
 8. **No check-then-act:** duplicate and race protection comes from DB constraints and row counts, never from a prior `SELECT`.
 9. **Queries:** raw parameterised SQL via `pg`, confined to the data-access layer, with explicit typed row mapping.
-10. **Ledger is self-protecting:** `balance_movements` with `UNIQUE (reference_id, reference_step)`; `move()` is a no-op on a duplicate reference. Payment state drives the workflow but is not the only thing preventing double movements, avoiding coupling the ledger to payment state.
+10. **Ledger is self-protecting:** `balance_movements` with `UNIQUE (reference_type, reference_id, reference_step)`; `move()` is a no-op on a duplicate reference. Payment state drives the workflow but is not the only thing preventing double movements, avoiding coupling the ledger to payment state.
 11. **Duplicates are counted, not guarded, by a log:** `event_deliveries` (one row per delivery, no unique constraint) replaces `processed_events`; ingestion duplicates counted via `notification_count`.

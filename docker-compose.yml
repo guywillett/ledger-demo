@@ -1,0 +1,53 @@
+name: ledger-demo
+
+services:
+  postgres:
+    image: postgres:18.6-alpine3.24
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  nats:
+    image: nats:2.15.1-alpine
+    # -js enables JetStream; -sd is where it persists streams; -m exposes the monitoring port.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      # ?js-enabled-only=true makes /healthz fail unless JetStream is up.
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2.36.0
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      # Set as env vars rather than flags so they also apply to ad-hoc
+      # `docker compose run --rm migrate <command>` invocations.
+      DBMATE_WAIT: "true"
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes:
+      - ./db:/db
+    command: ["up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  natsdata:
