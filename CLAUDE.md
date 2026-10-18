@@ -14,7 +14,11 @@ Portfolio project: a small payment event-processing system (incoming payments, p
 - Before writing code for a step, say briefly what you're about to do and why. After it, summarise what changed.
 - Explain non-obvious language or library idioms when you first use them (Node event loop, promise handling, TypeScript types vs runtime validation, etc.). Skip what a senior backend engineer already knows (SQL, transactions, HTTP).
 - Ask rather than guess when a choice isn't covered by the spec.
-- Don't commit unless asked. Feature branches; history gets tidied before merging to `main`.
+- Don't commit unless asked. At the end of each step, propose a commit message and wait for the go-ahead.
+- **Branching:** one branch per slice (`slice-1`, `slice-2`, …) off `main`, with one commit per step. Short-lived side branches only for experiments that may be discarded. When the slice is done, tidy its history and merge into `main` with `--no-ff` — no squash, no fast-forward — so `git log --first-parent main` shows one merge per slice and the step commits are kept. Release tags (e.g. `v0.1-simple-ledger`) go on those merge commits.
+- **Fix-ups:** when a change belongs to an earlier step, commit it with `git commit --fixup=<step-sha>` rather than as a loose "fix" commit. The owner folds them in at the end with `git rebase -i --autosquash main` (don't run interactive rebases yourself). Only for steps on the current slice branch; a fix to an already-merged slice is a normal commit.
+- **Pushing:** the slice branch may be rebased during tidy-up, so pushing it afterwards needs `git push --force-with-lease`. Never rebase or force-push `main`.
+- **Commit messages:** imperative summary line (≤ 72 chars), blank line, then a short body saying why, not just what.
 
 ## Conventions
 
