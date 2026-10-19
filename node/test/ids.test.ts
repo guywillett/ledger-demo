@@ -3,20 +3,20 @@ import { fromTypeId, newUuid, toTypeId, type Uuid } from '../src/shared/ids.ts';
 
 describe('ids', () => {
   it('generates UUIDv7', () => {
-    expect(newUuid()).toMatch(
+    expect(newUuid('acct')).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
   });
 
   it('round-trips a UUID through a TypeID', () => {
-    const uuid = newUuid();
+    const uuid = newUuid('pay');
     const typeId = toTypeId('pay', uuid);
     expect(typeId).toMatch(/^pay_[0-9a-z]{26}$/);
     expect(fromTypeId('pay', typeId)).toBe(uuid);
   });
 
   it('rejects a TypeID with the wrong prefix', () => {
-    const typeId = toTypeId('acct', newUuid());
+    const typeId = toTypeId('acct', newUuid('acct'));
     expect(() => fromTypeId('pay', typeId)).toThrow();
   });
 
@@ -26,8 +26,14 @@ describe('ids', () => {
   });
 
   it('rejects a TypeID that does not hold a UUIDv7', () => {
-    const v4 = '2c5ea4c0-4067-41fb-9c1e-5c3f2d7e8a90' as Uuid;
+    const v4 = '2c5ea4c0-4067-41fb-9c1e-5c3f2d7e8a90' as Uuid<'acct'>;
     expect(() => fromTypeId('acct', toTypeId('acct', v4))).toThrow(/UUIDv7/);
+  });
+
+  it('keeps entity IDs apart at compile time', () => {
+    const accountId = newUuid('acct');
+    // @ts-expect-error: an account UUID is not a payment UUID
+    toTypeId('pay', accountId);
   });
 
   // The seed migration and README hard-code these pairs.
@@ -36,7 +42,7 @@ describe('ids', () => {
     ['01a14c4e-e001-7331-bab2-75411dbbe55d', 'acct_01m564xr01ecrvnckn84evqsax'],
     ['01a14c4e-e002-71c0-a116-c28cf6a1c175', 'acct_01m564xr02e70a25p2hkva3gbn'],
   ])('seed account %s is %s', (uuid, typeId) => {
-    expect(toTypeId('acct', uuid as Uuid)).toBe(typeId);
+    expect(toTypeId('acct', uuid as Uuid<'acct'>)).toBe(typeId);
     expect(fromTypeId('acct', typeId)).toBe(uuid);
   });
 });
