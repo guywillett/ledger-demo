@@ -34,7 +34,9 @@ describe('database', () => {
   });
 
   it('accepts BigInt query parameters', async () => {
-    const result = await pool.query<{ n: bigint }>('SELECT $1::bigint + 1 AS n', [9007199254740993n]);
+    const result = await pool.query<{ n: bigint }>('SELECT $1::bigint + 1 AS n', [
+      9007199254740993n,
+    ]);
     expect(result.rows[0]?.n).toBe(9007199254740994n);
   });
 

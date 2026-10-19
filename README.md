@@ -105,6 +105,20 @@ TypeScript is run directly by Node (type stripping); there is no build step and 
 
 Tests default to the compose services on `localhost`; set `DATABASE_URL` / `NATS_URL` to point elsewhere.
 
+#### Lint and format
+
+```sh
+npm run check                   # format:check + lint + typecheck (what CI will run)
+npm run format                  # Prettier: rewrite files in place
+npm run lint                    # oxlint, including type-aware rules
+```
+
+- **Prettier** (`.prettierrc.json`) formats everything under `node/`.
+- **oxlint** (`.oxlintrc.json`) lints. Type-aware rules (`no-floating-promises`, `no-misused-promises`, …) run through `oxlint-tsgolint`, which uses the same TypeScript 7 checker as `tsc`. ESLint's typescript-eslint doesn't support TypeScript 7 yet.
+- Exported functions must declare parameter and return types (`explicit-module-boundary-types`; not enforced in tests).
+- A `switch` over a union type must list every member (`switch-exhaustiveness-check`); a `default:` alone doesn't count, so adding a new status flags every switch that misses it.
+- Editor: install the Prettier and oxc extensions; `.editorconfig` at the repo root covers indentation and line endings for all languages.
+
 ### Troubleshooting
 
 - **Port already in use** (`5432`, `4222`, `8222`): another Postgres or NATS is running on the host. Stop it, or change the left-hand side of the port mapping in `docker-compose.yml`.

@@ -3,7 +3,9 @@ import { fromTypeId, newUuid, toTypeId, type Uuid } from '../src/shared/ids.ts';
 
 describe('ids', () => {
   it('generates UUIDv7', () => {
-    expect(newUuid()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(newUuid()).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
   });
 
   it('round-trips a UUID through a TypeID', () => {

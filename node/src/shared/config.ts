@@ -18,7 +18,10 @@ export type SharedConfig = {
 };
 
 // Validates `env` against `schema`, throwing one error that lists every problem.
-export function parseEnv<S extends z.ZodType>(schema: S, env: NodeJS.ProcessEnv = process.env): z.infer<S> {
+export function parseEnv<S extends z.ZodType>(
+  schema: S,
+  env: NodeJS.ProcessEnv = process.env,
+): z.infer<S> {
   const result = schema.safeParse(env);
   if (!result.success) {
     throw new Error(`Invalid configuration:\n${z.prettifyError(result.error)}`);

@@ -8,6 +8,10 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run format:check && npm run lint && npm run typecheck",
     "test": "npm run typecheck && vitest run",
     "test:watch": "vitest"
   },
@@ -21,6 +25,9 @@
   "devDependencies": {
     "@types/node": "26.6.5",
     "@types/pg": "8.23.1",
+    "oxlint": "1.88.0",
+    "oxlint-tsgolint": "7.0.2004",
+    "prettier": "3.9.10",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
   }
