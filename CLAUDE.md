@@ -26,7 +26,7 @@ Portfolio project: a small payment event-processing system (incoming payments, p
 - **No check-then-act:** never `SELECT` to decide whether something has happened and then act. Use conditional `UPDATE … WHERE status = $expected`, `INSERT … ON CONFLICT DO NOTHING`, `rowCount` and `RETURNING`.
 - **Balances** change only through `ledger/move()`. The API never changes balances.
 - **IDs:** UUIDv7 in `uuid` columns; TypeIDs (`typeid-js`, prefixes `acct`, `pay`, `evt`) outside the database. Convert only at boundaries. Never store IDs as text.
-- **Money:** integer minor units (`bigint`), never floats.
+- **Money:** integer minor units: `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON (`"amount_minor": "1250"`). Never floats. Cast counts to `::int` in SQL. Any division goes through one helper with an explicit rounding mode. See `docs/decisions/0001-money-representation.md`.
 - **Validation:** Zod at every boundary (HTTP bodies, NATS messages).
 - **Migrations:** plain SQL in `db/migrations/`, run by dbmate. Language-neutral (shared with Go later).
 - **Versions:** pin Docker image tags and dependency versions; commit lockfiles.

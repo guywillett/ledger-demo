@@ -69,7 +69,7 @@ ledger-demo/
 
 ## Data model
 
-Amounts are **integer minor units** (cents). No floats anywhere.
+Amounts are **integer minor units** (cents): `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON. No floats anywhere. See `docs/decisions/0001-money-representation.md`.
 
 **IDs:** entity primary keys and event IDs are native `uuid` columns holding UUIDv7 (time-ordered, generated in the app). Every UUID column has `CHECK (uuid_extract_version(col) = 7)`; entity primary keys also have `DEFAULT uuidv7()` as a fallback for manual inserts only — the app always supplies IDs. Event IDs and references have no default. **Primary key rule:** UUIDv7 for entities that may be referenced or exposed (accounts, payments, balance movements); `bigserial` for internal append-only logs that are never referenced or exposed (`payment_status_history`, `event_deliveries`). Outside the database — API, events, logs — they appear as TypeIDs with a type prefix (`acct_…`, `pay_…`, `evt_…`). Conversion happens only in the data-access layer and the request/event schemas. Never store IDs as text or cast them in queries.
 
@@ -198,7 +198,7 @@ Nothing else may update balances. Because the guard lives in the ledger, `move()
 ### `POST /payments`
 Models an **inbound notification from the network / BaaS provider** (webhook-style), not a client request.
 
-Body: `{ network_transaction_id, account_id, amount_minor, currency: "EUR", network: "SEPA" }`
+Body: `{ network_transaction_id, account_id, amount_minor, currency: "EUR", network: "SEPA" }`, with `amount_minor` a string of digits (e.g. `"1250"`), validated and converted to `BigInt`.
 
 One DB transaction: insert the payment (`received`) and its first history row. **No balance change** — ingestion only.
 
@@ -214,7 +214,7 @@ A client-supplied `Idempotency-Key` header is not used here; it arrives with wit
 Response `201`: the payment, including status.
 
 ### `GET /accounts/:id/balance`
-`{ pending_in, available, currency }`
+`{ pending_in, available, currency }`, with balances as digit strings (e.g. `{ "pending_in": "1250", "available": "0", "currency": "EUR" }`).
 
 ### `GET /accounts/:id/transactions`
 Payments, newest first, each with current status. Optional `?include=history` adds the status-history rows.
@@ -230,7 +230,7 @@ Payments, newest first, each with current status. Optional `?include=history` ad
   "network": "SEPA",
   "network_transaction_id": "…",
   "account_id": "acct_…",
-  "amount_minor": 1250,
+  "amount_minor": "1250",
   "currency": "EUR",
   "occurred_at": "2026-10-18T09:00:00Z"
 }
@@ -313,3 +313,4 @@ Prints a per-account table and an overall difference; exit code non-zero if any 
 9. **Queries:** raw parameterised SQL via `pg`, confined to the data-access layer, with explicit typed row mapping.
 10. **Ledger is self-protecting:** `balance_movements` with `UNIQUE (reference_type, reference_id, reference_step)`; `move()` is a no-op on a duplicate reference. Payment state drives the workflow but is not the only thing preventing double movements, avoiding coupling the ledger to payment state.
 11. **Duplicates are counted, not guarded, by a log:** `event_deliveries` (one row per delivery, no unique constraint) replaces `processed_events`; ingestion duplicates counted via `notification_count`.
+12. **Money:** `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON; division via one helper with an explicit rounding mode. Rationale in `docs/decisions/0001-money-representation.md`.

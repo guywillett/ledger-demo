@@ -87,6 +87,24 @@ Seeded by `db/migrations/20261018000002_seed_demo_accounts.sql`, with zero balan
 | bob | `acct_01m564xr01ecrvnckn84evqsax` | `01a14c4e-e001-7331-bab2-75411dbbe55d` |
 | carol | `acct_01m564xr02e70a25p2hkva3gbn` | `01a14c4e-e002-71c0-a116-c28cf6a1c175` |
 
+### Node
+
+The Node.js implementation lives in `node/`. The Node version is in `.nvmrc` (major version only); `package.json` `engines` and `engine-strict` in `node/.npmrc` make npm refuse other majors.
+
+```sh
+nvm install                     # once: installs the version in .nvmrc
+nvm use                         # in each new shell (or set up nvm's shell hook)
+cd node
+npm ci                          # install exactly what package-lock.json records
+npm run typecheck               # tsc --noEmit
+npm test                        # typecheck, then Vitest (needs `docker compose up -d`)
+npm run test:watch              # Vitest in watch mode
+```
+
+TypeScript is run directly by Node (type stripping); there is no build step and no `dist/`. `tsc` only type-checks, which is why `npm test` runs it first. Consequences: relative imports use `.ts` extensions, and only erasable syntax is allowed (no `enum`, namespaces or constructor parameter properties; `erasableSyntaxOnly` enforces this).
+
+Tests default to the compose services on `localhost`; set `DATABASE_URL` / `NATS_URL` to point elsewhere.
+
 ### Troubleshooting
 
 - **Port already in use** (`5432`, `4222`, `8222`): another Postgres or NATS is running on the host. Stop it, or change the left-hand side of the port mapping in `docker-compose.yml`.
