@@ -81,11 +81,11 @@ curl http://localhost:8222/jsz                                      # JetStream 
 
 Seeded by `db/migrations/20261018000002_seed_demo_accounts.sql`, with zero balances:
 
-| Name | TypeID (API) | UUID (database) |
-|---|---|---|
-| alice | `acct_01m564xr00fx7rjvqryn5dzwxx` | `01a14c4e-e000-7f4f-896e-f8f54adff3bd` |
-| bob | `acct_01m564xr01ecrvnckn84evqsax` | `01a14c4e-e001-7331-bab2-75411dbbe55d` |
-| carol | `acct_01m564xr02e70a25p2hkva3gbn` | `01a14c4e-e002-71c0-a116-c28cf6a1c175` |
+| Name | TypeID (API) | UUID (database) | IBAN (provider notifications) |
+|---|---|---|---|
+| alice | `acct_01m564xr00fx7rjvqryn5dzwxx` | `01a14c4e-e000-7f4f-896e-f8f54adff3bd` | `FR7612345000010000000000193` |
+| bob | `acct_01m564xr01ecrvnckn84evqsax` | `01a14c4e-e001-7331-bab2-75411dbbe55d` | `FR7612345000010000000000290` |
+| carol | `acct_01m564xr02e70a25p2hkva3gbn` | `01a14c4e-e002-71c0-a116-c28cf6a1c175` | `FR7612345000010000000000387` |
 
 ### Node
 
