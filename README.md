@@ -103,7 +103,27 @@ npm run test:watch              # Vitest in watch mode
 
 TypeScript is run directly by Node (type stripping); there is no build step and no `dist/`. `tsc` only type-checks, which is why `npm test` runs it first. Consequences: relative imports use `.ts` extensions, and only erasable syntax is allowed (no `enum`, namespaces or constructor parameter properties; `erasableSyntaxOnly` enforces this).
 
-Tests default to the compose services on `localhost`; set `DATABASE_URL` / `NATS_URL` to point elsewhere.
+Tests default to the compose services on `localhost`; set `DATABASE_URL` / `NATS_URL` to point elsewhere. Every API test response is also checked against `contracts/openapi.yaml`.
+
+#### Running the API locally
+
+```sh
+cp .env.example .env            # once; .env is gitignored and loaded by Node itself
+npm run dev:api                 # restarts on file changes (node --watch)
+npm run start:api               # without watching
+```
+
+Record a payment notification for alice (repeat it to see the duplicate handling: `200` and a rising `notification_count`; change the amount to see a `409`):
+
+```sh
+curl -i -X POST localhost:3000/payments -H 'content-type: application/json' -d '{
+  "network_transaction_id": "NTX-0001",
+  "creditor_iban": "FR76 1234 5000 0100 0000 0000 193",
+  "amount_minor": "1250",
+  "currency": "EUR",
+  "network": "SEPA"
+}'
+```
 
 #### Lint and format
 

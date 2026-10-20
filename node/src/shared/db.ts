@@ -5,6 +5,11 @@ import type { Logger } from './logger.ts';
 // Data-access functions that must run inside a transaction take a Tx.
 export type Tx = pg.PoolClient;
 
+// Anything that can run a query: the pool (each query on whichever connection is free) or a
+// Tx. Data-access functions whose work is a single statement take a Queryable, so callers can
+// run them on their own or inside a transaction.
+export type Queryable = Pick<pg.Pool, 'query'>;
+
 // pg returns bigint (int8) columns as strings, because a JS number cannot hold every
 // 64-bit integer. Parse them as BigInt: exact across the whole int8 range, and BigInt
 // can't be mixed with number, so float arithmetic on money is a TypeError.

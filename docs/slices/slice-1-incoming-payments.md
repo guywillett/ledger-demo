@@ -58,6 +58,7 @@ ledger-demo/
 │   │   ├── api/          # Fastify app
 │   │   ├── worker/       # consumer: wires compliance decision to ledger effects
 │   │   ├── compliance/   # decides approve/reject — knows nothing about balances
+│   │   ├── ingestion/    # records provider notifications; maps provider identifiers (IBAN) to our accounts
 │   │   ├── ledger/       # state transitions + move() — the only code that touches balances
 │   │   └── shared/       # config, db pool, nats client, logging
 │   ├── scripts/reconcile.ts
@@ -253,7 +254,7 @@ Body: `{ network_transaction_id, creditor_iban, provider_account_id?, amount_min
 - `creditor_iban` is parsed into a branded `Iban` type (`type Iban = string & { readonly __brand: 'Iban' }`) by `parseIban`, which normalises (spaces removed, upper case) and then checks format, length and the mod-97 checksum. Only `parseIban` can produce an `Iban`, so any function taking one (e.g. the repository lookup) is guaranteed a normalised, valid IBAN ("parse, don't validate"). In the request schema it is a Zod `.transform()` calling `parseIban`;
 - `provider_account_id` is optional, stored as received, and not used for matching or checked against `accounts.provider_account_id` (with vIBANs they can legitimately differ).
 
-One DB transaction: resolve `creditor_iban` to our account and insert the payment (`created`) in the same statement (`INSERT … SELECT … FROM accounts WHERE iban = $1`), then its first history row. No matching account → nothing inserted → `422`. **No balance change** — ingestion only.
+One statement (so no explicit transaction is needed): resolve `creditor_iban` to our account, insert the payment (`created`) and its first history row (a data-modifying CTE), or count a duplicate (`INSERT … SELECT … FROM accounts WHERE iban = $1 … ON CONFLICT …`, detailed below). No matching account → nothing inserted → `422`. **No balance change** — ingestion only.
 
 Then publish `payment.created` to JetStream with `Nats-Msg-Id = event_id`.
 
@@ -262,11 +263,13 @@ Idempotency behaviour (keyed on `network` + `network_transaction_id`). "Same det
 - Same network ID, different details → `409` and an `error` log naming the fields that differ (provider bug or suspicious — not a retry)
 - Concurrent notifications with the same network ID → exactly one creates; the rest are duplicates or conflicts
 
-All of this is decided by one statement: an `INSERT … SELECT … FROM accounts WHERE iban = $1 … ON CONFLICT (network, network_transaction_id) DO UPDATE SET notification_count = notification_count + 1 WHERE (creditor_iban, amount_minor, currency) = (EXCLUDED.…)`, returning whether a row was inserted (Postgres 18 `RETURNING old/new`). No row returned means either no matching account (`422`) or a conflict (`409`); a conflict takes priority when both apply.
+All of this is decided by one statement: an `INSERT … SELECT … FROM accounts WHERE iban = $1 … ON CONFLICT (network, network_transaction_id) DO UPDATE SET notification_count = notification_count + 1 WHERE (creditor_iban, amount_minor, currency) = (EXCLUDED.…)`, returning whether a row was inserted (Postgres 18 `RETURNING old/new`). No row returned means either no matching account (`422`) or a conflict (`409`); a conflict takes priority when both apply. Which one is decided by reading the stored payment for the network ID after the statement (a fresh snapshot): one exists → `409` (and its details name the differing fields), none → `422`. This read only classifies a decision the statement has already made atomically. When the IBAN matches an account the result is exact even under concurrency, because `ON CONFLICT` waits for a competing insert and sees the committed row. When it matches none, a competing notification with the same network ID that has not yet committed when the read runs gives `422`: at that moment no payment with that ID is stored, so `422` is accurate.
 
 A client-supplied `Idempotency-Key` header is not used here; it arrives with withdrawals, which are genuinely client-initiated.
 
-Other responses: `400` for an invalid body (including an invalid IBAN), `422` for a valid IBAN that matches none of our accounts, `5xx` for unexpected failures.
+Other responses: `400` for an invalid body (including an invalid IBAN), `422` for a valid IBAN that matches none of our accounts, `5xx` for unexpected failures. A refused notification whose stored payment differs in no compared field is an internal inconsistency (the SQL and TypeScript duplicate rules have drifted, or an account's IBAN changed), not a conflict: `500` and an `error` log.
+
+Errors are RFC 9457 problem details (`application/problem+json`): a `400` lists each problem in `errors` (path and message, never the input values), and a `409` lists the names of the differing fields in `differing_fields` (never their stored values). Unknown body fields are ignored rather than rejected (tolerant reader), and are neither stored nor logged. The contract is `contracts/openapi.yaml`, written by hand and shared with the Go implementation.
 
 Response `201`: the payment, including status.
 

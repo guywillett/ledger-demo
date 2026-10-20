@@ -1,0 +1,211 @@
+openapi: 3.1.1
+info:
+  title: ledger-demo API
+  version: 0.1.0
+  description: |
+    Hand-written contract, shared by the Node and Go implementations. Both are tested against
+    it. Amounts are integer minor units as digit strings; IDs are TypeIDs.
+    Errors are RFC 9457 problem details (application/problem+json).
+paths:
+  /payments:
+    post:
+      summary: Record an incoming payment notification from the network / BaaS provider
+      description: |
+        Webhook-style ingestion. Idempotent on (network, network_transaction_id): a repeat with
+        the same creditor_iban, amount_minor and currency is a duplicate (200); with different
+        details it is a conflict (409). The status codes are the demo's; see "Webhook semantics"
+        in docs/slices/slice-1-incoming-payments.md for how a real provider contract differs.
+      parameters:
+        - name: x-request-id
+          in: header
+          required: false
+          description: Reused as the request ID if it matches the pattern; otherwise one is generated.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentNotification'
+            example:
+              network_transaction_id: NTX-2026-0001
+              creditor_iban: FR7612345000010000000000193
+              provider_account_id: prov_acc_0001
+              amount_minor: '1250'
+              currency: EUR
+              network: SEPA
+      responses:
+        '201':
+          description: Payment recorded (status created)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '200':
+          description: Duplicate notification with the same details; the existing payment
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '400':
+          description: Invalid body (including an invalid IBAN) or malformed JSON
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: Same network transaction ID with different details
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ConflictProblem'
+        '415':
+          description: Unsupported content type
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Valid IBAN that matches none of our accounts
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+components:
+  headers:
+    RequestId:
+      description: The request ID used in logs
+      schema:
+        type: string
+  schemas:
+    AmountMinor:
+      description: Integer minor units (cents) as a string of digits, greater than zero.
+      type: string
+      pattern: '^[1-9][0-9]*$'
+      maxLength: 19
+      examples: ['1250']
+    PaymentNotification:
+      type: object
+      description: Unknown fields are ignored (tolerant reader).
+      required: [network_transaction_id, creditor_iban, amount_minor, currency, network]
+      properties:
+        network_transaction_id:
+          type: string
+          minLength: 1
+          maxLength: 255
+        creditor_iban:
+          type: string
+          description: SEPA IBAN; spaces and lower case are accepted and normalised.
+          maxLength: 64
+        provider_account_id:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Stored when sent; not used for matching or duplicate detection.
+        amount_minor:
+          $ref: '#/components/schemas/AmountMinor'
+        currency:
+          const: EUR
+        network:
+          const: SEPA
+    Payment:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - account_id
+        - creditor_iban
+        - provider_account_id
+        - amount_minor
+        - currency
+        - network
+        - network_transaction_id
+        - status
+        - notification_count
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          pattern: '^pay_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        account_id:
+          type: string
+          pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        creditor_iban:
+          type: string
+          description: Normalised (no spaces, upper case).
+          pattern: '^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$'
+        provider_account_id:
+          type: [string, 'null']
+        amount_minor:
+          $ref: '#/components/schemas/AmountMinor'
+        currency:
+          const: EUR
+        network:
+          const: SEPA
+        network_transaction_id:
+          type: string
+        status:
+          type: string
+          enum: [created, received, under_review, approved, rejected, credited, returned]
+        notification_count:
+          type: integer
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Problem:
+      type: object
+      description: RFC 9457 problem details.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        errors:
+          type: array
+          description: For invalid notifications, one entry per problem found.
+          items:
+            type: object
+            additionalProperties: false
+            required: [path, message]
+            properties:
+              path:
+                type: string
+              message:
+                type: string
+    ConflictProblem:
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          required: [differing_fields]
+          properties:
+            differing_fields:
+              type: array
+              description: Names of the stored fields that differ (never their values).
+              minItems: 1
+              items:
+                type: string
+                enum: [creditor_iban, amount_minor, currency]
