@@ -127,7 +127,6 @@ One row per account.
 | network | text | `CHECK (network = 'SEPA')` |
 | network_transaction_id | text | ID from the network / BaaS provider; `UNIQUE (network, network_transaction_id)` — the idempotency key for incoming payments |
 | status | text | `created`, `received`, `under_review`, `approved`, `rejected`, `credited`, `returned` |
-| request_hash | text | hash of the notification's identifying details (`network`, `network_transaction_id`, `creditor_iban`, `amount_minor`, `currency`), computed after validation and normalisation, to detect the same network ID arriving with different details. `provider_account_id` is deliberately excluded: it is informational, and a provider that includes it in one retry and omits it in the next must not trigger a `409` |
 | notification_count | int | starts at 1; incremented on each duplicate notification with the same details (ingestion-side duplicate count) |
 | created_at / updated_at | timestamptz | |
 
@@ -258,10 +257,12 @@ One DB transaction: resolve `creditor_iban` to our account and insert the paymen
 
 Then publish `payment.created` to JetStream with `Nats-Msg-Id = event_id`.
 
-Idempotency behaviour (keyed on `network` + `network_transaction_id`):
+Idempotency behaviour (keyed on `network` + `network_transaction_id`). "Same details" means `creditor_iban`, `amount_minor` and `currency` equal the stored row's, compared directly in SQL — every identifying detail is stored on the row, so no request hash is needed, and Node and Go share the exact rule by running the same SQL. `provider_account_id` is not compared: it is informational, and a provider that includes it in one retry and omits it in the next must not trigger a `409`; the first value received is kept.
 - Same network ID, same details → `200` with the existing payment; `notification_count` incremented; no other effects
-- Same network ID, different details (e.g. amount or `creditor_iban`) → `409` and an `error` log (provider bug or suspicious — not a retry)
-- Concurrent notifications with the same network ID → exactly one creates; the rest get the existing payment (unique constraint, then re-read)
+- Same network ID, different details → `409` and an `error` log naming the fields that differ (provider bug or suspicious — not a retry)
+- Concurrent notifications with the same network ID → exactly one creates; the rest are duplicates or conflicts
+
+All of this is decided by one statement: an `INSERT … SELECT … FROM accounts WHERE iban = $1 … ON CONFLICT (network, network_transaction_id) DO UPDATE SET notification_count = notification_count + 1 WHERE (creditor_iban, amount_minor, currency) = (EXCLUDED.…)`, returning whether a row was inserted (Postgres 18 `RETURNING old/new`). No row returned means either no matching account (`422`) or a conflict (`409`); a conflict takes priority when both apply.
 
 A client-supplied `Idempotency-Key` header is not used here; it arrives with withdrawals, which are genuinely client-initiated.
 
@@ -361,7 +362,7 @@ available  == net of balance_movements into/out of available
 ```
 
 Prints a per-account table and an overall difference; exit code non-zero if any difference ≠ 0. Also prints:
-- payments stuck in `created` beyond a threshold (orphaned notifications — see *Known gaps*)
+- payments stuck in `created` beyond a threshold: received by the bank but never booked (see the commit-then-publish gap under *Known gaps*)
 - deliveries vs applied: count of `event_deliveries` by outcome, and duplicate notifications from `notification_count`
 
 ## Configuration
@@ -388,7 +389,7 @@ Prints a per-account table and an overall difference; exit code non-zero if any 
 
 ## Known gaps (deliberate)
 
-- **Commit-then-publish gap:** if the API commits but crashes before publishing, the payment stays `created` forever. Because `created` has no balance effect, this is an orphaned notification rather than stranded money. Fix in a later slice with a transactional outbox; until then, reconciliation lists payments stuck in `received` beyond a threshold.
+- **Commit-then-publish gap:** if the API commits the payment but crashes before publishing `payment.created`, nothing ever processes it and it stays `created` forever. The money has arrived at the bank but is never booked, so the customer never gets it: stranded money. Our ledger stays internally consistent (no balance without a booked payment), which is exactly why internal reconciliation cannot see the problem; only the "stuck in `created`" check below, or reconciling against the provider's own statement, catches it. This gap has been present since the API first published events; it is fixed in a later slice with a transactional outbox.
 - Approve/reject is random, not a real rules engine.
 - No authentication on the API. In particular, `POST /payments` does not verify the sender: real webhooks are authenticated, typically by an HMAC signature header checked against a shared secret.
 - `POST /payments` uses demo status codes rather than a real webhook contract (see *Webhook semantics*), and does not distinguish accounts outside this app from genuinely unknown ones.
@@ -409,5 +410,6 @@ Prints a per-account table and an overall difference; exit code non-zero if any 
 11. **Duplicates are counted, not guarded, by a log:** `event_deliveries` (one row per delivery, no unique constraint) replaces `processed_events`; ingestion duplicates counted via `notification_count`.
 12. **Money:** `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON; division via one helper with an explicit rounding mode. Rationale in `docs/decisions/0001-money-representation.md`.
 13. **`POST /payments` status codes:** conventional API codes for the demo; the real webhook contract (2xx for anything recorded or handled, 5xx only when a retry helps, accounts outside this app acknowledged and ignored) is documented under *Webhook semantics*.
-14. **Provider identifiers mapped at the edge:** notifications identify accounts by `creditor_iban`, mapped to `account_id` during ingestion; the IBAN as received is stored on the payment; nothing downstream sees provider identifiers. The provider account ID is optional, stored when sent, and not used for matching or in the request hash. One IBAN and at most one provider account ID per account for now; `provider_accounts` (per provider, with lifecycle status) is the evolution path.
+14. **Provider identifiers mapped at the edge:** notifications identify accounts by `creditor_iban`, mapped to `account_id` during ingestion; the IBAN as received is stored on the payment; nothing downstream sees provider identifiers. The provider account ID is optional, stored when sent, and not used for matching or for duplicate detection. One IBAN and at most one provider account ID per account for now; `provider_accounts` (per provider, with lifecycle status) is the evolution path.
 15. **Event naming:** `payment.<new status>`, one event per state transition, published on entering that status; status names are part of the event contract. Only `payment.created` is published in slice 1.
+16. **No request hash:** duplicate detection compares the stored `creditor_iban`, `amount_minor` and `currency` directly in the upsert. Every identifying detail is stored on the row, so a hash would add a cross-language format to keep in sync and hide which field differed.
