@@ -93,3 +93,48 @@ export async function paymentExists(db: Queryable, paymentId: Uuid<'pay'>): Prom
   const result = await db.query(EXISTS_SQL, [paymentId]);
   return result.rowCount === 1;
 }
+
+// One row of a payment's status history.
+export type StatusChange = {
+  readonly from: PaymentStatus | null;
+  readonly to: PaymentStatus;
+  readonly reason: string | null;
+  readonly at: Date;
+};
+
+const HISTORY_OF_SQL = `
+SELECT payment_id, from_status, to_status, reason, at
+FROM payment_status_history
+WHERE payment_id = ANY($1)
+ORDER BY payment_id, id
+`;
+
+// The status history of several payments in one query (not one query per payment), oldest
+// change first. Payments without history rows are absent from the map.
+export async function statusHistories(
+  db: Queryable,
+  paymentIds: readonly Uuid<'pay'>[],
+): Promise<Map<Uuid<'pay'>, StatusChange[]>> {
+  const histories = new Map<Uuid<'pay'>, StatusChange[]>();
+  if (paymentIds.length === 0) return histories;
+  const result = await db.query<{
+    payment_id: string;
+    from_status: string | null;
+    to_status: string;
+    reason: string | null;
+    at: Date;
+  }>(HISTORY_OF_SQL, [paymentIds]);
+  for (const row of result.rows) {
+    const id = row.payment_id as Uuid<'pay'>;
+    const change: StatusChange = {
+      from: row.from_status === null ? null : parseStatus(row.from_status),
+      to: parseStatus(row.to_status),
+      reason: row.reason,
+      at: row.at,
+    };
+    const list = histories.get(id);
+    if (list === undefined) histories.set(id, [change]);
+    else list.push(change);
+  }
+  return histories;
+}

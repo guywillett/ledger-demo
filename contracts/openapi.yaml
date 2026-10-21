@@ -100,7 +100,87 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /accounts/{account_id}/balance:
+    get:
+      summary: The account's balances
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: Balances in integer minor units, as digit strings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Balance'
+        '400':
+          description: account_id is not an acct_ ID
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such account
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /accounts/{account_id}/transactions:
+    get:
+      summary: The account's payments, newest first, a page at a time
+      description: |
+        Paginated by seeking on the payment ID (UUIDv7 IDs sort by creation time): pass the
+        previous page's next_before as `before` to get the next, older page.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: before
+          in: query
+          required: false
+          description: Only payments older than this one (a previous page's next_before).
+          schema:
+            type: string
+            pattern: '^pay_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        - name: include
+          in: query
+          required: false
+          description: '`history` adds each payment''s status history.'
+          schema:
+            const: history
+      responses:
+        '200':
+          description: A page of payments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionList'
+        '400':
+          description: Invalid account_id or query parameter
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such account
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 components:
+  parameters:
+    AccountId:
+      name: account_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
   headers:
     RequestId:
       description: The request ID used in logs
@@ -137,9 +217,11 @@ components:
           const: EUR
         network:
           const: SEPA
-    Payment:
+    # The fields of a payment, shared by Payment and Transaction. Each of those closes itself
+    # with unevaluatedProperties: false, which (unlike additionalProperties) also counts the
+    # properties described through allOf.
+    PaymentFields:
       type: object
-      additionalProperties: false
       required:
         - id
         - account_id
@@ -175,8 +257,7 @@ components:
         network_transaction_id:
           type: string
         status:
-          type: string
-          enum: [created, received, under_review, approved, rejected, credited, returned]
+          $ref: '#/components/schemas/PaymentStatus'
         notification_count:
           type: integer
           minimum: 1
@@ -186,6 +267,75 @@ components:
         updated_at:
           type: string
           format: date-time
+    Payment:
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/PaymentFields'
+      unevaluatedProperties: false
+    Transaction:
+      description: A payment in an account's transaction list.
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/PaymentFields'
+      properties:
+        history:
+          description: Present with include=history. Oldest change first.
+          type: array
+          items:
+            $ref: '#/components/schemas/StatusChange'
+      unevaluatedProperties: false
+    StatusChange:
+      type: object
+      additionalProperties: false
+      required: [from_status, to_status, reason, at]
+      properties:
+        from_status:
+          description: null for the first entry (the payment was created).
+          oneOf:
+            - $ref: '#/components/schemas/PaymentStatus'
+            - type: 'null'
+        to_status:
+          $ref: '#/components/schemas/PaymentStatus'
+        reason:
+          type: [string, 'null']
+        at:
+          type: string
+          format: date-time
+    TransactionList:
+      type: object
+      additionalProperties: false
+      required: [payments, next_before]
+      properties:
+        payments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+        next_before:
+          description: Pass as `before` for the next page; null on the last page.
+          oneOf:
+            - type: string
+              pattern: '^pay_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+            - type: 'null'
+    Balance:
+      type: object
+      additionalProperties: false
+      required: [pending_in, available, currency]
+      properties:
+        pending_in:
+          description: Booked but not yet credited (under review, or decided and not yet posted).
+          $ref: '#/components/schemas/Money'
+        available:
+          $ref: '#/components/schemas/Money'
+        currency:
+          const: EUR
+    Money:
+      description: Integer minor units as a string of digits (zero allowed).
+      type: string
+      pattern: '^(0|[1-9][0-9]*)$'
+      maxLength: 19
+    PaymentStatus:
+      type: string
+      enum: [created, received, under_review, approved, rejected, credited, returned]
     Problem:
       type: object
       description: RFC 9457 problem details.

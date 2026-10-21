@@ -149,6 +149,19 @@ export async function postPayment(
   };
 }
 
+// GETs `url` and checks the response against the contract operation at `contractPath` (the
+// path template, e.g. '/accounts/{account_id}/balance').
+export async function getJson(app: App, url: string, contractPath: string): Promise<JsonResponse> {
+  const response = await app.inject({ method: 'GET', url });
+  expectMatchesContract('GET', contractPath, response);
+  return {
+    statusCode: response.statusCode,
+    headers: response.headers,
+    body: response.body,
+    json: JSON.parse(response.body) as Record<string, unknown>,
+  };
+}
+
 // A logger whose JSON lines are collected instead of written to stdout.
 export function capturingLogger(): { logger: Logger; lines: () => Record<string, unknown>[] } {
   const chunks: string[] = [];

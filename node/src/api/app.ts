@@ -3,8 +3,9 @@ import Fastify, { LogController, type FastifyReply, type FastifyRequest } from '
 import type { PaymentEvents } from '../ingestion/events.ts';
 import type { Queryable } from '../shared/db.ts';
 import type { Logger } from '../shared/logger.ts';
+import { registerAccountRoutes } from './accounts.ts';
 import { registerPaymentRoutes } from './payments.ts';
-import { httpProblem, sendProblem } from './problem.ts';
+import { problems, sendProblem } from './problem.ts';
 import type { App } from './types.ts';
 
 // An incoming x-request-id is reused only if it is short and plain: it ends up in every log
@@ -65,16 +66,16 @@ export function buildApp(deps: { db: Queryable; events: PaymentEvents; logger: L
     const status = clientErrorStatus(error);
     if (status === undefined) {
       request.log.error({ err: error }, 'unexpected error');
-      return sendProblem(reply, httpProblem(500));
+      return sendProblem(reply, problems.http(500));
     }
     const message = error instanceof Error ? error.message : undefined;
     request.log.warn({ status_code: status, reason: message }, 'request rejected');
-    return sendProblem(reply, httpProblem(status, message));
+    return sendProblem(reply, problems.http(status, message));
   });
 
   // A fixed detail: echoing the requested URL would return caller input.
   app.setNotFoundHandler((_request, reply) => {
-    return sendProblem(reply, httpProblem(404, 'No such route.'));
+    return sendProblem(reply, problems.http(404, 'No such route.'));
   });
 
   // Fastify parses text/plain bodies by default, which would let a text/plain body reach
@@ -82,5 +83,6 @@ export function buildApp(deps: { db: Queryable; events: PaymentEvents; logger: L
   app.removeContentTypeParser('text/plain');
 
   registerPaymentRoutes(app, { db: deps.db, events: deps.events });
+  registerAccountRoutes(app, { db: deps.db });
   return app;
 }

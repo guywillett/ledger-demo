@@ -9,7 +9,7 @@ import type { Queryable } from '../shared/db.ts';
 import { maskIban } from '../shared/iban.ts';
 import { toTypeId } from '../shared/ids.ts';
 import type { Logger } from '../shared/logger.ts';
-import { httpProblem, PROBLEM_TYPES, sendProblem } from './problem.ts';
+import { problems, sendProblem, validationErrors } from './problem.ts';
 import { notificationBodySchema, toNotification, toPaymentResponse } from './schemas.ts';
 import type { App } from './types.ts';
 
@@ -30,18 +30,9 @@ export function registerPaymentRoutes(
   app.post('/payments', async (request, reply) => {
     const parsed = notificationBodySchema.safeParse(request.body);
     if (!parsed.success) {
-      // Paths and messages only: never the input values, which come from the request body.
-      const errors = parsed.error.issues.map((issue) => ({
-        path: issue.path.map(String).join('.'),
-        message: issue.message,
-      }));
+      const errors = validationErrors(parsed.error);
       request.log.warn({ errors }, 'invalid payment notification');
-      return sendProblem(reply, {
-        type: PROBLEM_TYPES.invalidNotification,
-        title: 'Invalid payment notification',
-        status: 400,
-        errors,
-      });
+      return sendProblem(reply, problems.invalidNotification(errors));
     }
 
     const notification = toNotification(parsed.data);
@@ -100,24 +91,11 @@ export function registerPaymentRoutes(
           },
           'payment notification conflicts with the stored payment',
         );
-        return sendProblem(reply, {
-          type: PROBLEM_TYPES.notificationConflict,
-          title: 'Notification conflicts with a stored payment',
-          status: 409,
-          detail:
-            'A payment with this network transaction ID exists with different details. ' +
-            'This is not treated as a retry.',
-          differing_fields: result.differingFields,
-        });
+        return sendProblem(reply, problems.notificationConflict(result.differingFields));
       }
       case 'unknown_account': {
         request.log.warn(context, 'payment notification for an unknown account');
-        return sendProblem(reply, {
-          type: PROBLEM_TYPES.unknownAccount,
-          title: 'Unknown account',
-          status: 422,
-          detail: 'The creditor IBAN does not match any account managed by this application.',
-        });
+        return sendProblem(reply, problems.unknownAccount());
       }
       case 'inconsistent': {
         // Our bug or our data, not the caller's: 500, which also makes a real provider retry,
@@ -128,7 +106,7 @@ export function registerPaymentRoutes(
           'notification refused but no field differs from the stored payment: ' +
             'duplicate rule drift or a changed account IBAN',
         );
-        return sendProblem(reply, httpProblem(500));
+        return sendProblem(reply, problems.http(500));
       }
     }
   });
@@ -164,13 +142,7 @@ function eventFields(published: PublishedEvent): Record<string, unknown> {
   return published.duplicate ? { stream_duplicate: true } : { event_id: published.eventId };
 }
 
+// The 503 with a Retry-After (a response header, so not part of the problem itself).
 function sendNotAnnounced(reply: FastifyReply): FastifyReply {
-  return sendProblem(reply.header('retry-after', '5'), {
-    type: PROBLEM_TYPES.notAnnounced,
-    title: 'Payment recorded but not yet passed on',
-    status: 503,
-    detail:
-      'The payment was recorded but could not be passed on for processing. Retry the ' +
-      'notification: it will be recognised as a duplicate and passed on again.',
-  });
+  return sendProblem(reply.header('retry-after', '5'), problems.notAnnounced());
 }

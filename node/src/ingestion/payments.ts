@@ -203,3 +203,49 @@ function expectLiteral<T extends string>(value: string, expected: T, column: str
   }
   return expected;
 }
+
+// A page of an account's payments, newest first.
+export type PaymentPage = {
+  readonly payments: readonly Payment[];
+  // Pass as `before` to get the next (older) page; null on the last page.
+  readonly nextBefore: Uuid<'pay'> | null;
+};
+
+const ACCOUNT_EXISTS_SQL = 'SELECT 1 FROM accounts WHERE id = $1';
+
+// Seek pagination on the payment ID: UUIDv7 IDs sort by creation time, so "older than the
+// last one seen" is `id < $before`, served by the (account_id, id DESC) index. Two fixed
+// statements rather than one with an optional condition, which keeps each one simple to plan.
+const FIRST_PAGE_SQL = `
+SELECT * FROM incoming_payments
+WHERE account_id = $1
+ORDER BY id DESC
+LIMIT $2
+`;
+const NEXT_PAGE_SQL = `
+SELECT * FROM incoming_payments
+WHERE account_id = $1 AND id < $3
+ORDER BY id DESC
+LIMIT $2
+`;
+
+// undefined if there is no such account (an account without payments gets an empty page).
+// The existence check is a read before a read: nothing is written based on it.
+export async function listPayments(
+  db: Queryable,
+  accountId: Uuid<'acct'>,
+  page: { readonly limit: number; readonly before?: Uuid<'pay'> },
+): Promise<PaymentPage | undefined> {
+  const account = await db.query(ACCOUNT_EXISTS_SQL, [accountId]);
+  if (account.rowCount === 0) return undefined;
+
+  // One more than the page size, to know whether there is a next page.
+  const params: unknown[] = [accountId, page.limit + 1];
+  const sql = page.before === undefined ? FIRST_PAGE_SQL : NEXT_PAGE_SQL;
+  if (page.before !== undefined) params.push(page.before);
+  const result = await db.query<PaymentRow>(sql, params);
+
+  const payments = result.rows.slice(0, page.limit).map(paymentFromRow);
+  const hasMore = result.rows.length > page.limit;
+  return { payments, nextBefore: hasMore ? (payments.at(-1)?.id ?? null) : null };
+}

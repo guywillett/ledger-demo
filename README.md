@@ -171,6 +171,14 @@ curl -i -X POST localhost:3000/payments -H 'content-type: application/json' -d '
 }'
 ```
 
+Read an account (alice here; TypeIDs of the demo accounts are listed under *Demo accounts*):
+
+```sh
+curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=10&include=history'
+# next page: add &before=<next_before from the previous response>
+```
+
 #### Lint and format
 
 ```sh
