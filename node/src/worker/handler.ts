@@ -50,8 +50,12 @@ export type HandlerDeps = {
   // During the review, signal working() at least this often (well under the consumer's
   // ack_wait), so the message isn't redelivered while it's being processed.
   readonly workingIntervalMs: number;
-  // After an unexpected failure, how long before JetStream redelivers.
-  readonly retryDelayMs: number;
+  // After a transient failure, the delay before JetStream redelivers: retryBaseDelayMs on the
+  // first attempt, doubling with each further attempt, at most retryMaxDelayMs. Set on each
+  // nak rather than as a consumer backoff, because a consumer backoff also replaces ack_wait
+  // for messages still being processed.
+  readonly retryBaseDelayMs: number;
+  readonly retryMaxDelayMs: number;
 };
 
 export async function handleDelivery(
@@ -76,7 +80,7 @@ export async function handleDelivery(
   } catch (err) {
     // Can't even record it (e.g. the database is down): try again later.
     log.error({ err }, 'could not record delivery; will retry');
-    msg.nak(deps.retryDelayMs);
+    msg.nak(retryDelay(deps, msg.deliveryAttempt));
     return 'failed';
   }
 
@@ -161,7 +165,7 @@ export async function handleDelivery(
     // Transient (e.g. the database went away mid-way). Committed steps stay committed; the
     // redelivery carries on from there.
     log.error({ err }, 'processing failed; will retry');
-    msg.nak(deps.retryDelayMs);
+    msg.nak(retryDelay(deps, msg.deliveryAttempt));
     return 'failed';
   }
 }
@@ -218,4 +222,12 @@ function isInvariantViolation(err: unknown): boolean {
     return true;
   }
   return typeof err === 'object' && err !== null && 'code' in err && err.code === '23514';
+}
+
+export function retryDelay(
+  deps: Pick<HandlerDeps, 'retryBaseDelayMs' | 'retryMaxDelayMs'>,
+  deliveryAttempt: number,
+): number {
+  const exponent = Math.min(Math.max(deliveryAttempt - 1, 0), 30);
+  return Math.min(deps.retryBaseDelayMs * 2 ** exponent, deps.retryMaxDelayMs);
 }

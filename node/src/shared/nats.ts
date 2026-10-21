@@ -8,6 +8,8 @@ export type { NatsConnection };
 // Streams are created by the nats-setup compose service from nats/streams/*.json, not by the
 // apps; see nats/setup.sh.
 export const STREAMS = { payments: 'PAYMENTS' } as const;
+// Durable consumers, created by nats-setup from nats/consumers/<STREAM>/<NAME>.json.
+export const CONSUMERS = { worker: 'worker' } as const;
 
 // How long a publish waits for the stream's acknowledgement before it counts as failed.
 export const PUBLISH_TIMEOUT_MS = 2000;

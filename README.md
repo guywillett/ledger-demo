@@ -14,8 +14,11 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `nats` | NATS with JetStream | `4222` (clients), `8222` (monitoring) |
 | `migrate` | dbmate: applies `db/migrations/` and exits | — |
 | `migrate-test` | the same migrations against the test database `ledger_test` | — |
-| `nats-setup` | nats-box: applies the stream definitions in `nats/streams/` and exits | — |
+| `nats-setup` | nats-box: applies the stream and consumer definitions in `nats/` and exits | — |
 | `api` | the Node API (`node/`, image `ledger-demo-node`) | `3000` |
+| `worker` | the Node worker (same image): books, reviews and posts payments | — |
+| `nats-test` | a separate NATS for the tests, so test events never reach the development stream | `4223`, `8223` |
+| `nats-setup-test` | the same definitions applied to `nats-test` | — |
 
 Connection details from the host:
 
@@ -41,14 +44,25 @@ docker compose down             # remove containers and network; data volumes ar
 
 There's no health endpoint yet (see *Known gaps* in the slice spec); `docker compose logs api` shows "Server listening" once it's up.
 
-### Streams
+### Streams and consumers
 
-JetStream streams are defined in `nats/streams/<NAME>.json` (the server's own JSON format; durations in nanoseconds) and applied by `nats/setup.sh`: created if missing, updated if the file changed. To change a stream, edit its file and run `docker compose up -d` (or `docker compose run --rm nats-setup`).
+JetStream streams are defined in `nats/streams/<NAME>.json` and durable consumers in `nats/consumers/<STREAM>/<NAME>.json` (the server's own JSON format; durations in nanoseconds). `nats/setup.sh` applies them: created if missing, updated if the file changed; changes the server refuses (e.g. a consumer's `deliver_policy`) fail loudly. To change one, edit its file and run `docker compose up -d` (or `docker compose run --rm nats-setup`).
 
 ```sh
 NATS="docker run --rm --network ledger-demo_default natsio/nats-box:0.20.0 nats -s nats://nats:4222"
 $NATS stream info PAYMENTS                       # configuration and message counts
 $NATS stream get PAYMENTS --last-for payment.created   # the latest payment.created event
+$NATS consumer info PAYMENTS worker              # the worker's consumer: pending, unacked, redelivered
+```
+
+### Worker
+
+`docker compose up -d` starts one worker. It pulls `payment.created` from the durable `worker` consumer, books the payment, reviews it (`REVIEW_DELAY_MS`, default 2000), decides (approve with probability `APPROVE_RATE`, default 0.8) and posts the decision, handling up to `WORKER_CONCURRENCY` (default 10) messages at once.
+
+```sh
+docker compose logs -f worker              # follow what it does
+docker compose up -d --scale worker=3      # three instances sharing the consumer; each message goes to one
+docker compose kill -s SIGKILL worker      # crash it mid-review: the message is redelivered after ack_wait (10 s)
 ```
 
 ### Migrations
@@ -125,7 +139,13 @@ Tests run against their own database, `ledger_test` (migrated by the `migrate-te
 npm run test:db:reset           # drop and re-migrate ledger_test
 ```
 
-Tests default to the compose services on `localhost`; set `DATABASE_URL` / `NATS_URL` to point elsewhere. Every API test response is also checked against `contracts/openapi.yaml`, and every published event against its schema in `contracts/events/`. Tests need Postgres and NATS (with the stream set up), i.e. `docker compose up -d`.
+Tests default to the compose services on `localhost`: `ledger_test` and the test NATS (`nats-test`, port 4223). To point them elsewhere, set `TEST_DATABASE_URL` / `TEST_NATS_URL` (and `TEST_LOG_LEVEL` to see logs); the tests deliberately ignore `DATABASE_URL` / `NATS_URL`, so a development value in your shell can't redirect them. Two guards on top: the database name must end in `_test`, and the e2e tests only purge a NATS server named `ledger-demo-test`. Every API test response is also checked against `contracts/openapi.yaml`, and every published event against its schema in `contracts/events/`. Tests need Postgres and the test NATS, i.e. `docker compose up -d`.
+
+```sh
+npm run test:e2e                # process-level tests: start the real worker, kill -9 it, restart it (~15 s)
+```
+
+The e2e tests purge the test stream first; don't run them at the same time as `npm test`.
 
 #### Running the API locally
 

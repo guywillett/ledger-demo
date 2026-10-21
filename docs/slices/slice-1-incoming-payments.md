@@ -347,7 +347,23 @@ Defined in `nats/streams/PAYMENTS.json` and applied by the `nats-setup` compose 
 
 ## Worker (posting and compliance)
 
-Durable JetStream consumer with explicit acks. For each message:
+Durable JetStream consumer with explicit acks, defined in `nats/consumers/PAYMENTS/worker.json` and applied by `nats-setup` like the stream. Every worker instance reads from this one consumer; JetStream gives each message to one of them, so instances scale horizontally. Each instance handles up to `WORKER_CONCURRENCY` messages at once (safe: every step is a per-payment conditional transition and `move()` guards itself).
+
+**Pulling:** the worker fetches exactly as many messages as it has free slots, and none while every slot is busy, so every message it holds is being handled (and signalling in-progress) from the moment it arrives. A prefetching `consume()` would hold extra messages in a client buffer with their `ack_wait` running and no one signalling; with reviews longer than `ack_wait` they were redelivered and processed twice (an e2e test covers this). An idle fetch long-polls for 5 s on the server (the client adds an idle heartbeat of half that, so a dead connection is noticed meanwhile), then the worker fetches again. A failed fetch is retried after 1 s, doubling to 30 s: logged at `warn` when transient (e.g. NATS reconnecting); a missing consumer or stream is a configuration problem, logged at `error` on each attempt, and after 5 attempts the worker shuts down with a failing exit code, so the restart policy and the logs make it obvious. On shutdown a waiting fetch is closed at once. Under a steady backlog every freed slot is refilled at once (each fetch is filled immediately, and the loop fetches again as soon as a handler finishes); but a burst arriving while a mostly satisfied fetch is still open can wait up to `expires` (5 s) for the next fetch, since only the open fetch's remaining slots are requested meanwhile. A shorter `expires` narrows that, at the cost of more pull requests while idle; worth measuring in the load-testing slice.
+
+| Consumer setting | Value | Why |
+|---|---|---|
+| `durable_name` | `worker` | one consumer shared by all instances |
+| `filter_subject` | `payment.created` | the only event the worker handles in slice 1 |
+| `ack_policy` | `explicit` | acked individually, after the outcome is recorded |
+| `deliver_policy` | `all` | on first start, process everything already in the stream |
+| `ack_wait` | 10 s | short, because long work signals in-progress every 3 s; a crashed worker's message is redelivered within ~10 s |
+| `max_deliver` | 100 | large: invariant violations are terminated by the handler itself, so the limit only bounds transient failures (with the handler's growing retry delay, roughly 1.5 hours) |
+| `max_ack_pending` | 1000 | bound on unacked messages across all instances |
+
+No consumer `backoff`: on JetStream it also replaces `ack_wait` for messages still being processed (the first step becomes the ack timeout). Instead the handler sets the delay on each `nak`: 1 s, doubling per attempt, at most 60 s.
+
+For each message:
 
 1. **Log the delivery** in its own small transaction: insert into `event_deliveries` with outcome `in_progress`.
 2. Validate with Zod; invalid → outcome `invalid`, log and terminate the message (no infinite redelivery). A dead-letter table can come later. Parsing turns the TypeIDs into our UUIDs (checking each holds a UUIDv7), the amount into a `BigInt` and `occurred_at` into a `Date`: the schema's input type is the wire format producers build, its output type what consumers work with.
@@ -384,12 +400,14 @@ available  == net of balance_movements into/out of available
 ```
 
 Prints a per-account table and an overall difference; exit code non-zero if any difference ≠ 0. Also prints:
-- payments stuck in `created` beyond a threshold: received by the bank but never booked (see the commit-then-publish gap under *Known gaps*)
+- payments stuck in a non-final status (`created`, `received`, `under_review`, `approved`, `rejected`) beyond a threshold since they entered it, listed with their status and age. The balance checks can't see these: a stuck payment's funds are fully accounted for (in `pending_in`, or not booked at all), the payment just never finishes. The status tells the cause apart:
+  - `created`: received by the bank but never booked, e.g. the commit-then-publish gap (see *Known gaps*);
+  - any later non-final status: processing stopped half-way, e.g. a message that exhausted `max_deliver` or was terminated by the worker (see the dead-letter gap under *Known gaps*), with the funds held in `pending_in`.
 - deliveries vs applied: count of `event_deliveries` by outcome, and duplicate notifications from `notification_count`
 
 ## Configuration
 
-`DATABASE_URL`, `NATS_URL`, `PORT`, `REVIEW_DELAY_MS`, `APPROVE_RATE`, `LOG_LEVEL`. Structured JSON logs including `request_id`, `payment_id`, `event_id`.
+`DATABASE_URL`, `NATS_URL`, `PORT` (API), `REVIEW_DELAY_MS`, `APPROVE_RATE`, `WORKER_CONCURRENCY` (worker), `LOG_LEVEL`. Structured JSON logs including `request_id`, `payment_id`, `event_id`.
 
 ## Done when
 
@@ -429,6 +447,7 @@ No change in slice 1. The load-testing slice should measure it: throughput again
 
 - **Commit-then-publish gap:** if the API commits the payment but crashes before publishing `payment.created`, nothing ever processes it and it stays `created` forever. The money has arrived at the bank but is never booked, so the customer never gets it: stranded money. Our ledger stays internally consistent (no balance without a booked payment), which is exactly why internal reconciliation cannot see the problem; only the "stuck in `created`" check below, or reconciling against the provider's own statement, catches it. This gap has been present since the API first published events. It is narrowed, not closed, by re-publishing on duplicates (a provider that gets no response, or a `503`, retries, and the retry re-announces a payment still `created`); it remains for a provider that never retries. It is closed in a later slice with a transactional outbox.
 - Approve/reject is random, not a real rules engine.
+- No dead-letter handling: when a message exhausts the worker consumer's `max_deliver` (100), JetStream drops it and only emits an advisory (`$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.PAYMENTS.worker`), which nothing consumes yet; messages the worker terminates (invalid events, invariant violations) are likewise only logged and recorded in `event_deliveries`. The payment is left where it stopped, possibly holding funds in `pending_in`. Reconciliation is what surfaces it; the evolution is a dead-letter consumer of those advisories (and of terminated messages) with a replay tool.
 - No authentication on the API. In particular, `POST /payments` does not verify the sender: real webhooks are authenticated, typically by an HMAC signature header checked against a shared secret.
 - No authentication or authorization on NATS: any client that can reach port 4222 can publish to `payment.created` or manage streams. The evolution is a NATS user per service with publish/subscribe allow lists (the API may publish only `payment.created`; the worker may only fetch from and acknowledge its own consumer; only `nats-setup` may use `$JS.API.>`), per-client inbox prefixes so replies aren't readable by other clients, and `deny_delete` / `deny_purge` on the stream.
 - One database user for everything (migrations, API, worker, tests), owning all tables. Append-only audit tables are enforced by triggers instead of privileges; the evolution is a role per service with least-privilege grants (the API without write access to balances, the worker unable to `UPDATE` or `DELETE` audit rows) and migrations under a separate owner role.
@@ -455,7 +474,8 @@ No change in slice 1. The load-testing slice should measure it: throughput again
 14. **Provider identifiers mapped at the edge:** notifications identify accounts by `creditor_iban`, mapped to `account_id` during ingestion; the IBAN as received is stored on the payment; nothing downstream sees provider identifiers. The provider account ID is optional, stored when sent, and not used for matching or for duplicate detection. One IBAN and at most one provider account ID per account for now; `provider_accounts` (per provider, with lifecycle status) is the evolution path.
 15. **Event naming:** `payment.<new status>`, one event per state transition, published on entering that status; status names are part of the event contract. Only `payment.created` is published in slice 1.
 16. **No request hash:** duplicate detection compares the stored `creditor_iban`, `amount_minor` and `currency` directly in the upsert. Every identifying detail is stored on the row, so a hash would add a cross-language format to keep in sync and hide which field differed.
-17. **Stream setup:** JetStream streams are defined in `nats/streams/*.json` and applied by a one-off compose service, like the migrations; apps only check that their stream exists. Stream `PAYMENTS`: subjects `payment.>`, file storage, `limits` retention for 7 days, default 2-minute duplicate window (see *Stream `PAYMENTS`*).
+17. **Stream setup:** JetStream streams (`nats/streams/*.json`) and durable consumers (`nats/consumers/<STREAM>/*.json`) are applied by a one-off compose service, like the migrations; apps only check that they exist. Tests use a separate NATS server (`nats-test`) with the same definitions, as they use `ledger_test`. Stream `PAYMENTS`: subjects `payment.>`, file storage, `limits` retention for 7 days, default 2-minute duplicate window (see *Stream `PAYMENTS`*).
 18. **Publish failure:** if `payment.created` can't be published after the insert commits, the API answers `503` (with `Retry-After`), and a duplicate notification of a payment still `created` publishes it again, with a new `event_id`. The provider's retry is what completes the publish until the outbox replaces this.
 19. **No health endpoint** in slice 1 (see *Known gaps*).
 20. **Message IDs:** `Nats-Msg-Id = <payment_id>.<event>` (e.g. `pay_….created`), one per payment and event type, rather than `event_id`, so the stream's duplicate window drops repeated announcements of the same transition. `event_id` still identifies each event; when the stream drops a repeat, the API logs `stream_duplicate: true` instead of the new, unstored `event_id`.
+21. **Worker retries:** invariant violations are terminated by the handler (logged `fatal`, `alert: true`); transient failures are `nak`ed with a growing delay (1 s doubling, at most 60 s), up to the consumer's `max_deliver` of 100. No consumer `backoff`, because it would also shorten `ack_wait` for messages in progress.

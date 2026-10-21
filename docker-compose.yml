@@ -33,6 +33,22 @@ services:
       timeout: 3s
       retries: 15
 
+  # NATS for the tests, like ledger_test for the database: test events never reach the
+  # development stream (or the compose worker). No volume: test streams needn't survive a
+  # restart.
+  nats-test:
+    image: nats:2.15.1-alpine
+    # -n names the server: the e2e tests check for this name before purging its stream.
+    command: ["-js", "-sd", "/data", "-m", "8222", "-n", "ledger-demo-test"]
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
   migrate:
     image: ghcr.io/amacneil/dbmate:2.36.0
     environment:
@@ -63,8 +79,8 @@ services:
       postgres:
         condition: service_healthy
 
-  # Applies the JetStream stream definitions in nats/streams/ and exits, like migrate does for
-  # the schema (see nats/setup.sh).
+  # Applies the JetStream definitions in nats/ (streams and consumers) and exits, like migrate
+  # does for the schema (see nats/setup.sh).
   nats-setup:
     image: natsio/nats-box:0.20.0
     environment:
@@ -76,9 +92,21 @@ services:
       nats:
         condition: service_healthy
 
+  # The same definitions on the test NATS.
+  nats-setup-test:
+    image: natsio/nats-box:0.20.0
+    environment:
+      NATS_URL: nats://nats-test:4222
+    volumes:
+      - ./nats:/nats:ro
+    entrypoint: ["/bin/sh", "/nats/setup.sh"]
+    depends_on:
+      nats-test:
+        condition: service_healthy
+
   api:
     build: ./node
-    # Named so the worker (later) can reuse the same image with a different command.
+    # Named, and built the same way by the worker service: one image for both.
     image: ledger-demo-node
     # The API exits with a failing code if it can't start or loses NATS for good; restart it.
     restart: unless-stopped
@@ -93,6 +121,34 @@ services:
     # npm run dev:api on the host, which wants the same port.
     ports:
       - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats-setup:
+        condition: service_completed_successfully
+
+  # Books, reviews and posts payments (src/worker/). Several instances can run at once
+  # (docker compose up -d --scale worker=3): they share the durable consumer, and each
+  # message goes to one of them.
+  worker:
+    # The same image as the api (one Dockerfile for the Node processes), with another command.
+    build: ./node
+    image: ledger-demo-node
+    command: ["node", "src/worker/main.ts"]
+    # Exits with a failing code if it can't start or loses NATS for good; restart it.
+    restart: unless-stopped
+    # Graceful shutdown can take just over Docker's default 10 s: a waiting fetch is closed at
+    # once, then up to 5 s for in-flight messages (SHUTDOWN_GRACE_MS), up to 5 s to drain NATS,
+    # then closing the pool. After this, Docker sends SIGKILL (unfinished messages are
+    # redelivered either way).
+    stop_grace_period: 15s
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      NATS_URL: nats://nats:4222
+      REVIEW_DELAY_MS: "2000"
+      APPROVE_RATE: "0.8"
+      WORKER_CONCURRENCY: "10"
+      LOG_LEVEL: info
     depends_on:
       migrate:
         condition: service_completed_successfully

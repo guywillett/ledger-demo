@@ -11,6 +11,7 @@ import { createLogger } from '../../src/shared/logger.ts';
 import { startDelivery } from '../../src/worker/deliveries.ts';
 import {
   handleDelivery,
+  retryDelay,
   type DeliveredMessage,
   type HandlerDeps,
 } from '../../src/worker/handler.ts';
@@ -39,7 +40,8 @@ function deps(overrides: Partial<HandlerDeps> = {}): HandlerDeps {
     decide: () => APPROVE,
     reviewDelayMs: 0,
     workingIntervalMs: 10,
-    retryDelayMs: 5000,
+    retryBaseDelayMs: 1000,
+    retryMaxDelayMs: 60_000,
     ...overrides,
   };
 }
@@ -356,6 +358,15 @@ describe('handleDelivery: overdraft', () => {
         alert: true,
         err: expect.objectContaining({ type: 'OverdraftError' }),
       }),
+    ]);
+  });
+});
+
+describe('retryDelay', () => {
+  it('doubles with each attempt, up to the maximum', () => {
+    const limits = { retryBaseDelayMs: 1000, retryMaxDelayMs: 60_000 };
+    expect([1, 2, 3, 4, 6, 7, 50].map((attempt) => retryDelay(limits, attempt))).toEqual([
+      1000, 2000, 4000, 8000, 32_000, 60_000, 60_000,
     ]);
   });
 });

@@ -1,18 +1,18 @@
 #!/bin/sh
-# Applies every stream definition in /nats/streams (one file per stream, named after it) to the
-# NATS server at $NATS_URL. Run by the nats-setup compose service on every `docker compose up`,
-# like the migrations: language-neutral, so the Node and Go implementations share one definition.
+# Applies the JetStream definitions in /nats to the NATS server at $NATS_URL. Run by the
+# nats-setup compose service on every `docker compose up`, like the migrations: language-
+# neutral, so the Node and Go implementations share one definition.
 #
-# `stream add` creates the stream, and succeeds without change if an identical one exists. If
-# the stream exists with a different definition, the server answers error 10058 and
+#   /nats/streams/<STREAM>.json               one file per stream
+#   /nats/consumers/<STREAM>/<CONSUMER>.json  one file per durable consumer on that stream
+#
+# Streams: `stream add` creates the stream, and succeeds without change if an identical one
+# exists. If it exists with a different definition, the server answers error 10058 and
 # `stream edit` applies the changes; changes the server refuses (e.g. switching storage type)
 # fail loudly. Any other `add` error (unreachable server, invalid definition) is shown as-is.
 #
-# Detecting "exists with a different definition" relies on the CLI's error text containing
-# "(10058)", which may change between nats-box versions: it works because the image version is
-# pinned in docker-compose.yml; re-check it when upgrading. Applying `stream edit --force` on
-# every `up` suits a demo; in production, stream changes would be gated and reviewed like
-# migrations (some edits, e.g. a shorter max_age, discard stored messages).
+# Consumers: `consumer add` creates or updates the consumer in place. Changes the server
+# refuses (e.g. deliver_policy, error 10012) fail loudly; delete the consumer to change them.
 set -eu
 
 for config in /nats/streams/*.json; do
@@ -24,6 +24,18 @@ for config in /nats/streams/*.json; do
     echo "stream $name: updated"
   else
     echo "stream $name: $output" >&2
+    exit 1
+  fi
+done
+
+for config in /nats/consumers/*/*.json; do
+  [ -e "$config" ] || continue
+  stream=$(basename "$(dirname "$config")")
+  name=$(basename "$config" .json)
+  if output=$(nats -s "$NATS_URL" consumer add "$stream" --config "$config" 2>&1); then
+    echo "consumer $stream/$name: created or updated"
+  else
+    echo "consumer $stream/$name: $output" >&2
     exit 1
   fi
 done
