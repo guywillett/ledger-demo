@@ -1,21 +1,11 @@
 import type { Queryable } from '../shared/db.ts';
 import type { Iban } from '../shared/iban.ts';
 import { newUuid, type Uuid } from '../shared/ids.ts';
+import { parseStatus, type PaymentStatus } from '../shared/payment-status.ts';
 
 // Ingestion: records provider notifications as payments. This is the edge where provider
 // identifiers (IBANs, provider account IDs) are mapped to our account; nothing downstream
 // sees them. It never touches balances.
-
-export const PAYMENT_STATUSES = [
-  'created',
-  'received',
-  'under_review',
-  'approved',
-  'rejected',
-  'credited',
-  'returned',
-] as const;
-export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
 export type Payment = {
   readonly id: Uuid<'pay'>;
@@ -205,14 +195,6 @@ function paymentFromRow(row: PaymentRow): Payment {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
-}
-
-function parseStatus(value: string): PaymentStatus {
-  const status = PAYMENT_STATUSES.find((s) => s === value);
-  if (status === undefined) {
-    throw new Error(`unknown payment status in database: ${value}`);
-  }
-  return status;
 }
 
 function expectLiteral<T extends string>(value: string, expected: T, column: string): T {

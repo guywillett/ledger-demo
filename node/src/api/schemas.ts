@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { parseIban, type Iban } from '../shared/iban.ts';
 import { toTypeId, type TypeIdString } from '../shared/ids.ts';
-import type { Notification, Payment, PaymentStatus } from '../ingestion/payments.ts';
+import type { Notification, Payment } from '../ingestion/payments.ts';
+import type { PaymentStatus } from '../shared/payment-status.ts';
 
 const INT8_MAX = 9223372036854775807n;
 

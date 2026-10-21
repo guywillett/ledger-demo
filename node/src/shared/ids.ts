@@ -3,7 +3,7 @@ import { TypeID, typeid } from 'typeid-js';
 // IDs are UUIDv7 inside the database and prefixed TypeIDs everywhere else.
 // Conversion happens only at boundaries (data-access layer, request and event schemas).
 
-export type IdPrefix = 'acct' | 'pay' | 'evt';
+export type IdPrefix = 'acct' | 'pay' | 'evt' | 'mov';
 
 // A UUID as stored in Postgres, branded with the entity it identifies. The brand stops a
 // TypeID (or any other string) being passed where a database UUID is expected, and the

@@ -48,6 +48,21 @@ services:
       postgres:
         condition: service_healthy
 
+  # The same migrations against the test database (ledger_test), so tests never touch the
+  # development data. dbmate creates the database if it doesn't exist.
+  migrate-test:
+    image: ghcr.io/amacneil/dbmate:2.36.0
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger_test?sslmode=disable
+      DBMATE_WAIT: "true"
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes:
+      - ./db:/db
+    command: ["up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # Applies the JetStream stream definitions in nats/streams/ and exits, like migrate does for
   # the schema (see nats/setup.sh).
   nats-setup:

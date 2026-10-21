@@ -1,9 +1,14 @@
 import pg from 'pg';
 import type { Logger } from './logger.ts';
 
-// A connection checked out of the pool with a transaction open on it.
-// Data-access functions that must run inside a transaction take a Tx.
-export type Tx = pg.PoolClient;
+// A connection checked out of the pool WITH A TRANSACTION OPEN ON IT. Data-access functions
+// whose statements must be atomic together take a Tx.
+//
+// A plain PoolClient is only a connection: statements sent on it run in order, but each
+// autocommits on its own unless BEGIN was sent first. So Tx is branded, and withTransaction
+// (below) is the only place one is created: a function taking a Tx can rely on running inside
+// a transaction, and passing a raw PoolClient (no BEGIN) is a compile error.
+export type Tx = pg.PoolClient & { readonly __brand: 'Tx' };
 
 // Anything that can run a query: the pool (each query on whichever connection is free) or a
 // Tx. Data-access functions whose work is a single statement take a Queryable, so callers can
@@ -40,7 +45,8 @@ export async function withTransaction<T>(pool: pg.Pool, fn: (tx: Tx) => Promise<
   let broken: Error | undefined;
   try {
     await client.query('BEGIN');
-    const result = await fn(client);
+    // The one place a Tx is made: BEGIN has just been sent on this connection.
+    const result = await fn(client as Tx);
     await client.query('COMMIT');
     return result;
   } catch (err) {

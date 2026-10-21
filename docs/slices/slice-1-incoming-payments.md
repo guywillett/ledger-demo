@@ -57,9 +57,9 @@ ledger-demo/
 │   ├── src/
 │   │   ├── api/          # Fastify app
 │   │   ├── worker/       # consumer: wires compliance decision to ledger effects
-│   │   ├── compliance/   # decides approve/reject — knows nothing about balances
+│   │   ├── compliance/   # decides approve/reject and owns the review transitions — knows nothing about balances
 │   │   ├── ingestion/    # records provider notifications; maps provider identifiers (IBAN) to our accounts
-│   │   ├── ledger/       # state transitions + move() — the only code that touches balances
+│   │   ├── ledger/       # posting transitions + move() — the only code that touches balances
 │   │   └── shared/       # config, db pool, nats client, logging
 │   ├── scripts/reconcile.ts
 │   └── test/
@@ -72,7 +72,7 @@ ledger-demo/
 
 Amounts are **integer minor units** (cents): `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON. No floats anywhere. See `docs/decisions/0001-money-representation.md`.
 
-**IDs:** entity primary keys and event IDs are native `uuid` columns holding UUIDv7 (time-ordered, generated in the app). Every UUID column has `CHECK (uuid_extract_version(col) = 7)`; entity primary keys also have `DEFAULT uuidv7()` as a fallback for manual inserts only — the app always supplies IDs. Event IDs and references have no default. **Primary key rule:** UUIDv7 for entities that may be referenced or exposed (accounts, payments, balance movements); `bigserial` for internal append-only logs that are never referenced or exposed (`payment_status_history`, `event_deliveries`). Outside the database — API, events, logs — they appear as TypeIDs with a type prefix (`acct_…`, `pay_…`, `evt_…`). Conversion happens only in the data-access layer and the request/event schemas. Never store IDs as text or cast them in queries.
+**IDs:** entity primary keys and event IDs are native `uuid` columns holding UUIDv7 (time-ordered, generated in the app). Every UUID column has `CHECK (uuid_extract_version(col) = 7)`; entity primary keys also have `DEFAULT uuidv7()` as a fallback for manual inserts only — the app always supplies IDs. Event IDs and references have no default. **Primary key rule:** UUIDv7 for entities that may be referenced or exposed (accounts, payments, balance movements); `bigserial` for internal append-only logs that are never referenced or exposed (`payment_status_history`, `event_deliveries`). Outside the database — API, events, logs — they appear as TypeIDs with a type prefix (`acct_…`, `pay_…`, `evt_…`, `mov_…`). Conversion happens only in the data-access layer and the request/event schemas. Never store IDs as text or cast them in queries.
 
 ### `accounts`
 | Column | Type | Notes |
@@ -132,6 +132,8 @@ One row per account.
 | created_at / updated_at | timestamptz | |
 
 ### `payment_status_history`
+**Append-only**, enforced by triggers like `balance_movements`.
+
 | Column | Type | Notes |
 |---|---|---|
 | id | bigserial PK | |
@@ -142,7 +144,7 @@ One row per account.
 | at | timestamptz | |
 
 ### `balance_movements`
-One row per balance movement, written only by `move()`. The ledger's own idempotency guard and audit trail; grows into the double-entry transactions table later.
+One row per balance movement, written only by `move()`. The ledger's own idempotency guard and audit trail; grows into the double-entry transactions table later. **Append-only**, enforced by triggers that reject `UPDATE`, `DELETE` and `TRUNCATE`. The triggers suit the demo, where everything connects as one database user that owns the tables; in production the primary control would be database roles (each service its own role with only the privileges it needs, e.g. `INSERT` and `SELECT` on the audit tables; migrations as a separate owner role), with triggers as a backstop. See *Known gaps*.
 | Column | Type | Notes |
 |---|---|---|
 | id | uuid PK | UUIDv7 |
@@ -237,8 +239,10 @@ move(tx, { accountId, from, to, amountMinor, referenceType, referenceId, referen
 ```
 
 1. `INSERT INTO balance_movements … ON CONFLICT (reference_type, reference_id, reference_step) DO NOTHING`.
-2. If no row was inserted → return `'duplicate'`; balances untouched.
-3. Otherwise update the `account_balances` columns for the non-external side(s) and return `'applied'`.
+2. If no row was inserted → read the existing movement: if its account, buckets or amount differ, throw (the reference is being reused for something else: a bug, not a retry); otherwise return `'duplicate'`; balances untouched.
+3. Otherwise update the `account_balances` columns for the non-external side(s) in one fixed statement (`SET pending_in = pending_in + $2, available = available + $3`, the changes computed per bucket) and return `'applied'`. The `CHECK (… >= 0)` constraints reject an overdraft, reported as an `OverdraftError` naming the account and bucket (the database error kept as its `cause`), and a missing balance row is an error.
+
+The transitions are split by owner, each a conditional status update plus its history row in the caller's transaction: `ledger/posting.ts` has `book`, `credit`, `returnToSender` (each also calls `move()`) and `postDecision` (tries `credit`, then `returnToSender`); `compliance/transitions.ts` has `startReview` and `decide`. Each returns `'applied'` or `'skipped'` (already done, or the payment is in another state). The legal transitions are a TypeScript union grouped by owner (`PostingTransition`, `ComplianceTransition` in `shared/payment-status.ts`), and `transitionStatus` accepts only those: an illegal pair such as `credited → created` does not compile, and a `@ts-expect-error` test proves it.
 
 Nothing else may update balances. Because the guard lives in the ledger, `move()` is safe whatever the caller does — which is what lets compliance and posting become separate services later without relying on each other's state. If a transition succeeds but `move()` reports a duplicate, something is inconsistent: log an error and roll back.
 
@@ -403,12 +407,29 @@ Prints a per-account table and an overall difference; exit code non-zero if any 
 - [ ] README: how to run, what it demonstrates, known gaps
 - (No tag for this slice: `v0.1-simple-ledger` is tagged once withdrawals are also in.)
 
+## Scaling notes: hot accounts
+
+Every movement updates its account's single `account_balances` row, and Postgres holds that row lock until the transaction commits. Movements for **one** account therefore run strictly one after another: per-account throughput is capped at roughly 1 / (transaction duration), e.g. about 200 movements a second at 5 ms per posting transaction, however many workers run. Different accounts don't contend. It matters only for individually busy accounts: a large merchant, an omnibus or treasury account, and above all **system accounts**.
+
+**System accounts are the trap for double-entry.** Once every booking also debits a system account such as `external_incoming`, that one account takes part in every transaction and serialises the whole system. Today `external` has no balance row (its side of `move()` is a no-op); keep that property: no cached balance row for system accounts, their balances derived from entries when needed.
+
+Techniques, roughly cheapest first:
+
+1. **Short transactions.** Lock the balance row as late as possible; no network calls inside the transaction. (Already so: status update, then movement, then commit.)
+2. **Credit/debit asymmetry.** A credit can never fail an overdraft check, so it needs no lock at decision time: an append-only entry, with the balance updated later. Only debits must be serialised, because "is there enough?" must be answered atomically.
+3. **Snapshot plus entries.** Balance = last snapshot + sum of entries since; entries are append-only inserts (no contention), a background job rolls up snapshots. Reads cost a little more.
+4. **Sharded sub-balances.** N balance rows per account, each movement picking one; reads sum them. Credits scale; debits must reserve from one shard or lock all.
+5. **A purpose-built ledger database** (e.g. TigerBeetle), which batches transfers and avoids per-row locks.
+
+No change in slice 1. The load-testing slice should measure it: throughput against many accounts (scales with workers) versus one account (flattens at the per-row limit), then apply one technique, e.g. 3, and show the difference.
+
 ## Known gaps (deliberate)
 
 - **Commit-then-publish gap:** if the API commits the payment but crashes before publishing `payment.created`, nothing ever processes it and it stays `created` forever. The money has arrived at the bank but is never booked, so the customer never gets it: stranded money. Our ledger stays internally consistent (no balance without a booked payment), which is exactly why internal reconciliation cannot see the problem; only the "stuck in `created`" check below, or reconciling against the provider's own statement, catches it. This gap has been present since the API first published events. It is narrowed, not closed, by re-publishing on duplicates (a provider that gets no response, or a `503`, retries, and the retry re-announces a payment still `created`); it remains for a provider that never retries. It is closed in a later slice with a transactional outbox.
 - Approve/reject is random, not a real rules engine.
 - No authentication on the API. In particular, `POST /payments` does not verify the sender: real webhooks are authenticated, typically by an HMAC signature header checked against a shared secret.
 - No authentication or authorization on NATS: any client that can reach port 4222 can publish to `payment.created` or manage streams. The evolution is a NATS user per service with publish/subscribe allow lists (the API may publish only `payment.created`; the worker may only fetch from and acknowledge its own consumer; only `nats-setup` may use `$JS.API.>`), per-client inbox prefixes so replies aren't readable by other clients, and `deny_delete` / `deny_purge` on the stream.
+- One database user for everything (migrations, API, worker, tests), owning all tables. Append-only audit tables are enforced by triggers instead of privileges; the evolution is a role per service with least-privilege grants (the API without write access to balances, the worker unable to `UPDATE` or `DELETE` audit rows) and migrations under a separate owner role.
 - No health endpoint. Nothing waits on the API in compose (it is the last service to start), so ordering doesn't need one; a `GET /health` arrives with CI or a load balancer, and goes into the contract then.
 - `POST /payments` uses demo status codes rather than a real webhook contract (see *Webhook semantics*), and does not distinguish accounts outside this app from genuinely unknown ones.
 - One IBAN and at most one provider account ID per account, single provider, no lifecycle; see `provider_accounts` under *Data model* for the evolution path.

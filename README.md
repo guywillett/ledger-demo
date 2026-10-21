@@ -13,6 +13,7 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `postgres` | PostgreSQL 18 | `5432` |
 | `nats` | NATS with JetStream | `4222` (clients), `8222` (monitoring) |
 | `migrate` | dbmate: applies `db/migrations/` and exits | — |
+| `migrate-test` | the same migrations against the test database `ledger_test` | — |
 | `nats-setup` | nats-box: applies the stream definitions in `nats/streams/` and exits | — |
 | `api` | the Node API (`node/`, image `ledger-demo-node`) | `3000` |
 
@@ -117,6 +118,12 @@ npm run test:watch              # Vitest in watch mode
 ```
 
 TypeScript is run directly by Node (type stripping); there is no build step and no `dist/`. `tsc` only type-checks, which is why `npm test` runs it first. Consequences: relative imports use `.ts` extensions, and only erasable syntax is allowed (no `enum`, namespaces or constructor parameter properties; `erasableSyntaxOnly` enforces this).
+
+Tests run against their own database, `ledger_test` (migrated by the `migrate-test` service with the same migrations), never the development database `ledger`. Each test creates the accounts and payments it asserts on, with random IDs and IBANs, so tests don't depend on each other and nothing is deleted afterwards. To start from a clean slate:
+
+```sh
+npm run test:db:reset           # drop and re-migrate ledger_test
+```
 
 Tests default to the compose services on `localhost`; set `DATABASE_URL` / `NATS_URL` to point elsewhere. Every API test response is also checked against `contracts/openapi.yaml`, and every published event against its schema in `contracts/events/`. Tests need Postgres and NATS (with the stream set up), i.e. `docker compose up -d`.
 

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { loadSharedConfig } from '../src/shared/config.ts';
-import { createPool, withTransaction } from '../src/shared/db.ts';
+import { createPool, withTransaction, type Tx } from '../src/shared/db.ts';
 import { createLogger } from '../src/shared/logger.ts';
 
 // Runs against the compose Postgres (docker compose up -d).
@@ -15,8 +15,13 @@ afterAll(async () => {
 });
 
 describe('database', () => {
+  // Other tests create their own accounts in the same database, so check that the seed
+  // accounts are present, not that they are the only ones.
   it('sees the seeded demo accounts', async () => {
-    const result = await pool.query<{ name: string }>('SELECT name FROM accounts ORDER BY name');
+    const result = await pool.query<{ name: string }>(
+      'SELECT name FROM accounts WHERE name = ANY($1) ORDER BY name',
+      [['alice', 'bob', 'carol']],
+    );
     expect(result.rows.map((r) => r.name)).toEqual(['alice', 'bob', 'carol']);
   });
 
@@ -51,6 +56,32 @@ describe('database', () => {
       return result.rows[0]?.v;
     });
     expect(value).toBe(42n);
+  });
+
+  it('runs the function inside one transaction', async () => {
+    // Every statement in a transaction sees the same transaction ID; in autocommit each
+    // statement would get its own.
+    const [first, second] = await withTransaction(pool, async (tx) => {
+      const sql = 'SELECT pg_current_xact_id()::text AS id';
+      const a = await tx.query<{ id: string }>(sql);
+      const b = await tx.query<{ id: string }>(sql);
+      return [a.rows[0]?.id, b.rows[0]?.id];
+    });
+    expect(first).toBeDefined();
+    expect(second).toBe(first);
+  });
+
+  // Compile-time only: tsc fails if the @ts-expect-error line does NOT error. The function is
+  // never called.
+  it('accepts only a Tx from withTransaction where one is required', () => {
+    const needsTx = (tx: Tx): string => typeof tx;
+    const misuse = async (): Promise<void> => {
+      const client = await pool.connect();
+      // @ts-expect-error: a raw PoolClient has no transaction open, so it is not a Tx
+      needsTx(client);
+      client.release();
+    };
+    expect(typeof misuse).toBe('function');
   });
 
   it('rolls back when the function throws', async () => {

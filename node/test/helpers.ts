@@ -5,8 +5,10 @@ import { buildApp } from '../src/api/app.ts';
 import { paymentEvents, type PaymentEvents } from '../src/ingestion/events.ts';
 import type { App } from '../src/api/types.ts';
 import { loadSharedConfig } from '../src/shared/config.ts';
-import { createPool, type Queryable } from '../src/shared/db.ts';
-import { newUuid } from '../src/shared/ids.ts';
+import { recordNotification, type Payment } from '../src/ingestion/payments.ts';
+import { createPool, withTransaction, type Queryable } from '../src/shared/db.ts';
+import { parseIban, type Iban } from '../src/shared/iban.ts';
+import { newUuid, toTypeId, type TypeIdString, type Uuid } from '../src/shared/ids.ts';
 import {
   connectNats,
   jetStreamPublisher,
@@ -197,3 +199,88 @@ export const failingPublisher: EventPublisher = {
     throw new Error('simulated publish failure');
   },
 };
+
+// A pool on the test database, for tests that call data-access functions directly.
+export function createTestPool(): pg.Pool {
+  const config = loadSharedConfig();
+  return createPool({
+    databaseUrl: config.databaseUrl,
+    logger: createLogger({ service: 'test', level: config.logLevel }),
+  });
+}
+
+// A fresh, valid French IBAN (made-up bank 99999, random account number): correct RIB key and
+// IBAN check digits, so parseIban accepts it. Random, so every test account gets its own.
+export function newTestIban(): Iban {
+  const bank = '99999';
+  const branch = '00001';
+  const account = String(Math.floor(Math.random() * 1e11)).padStart(11, '0');
+  const ribKey = 97n - ((89n * BigInt(bank) + 15n * BigInt(branch) + 3n * BigInt(account)) % 97n);
+  const bban = `${bank}${branch}${account}${ribKey.toString().padStart(2, '0')}`;
+  // Check digits: 98 - (BBAN + "FR00", letters as numbers) mod 97. F = 15, R = 27.
+  const checkDigits = 98n - (BigInt(`${bban}152700`) % 97n);
+  const result = parseIban(`FR${checkDigits.toString().padStart(2, '0')}${bban}`);
+  if (!result.ok) throw new Error(`generated an invalid test IBAN: ${result.reason}`);
+  return result.iban;
+}
+
+export type TestAccount = {
+  readonly id: Uuid<'acct'>;
+  readonly typeId: TypeIdString<'acct'>;
+  readonly iban: Iban;
+};
+
+// An account of the test's own, with a zero balance row, so balance assertions don't depend
+// on other tests. Never deleted: the test database is reset as a whole (npm run test:db:reset).
+export async function createTestAccount(pool: pg.Pool): Promise<TestAccount> {
+  const id = newUuid('acct');
+  const iban = newTestIban();
+  await withTransaction(pool, async (tx) => {
+    await tx.query('INSERT INTO accounts (id, name, iban) VALUES ($1, $2, $3)', [
+      id,
+      `test-${id}`,
+      iban,
+    ]);
+    await tx.query('INSERT INTO account_balances (account_id) VALUES ($1)', [id]);
+  });
+  return { id, typeId: toTypeId('acct', id), iban };
+}
+
+// A payment in status `created` for the account, recorded through ingestion (the real path).
+export async function createTestPayment(
+  pool: pg.Pool,
+  account: TestAccount,
+  amountMinor = 1250n,
+): Promise<Payment> {
+  const result = await recordNotification(pool, {
+    creditorIban: account.iban,
+    providerAccountId: null,
+    amountMinor,
+    currency: 'EUR',
+    network: 'SEPA',
+    networkTransactionId: newNetworkTransactionId(),
+  });
+  if (result.kind !== 'created') throw new Error(`test payment not created: ${result.kind}`);
+  return result.payment;
+}
+
+export async function balancesOf(
+  pool: pg.Pool,
+  accountId: Uuid<'acct'>,
+): Promise<{ pendingIn: bigint; available: bigint }> {
+  const result = await pool.query<{ pending_in: bigint; available: bigint }>(
+    'SELECT pending_in, available FROM account_balances WHERE account_id = $1',
+    [accountId],
+  );
+  const row = result.rows[0];
+  if (row === undefined) throw new Error(`no balance row for ${accountId}`);
+  return { pendingIn: row.pending_in, available: row.available };
+}
+
+export async function statusOf(pool: pg.Pool, paymentId: Uuid<'pay'>): Promise<string> {
+  const result = await pool.query<{ status: string }>(
+    'SELECT status FROM incoming_payments WHERE id = $1',
+    [paymentId],
+  );
+  return result.rows[0]?.status ?? 'missing';
+}
