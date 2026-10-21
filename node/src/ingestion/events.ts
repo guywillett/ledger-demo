@@ -1,4 +1,4 @@
-import { SUBJECTS, type PaymentCreatedV1 } from '../shared/events.ts';
+import { SUBJECTS, type PaymentCreatedV1Wire } from '../shared/events.ts';
 import { newUuid, toTypeId, type TypeIdString } from '../shared/ids.ts';
 import type { EventPublisher, PublishResult } from '../shared/nats.ts';
 import type { Payment } from './payments.ts';
@@ -38,7 +38,7 @@ export type PaymentEvents = {
 export function paymentCreatedEvent(
   payment: Payment,
   eventId: TypeIdString<'evt'>,
-): PaymentCreatedV1 {
+): PaymentCreatedV1Wire {
   return {
     event_id: eventId,
     event_type: 'payment.created',

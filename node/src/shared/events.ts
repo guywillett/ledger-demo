@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { fromTypeId, type IdPrefix, type Uuid } from './ids.ts';
 
 // Event contracts, shared by producers and consumers. The language-neutral source is
 // contracts/events/*.json; these Zod schemas must match them (tests check both).
@@ -8,9 +9,25 @@ export const SUBJECTS = {
   paymentCreated: 'payment.created',
 } as const;
 
-const typeId = (prefix: string): z.ZodString =>
-  z.string().regex(new RegExp(`^${prefix}_[0-7][0-9a-hjkmnp-tv-z]{25}$`));
+// A TypeID on the wire, our UUID after parsing. The pattern matches the JSON contract;
+// fromTypeId additionally checks that it holds a UUIDv7, which JSON Schema can't express, so
+// on that one point the Zod schema is stricter than the contract.
+const typeId = <P extends IdPrefix>(prefix: P): z.ZodType<Uuid<P>, string> =>
+  z
+    .string()
+    .regex(new RegExp(`^${prefix}_[0-7][0-9a-hjkmnp-tv-z]{25}$`))
+    .transform((value, ctx): Uuid<P> => {
+      try {
+        return fromTypeId(prefix, value);
+      } catch {
+        ctx.issues.push({ code: 'custom', message: `not a ${prefix} ID`, input: value });
+        return z.NEVER;
+      }
+    });
 
+// One schema, two types. z.input is the wire format a producer builds (strings, TypeIDs);
+// z.output is what a consumer gets from parse() (our UUIDs, a BigInt amount, a Date).
+//
 // z.object (not strictObject): consumers ignore unknown fields, so a producer can add optional
 // fields within a version.
 export const paymentCreatedV1Schema = z.object({
@@ -24,9 +41,13 @@ export const paymentCreatedV1Schema = z.object({
   amount_minor: z
     .string()
     .max(19)
-    .regex(/^[1-9][0-9]*$/),
+    .regex(/^[1-9][0-9]*$/)
+    .transform((value) => BigInt(value)),
   currency: z.literal('EUR'),
-  occurred_at: z.iso.datetime(),
+  occurred_at: z.iso.datetime().transform((value) => new Date(value)),
 });
 
-export type PaymentCreatedV1 = z.infer<typeof paymentCreatedV1Schema>;
+// What goes on the wire (producers build this).
+export type PaymentCreatedV1Wire = z.input<typeof paymentCreatedV1Schema>;
+// What a consumer works with after parsing.
+export type PaymentCreatedV1 = z.output<typeof paymentCreatedV1Schema>;

@@ -164,7 +164,7 @@ A log, not a guard: one row per message the worker receives. **No unique constra
 | Column | Type | Notes |
 |---|---|---|
 | id | bigserial PK | internal log, never referenced or exposed |
-| event_id | uuid | business event ID (TypeID prefix `evt`); indexed, not unique |
+| event_id | uuid null | business event ID (TypeID prefix `evt`); indexed, not unique. Null only for a message too broken to read one: the row is written before validation, so `CHECK (event_id IS NOT NULL OR outcome IN ('in_progress', 'invalid'))` |
 | nats_msg_id | text null | transport message ID |
 | delivery_attempt | int | from JetStream message metadata |
 | outcome | text | `in_progress`, `applied`, `duplicate`, `invalid`, `failed` |
@@ -350,14 +350,14 @@ Defined in `nats/streams/PAYMENTS.json` and applied by the `nats-setup` compose 
 Durable JetStream consumer with explicit acks. For each message:
 
 1. **Log the delivery** in its own small transaction: insert into `event_deliveries` with outcome `in_progress`.
-2. Validate with Zod; invalid → outcome `invalid`, log and terminate the message (no infinite redelivery). A dead-letter table can come later.
+2. Validate with Zod; invalid → outcome `invalid`, log and terminate the message (no infinite redelivery). A dead-letter table can come later. Parsing turns the TypeIDs into our UUIDs (checking each holds a UUIDv7), the amount into a `BigInt` and `occurred_at` into a `Date`: the schema's input type is the wire format producers build, its output type what consumers work with.
 3. **Tx 1 (book):** transition `created → received`; if exactly one row changed, `move(external → pending_in, step book)` and history row. Zero rows → already done, carry on.
 4. **Tx 2 (start review):** transition `received → under_review` and history row; no movement. Zero rows → already done, carry on.
-5. Wait a configurable delay (`REVIEW_DELAY_MS`), signalling in-progress to JetStream so the message isn't redelivered mid-review.
+5. If this delivery started the review (Tx 2 applied), wait a configurable delay (`REVIEW_DELAY_MS`), signalling in-progress to JetStream so the message isn't redelivered mid-review. Duplicates, unknown payments and redeliveries after a crash between Tx 2 and Tx 3 don't wait: the review has already happened from the system's point of view, and Tx 3 still records at most one decision.
 6. Decide: approve with probability `APPROVE_RATE`, otherwise reject.
 7. **Tx 3 (decide):** transition `under_review → approved|rejected` and history row; no movement. Zero rows → already decided: the recorded decision stands and the one just made is discarded (a redelivery must never re-decide).
 8. **Tx 4 (post the decision):** transition `approved → credited` with `move(pending_in → available, step credit)`, or `rejected → returned` with `move(pending_in → external, step return)`, and history row. Which one applies comes from the payment's recorded state (try both conditional updates; at most one matches), not from step 6. Zero rows → already posted.
-9. Update the delivery row's outcome: `applied` if any of Tx 1–4 changed state, otherwise `duplicate`; `failed` on an unexpected error (message left for redelivery).
+9. Update the delivery row's outcome: `applied` if any of Tx 1–4 changed state, otherwise `duplicate`; `failed` on an unexpected error. A transient failure (e.g. the database is unavailable) `nak`s the message with a delay, so it is redelivered. An invariant violation (`LedgerInconsistencyError`, `MovementConflictError`, `OverdraftError`, or any other `CHECK` violation) is a bug that retrying can't fix: it is logged at `fatal` with `alert: true` and the message is terminated, leaving the payment where it stopped for someone to investigate. If nothing changed because the payment doesn't exist (e.g. after a database reset), the outcome is `invalid` and the message is terminated; that read only classifies the outcome, after every transition has been attempted.
 10. Ack.
 
 Tx 1–4 are separate transactions on purpose: they alternate between owners (posting, compliance, compliance, posting) and become different consumers when those are split.
@@ -368,6 +368,8 @@ Crash behaviour:
 - Crash after Tx 4 commits, before ack → redelivered, every transaction is a no-op, recorded as a duplicate, acked, no balance change.
 
 A delivery row left `in_progress` after a crash is expected; the redelivery gets its own row.
+
+Because each of Tx 1–4 commits on its own, "crashed after Tx N" is exactly the database state of Tx 1…N committed plus a delivery row left `in_progress`. The handler tests create that state directly and run the handler as the redelivery, which covers the crash scenarios deterministically without test hooks in the production code; a process-level test also kills a real worker mid-review.
 
 ## Reconciliation
 
