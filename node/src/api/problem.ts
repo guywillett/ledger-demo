@@ -16,6 +16,7 @@ export const PROBLEM_TYPES = {
   invalidNotification: 'urn:ledger-demo:problem:invalid-notification',
   notificationConflict: 'urn:ledger-demo:problem:notification-conflict',
   unknownAccount: 'urn:ledger-demo:problem:unknown-account',
+  notAnnounced: 'urn:ledger-demo:problem:payment-not-announced',
 } as const;
 
 export function httpProblem(status: number, detail?: string): Problem {

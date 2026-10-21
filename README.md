@@ -13,6 +13,8 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `postgres` | PostgreSQL 18 | `5432` |
 | `nats` | NATS with JetStream | `4222` (clients), `8222` (monitoring) |
 | `migrate` | dbmate: applies `db/migrations/` and exits | — |
+| `nats-setup` | nats-box: applies the stream definitions in `nats/streams/` and exits | — |
+| `api` | the Node API (`node/`, image `ledger-demo-node`) | `3000` |
 
 Connection details from the host:
 
@@ -26,14 +28,27 @@ Compose prefixes everything with the project name `ledger-demo`, so containers a
 ### Start and stop
 
 ```sh
-docker compose up -d            # start everything in the background (migrations run automatically)
-docker compose ps -a            # status; `migrate` should show "Exited (0)"
+docker compose up -d            # start everything in the background (migrations and streams set up automatically)
+docker compose up -d --build    # the same, rebuilding the Node image after code changes
+docker compose ps -a            # status; `migrate` and `nats-setup` should show "Exited (0)"
 docker compose logs -f          # follow all logs (or: docker compose logs -f nats)
 docker compose stop             # stop containers, keep them and their data
 docker compose down             # remove containers and network; data volumes are kept
 ```
 
-`migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits. It's normal for it to show as exited.
+`migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits; `nats-setup` does the same for the JetStream streams once NATS is healthy. It's normal for both to show as exited. The `api` starts only after both have succeeded.
+
+There's no health endpoint yet (see *Known gaps* in the slice spec); `docker compose logs api` shows "Server listening" once it's up.
+
+### Streams
+
+JetStream streams are defined in `nats/streams/<NAME>.json` (the server's own JSON format; durations in nanoseconds) and applied by `nats/setup.sh`: created if missing, updated if the file changed. To change a stream, edit its file and run `docker compose up -d` (or `docker compose run --rm nats-setup`).
+
+```sh
+NATS="docker run --rm --network ledger-demo_default natsio/nats-box:0.20.0 nats -s nats://nats:4222"
+$NATS stream info PAYMENTS                       # configuration and message counts
+$NATS stream get PAYMENTS --last-for payment.created   # the latest payment.created event
+```
 
 ### Migrations
 
@@ -103,17 +118,21 @@ npm run test:watch              # Vitest in watch mode
 
 TypeScript is run directly by Node (type stripping); there is no build step and no `dist/`. `tsc` only type-checks, which is why `npm test` runs it first. Consequences: relative imports use `.ts` extensions, and only erasable syntax is allowed (no `enum`, namespaces or constructor parameter properties; `erasableSyntaxOnly` enforces this).
 
-Tests default to the compose services on `localhost`; set `DATABASE_URL` / `NATS_URL` to point elsewhere. Every API test response is also checked against `contracts/openapi.yaml`.
+Tests default to the compose services on `localhost`; set `DATABASE_URL` / `NATS_URL` to point elsewhere. Every API test response is also checked against `contracts/openapi.yaml`, and every published event against its schema in `contracts/events/`. Tests need Postgres and NATS (with the stream set up), i.e. `docker compose up -d`.
 
 #### Running the API locally
 
+`docker compose up -d` already runs the API on port 3000. To run it on the host instead (e.g. with `--watch`), stop the container first: both want host port 3000.
+
 ```sh
+docker compose stop api         # free port 3000
 cp .env.example .env            # once; .env is gitignored and loaded by Node itself
 npm run dev:api                 # restarts on file changes (node --watch)
 npm run start:api               # without watching
+docker compose start api        # afterwards, back to the container
 ```
 
-Record a payment notification for alice (repeat it to see the duplicate handling: `200` and a rising `notification_count`; change the amount to see a `409`):
+The same curl works against either. Record a payment notification for alice (repeat it to see the duplicate handling: `200` and a rising `notification_count`; change the amount to see a `409`). Each `201` publishes a `payment.created` event (see *Streams* above to read it back):
 
 ```sh
 curl -i -X POST localhost:3000/payments -H 'content-type: application/json' -d '{

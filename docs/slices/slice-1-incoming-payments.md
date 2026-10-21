@@ -256,10 +256,10 @@ Body: `{ network_transaction_id, creditor_iban, provider_account_id?, amount_min
 
 One statement (so no explicit transaction is needed): resolve `creditor_iban` to our account, insert the payment (`created`) and its first history row (a data-modifying CTE), or count a duplicate (`INSERT … SELECT … FROM accounts WHERE iban = $1 … ON CONFLICT …`, detailed below). No matching account → nothing inserted → `422`. **No balance change** — ingestion only.
 
-Then publish `payment.created` to JetStream with `Nats-Msg-Id = event_id`.
+Then publish `payment.created` to JetStream with `Nats-Msg-Id = <payment_id>.created` (one message ID per payment and event type; see *Stream `PAYMENTS`*), and wait for the stream's acknowledgement (2 s timeout). If the publish fails (NATS down, timeout), the payment stays `created` and the response is `503` with `Retry-After`: the provider's retry arrives as a duplicate, and a duplicate of a payment still `created` publishes `payment.created` again (see below). That retry is what makes the publish eventually happen; see *Known gaps* for what remains.
 
 Idempotency behaviour (keyed on `network` + `network_transaction_id`). "Same details" means `creditor_iban`, `amount_minor` and `currency` equal the stored row's, compared directly in SQL — every identifying detail is stored on the row, so no request hash is needed, and Node and Go share the exact rule by running the same SQL. `provider_account_id` is not compared: it is informational, and a provider that includes it in one retry and omits it in the next must not trigger a `409`; the first value received is kept.
-- Same network ID, same details → `200` with the existing payment; `notification_count` incremented; no other effects
+- Same network ID, same details → `200` with the existing payment; `notification_count` incremented. If the payment is still `created`, `payment.created` is published again (an earlier publish may have failed); once the worker has moved it on, a duplicate has no other effect. A re-publish carries a new `event_id` (event IDs aren't stored without an outbox) but the same message ID, so within the stream's duplicate window the stream drops it (the original event stays, with its original `event_id`). Beyond the window consumers may see two events for one payment; they are idempotent on the payment's state, and the delivery log counts the second as a duplicate.
 - Same network ID, different details → `409` and an `error` log naming the fields that differ (provider bug or suspicious — not a retry)
 - Concurrent notifications with the same network ID → exactly one creates; the rest are duplicates or conflicts
 
@@ -326,7 +326,20 @@ Payments, newest first, each with current status. Optional `?include=history` ad
 }
 ```
 
-`event_id` identifies the business event; the NATS message ID is transport only. The event carries our `account_id`, not the IBAN: provider identifiers stop at the ingestion edge. The JSON schema lives in `contracts/events/`.
+`event_id` identifies the business event; the NATS message ID is transport only. The event carries our `account_id`, not the IBAN: provider identifiers stop at the ingestion edge. The JSON schema lives in `contracts/events/`. The subject is the event type (`payment.created`).
+
+### Stream `PAYMENTS`
+
+Defined in `nats/streams/PAYMENTS.json` and applied by the `nats-setup` compose service (`nats/setup.sh`) on every `docker compose up`, like the migrations: one language-neutral definition for Node and Go. The apps don't create streams; they check at startup that it exists.
+
+| Setting | Value | Why |
+|---|---|---|
+| `subjects` | `payment.>` | every `payment.<status>` event, present and future, in one ordered log |
+| `storage` | `file` | survives a NATS restart (the `natsdata` volume) |
+| `num_replicas` | `1` | single server; production would use 3 |
+| `retention` | `limits` | messages stay until they age out, whether consumed or not: replay and inspection, and several consumer types (posting, compliance) can read the same events. `workqueue` would allow one consumer per subject |
+| `max_age` | 7 days | the limit; sizes unlimited at demo volume; `discard: old`. With `limits` retention messages age out whether or not they were consumed: if the worker were down for more than 7 days, unprocessed `payment.created` events would vanish and those payments stay `created` (stranded money; the "stuck in `created`" reconciliation check catches it) |
+| `duplicate_window` | 2 minutes (default) | a repeated `Nats-Msg-Id` within the window is acknowledged (`duplicate: true`) but not stored again. The message ID is `<payment_id>.created`, not `event_id`, so this absorbs repeats of the same announcement: a publish that timed out but was stored and then retried, or provider retries while the worker is slow. The likeliest real case: while the client is reconnecting it buffers outgoing publishes, so a publish can time out (`503`) and still reach the stream once the connection returns; the provider's retry then re-announces it, and the per-payment message ID is what makes the stream drop that second copy (if it lands within the window). Noise reduction only: exactly-once effects come from the database guards |
 
 ## Worker (posting and compliance)
 
@@ -392,11 +405,14 @@ Prints a per-account table and an overall difference; exit code non-zero if any 
 
 ## Known gaps (deliberate)
 
-- **Commit-then-publish gap:** if the API commits the payment but crashes before publishing `payment.created`, nothing ever processes it and it stays `created` forever. The money has arrived at the bank but is never booked, so the customer never gets it: stranded money. Our ledger stays internally consistent (no balance without a booked payment), which is exactly why internal reconciliation cannot see the problem; only the "stuck in `created`" check below, or reconciling against the provider's own statement, catches it. This gap has been present since the API first published events; it is fixed in a later slice with a transactional outbox.
+- **Commit-then-publish gap:** if the API commits the payment but crashes before publishing `payment.created`, nothing ever processes it and it stays `created` forever. The money has arrived at the bank but is never booked, so the customer never gets it: stranded money. Our ledger stays internally consistent (no balance without a booked payment), which is exactly why internal reconciliation cannot see the problem; only the "stuck in `created`" check below, or reconciling against the provider's own statement, catches it. This gap has been present since the API first published events. It is narrowed, not closed, by re-publishing on duplicates (a provider that gets no response, or a `503`, retries, and the retry re-announces a payment still `created`); it remains for a provider that never retries. It is closed in a later slice with a transactional outbox.
 - Approve/reject is random, not a real rules engine.
 - No authentication on the API. In particular, `POST /payments` does not verify the sender: real webhooks are authenticated, typically by an HMAC signature header checked against a shared secret.
+- No authentication or authorization on NATS: any client that can reach port 4222 can publish to `payment.created` or manage streams. The evolution is a NATS user per service with publish/subscribe allow lists (the API may publish only `payment.created`; the worker may only fetch from and acknowledge its own consumer; only `nats-setup` may use `$JS.API.>`), per-client inbox prefixes so replies aren't readable by other clients, and `deny_delete` / `deny_purge` on the stream.
+- No health endpoint. Nothing waits on the API in compose (it is the last service to start), so ordering doesn't need one; a `GET /health` arrives with CI or a load balancer, and goes into the contract then.
 - `POST /payments` uses demo status codes rather than a real webhook contract (see *Webhook semantics*), and does not distinguish accounts outside this app from genuinely unknown ones.
 - One IBAN and at most one provider account ID per account, single provider, no lifecycle; see `provider_accounts` under *Data model* for the evolution path.
+- **Completed credits only:** `POST /payments` assumes the provider notifies only completed (settled and released) credits. Provider-side pending states (funds held for the provider's own screening) and provider rejections before release are out of scope; consuming them would add an upstream state machine before `created`. Recalls, returns and fraud claims (SEPA R-transactions) happen after settlement, are decided by people, and belong to a separate post-settlement return flow, handled with compensating movements rather than by changing the original payment.
 
 ## Decisions
 
@@ -416,3 +432,7 @@ Prints a per-account table and an overall difference; exit code non-zero if any 
 14. **Provider identifiers mapped at the edge:** notifications identify accounts by `creditor_iban`, mapped to `account_id` during ingestion; the IBAN as received is stored on the payment; nothing downstream sees provider identifiers. The provider account ID is optional, stored when sent, and not used for matching or for duplicate detection. One IBAN and at most one provider account ID per account for now; `provider_accounts` (per provider, with lifecycle status) is the evolution path.
 15. **Event naming:** `payment.<new status>`, one event per state transition, published on entering that status; status names are part of the event contract. Only `payment.created` is published in slice 1.
 16. **No request hash:** duplicate detection compares the stored `creditor_iban`, `amount_minor` and `currency` directly in the upsert. Every identifying detail is stored on the row, so a hash would add a cross-language format to keep in sync and hide which field differed.
+17. **Stream setup:** JetStream streams are defined in `nats/streams/*.json` and applied by a one-off compose service, like the migrations; apps only check that their stream exists. Stream `PAYMENTS`: subjects `payment.>`, file storage, `limits` retention for 7 days, default 2-minute duplicate window (see *Stream `PAYMENTS`*).
+18. **Publish failure:** if `payment.created` can't be published after the insert commits, the API answers `503` (with `Retry-After`), and a duplicate notification of a payment still `created` publishes it again, with a new `event_id`. The provider's retry is what completes the publish until the outbox replaces this.
+19. **No health endpoint** in slice 1 (see *Known gaps*).
+20. **Message IDs:** `Nats-Msg-Id = <payment_id>.<event>` (e.g. `pay_….created`), one per payment and event type, rather than `event_id`, so the stream's duplicate window drops repeated announcements of the same transition. `event_id` still identifies each event; when the stream drops a repeat, the API logs `stream_duplicate: true` instead of the new, unstored `event_id`.

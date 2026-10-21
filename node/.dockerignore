@@ -1,0 +1,6 @@
+# Only package files and src/ are copied into the image; keep everything else out of the
+# build context (and secrets such as .env out of it entirely).
+node_modules
+.env
+test
+*.log

@@ -13,7 +13,9 @@ paths:
       description: |
         Webhook-style ingestion. Idempotent on (network, network_transaction_id): a repeat with
         the same creditor_iban, amount_minor and currency is a duplicate (200); with different
-        details it is a conflict (409). The status codes are the demo's; see "Webhook semantics"
+        details it is a conflict (409). A payment.created event is published for each new
+        payment, and again for a duplicate whose payment is still `created` (an earlier publish
+        may have failed; see 503). The status codes are the demo's; see "Webhook semantics"
         in docs/slices/slice-1-incoming-payments.md for how a real provider contract differs.
       parameters:
         - name: x-request-id
@@ -74,6 +76,20 @@ paths:
                 $ref: '#/components/schemas/Problem'
         '422':
           description: Valid IBAN that matches none of our accounts
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: |
+            The payment was recorded but could not be passed on for processing (the
+            payment.created publish failed). Retry the notification: it is recognised as a
+            duplicate and passed on again.
+          headers:
+            retry-after:
+              description: Seconds to wait before retrying
+              schema:
+                type: string
           content:
             application/problem+json:
               schema:

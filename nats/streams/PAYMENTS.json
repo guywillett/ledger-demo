@@ -1,0 +1,14 @@
+{
+  "name": "PAYMENTS",
+  "description": "Payment lifecycle events, one subject per status: payment.<status>",
+  "subjects": ["payment.>"],
+  "storage": "file",
+  "num_replicas": 1,
+  "retention": "limits",
+  "max_age": 604800000000000,
+  "max_msgs": -1,
+  "max_bytes": -1,
+  "max_msg_size": -1,
+  "discard": "old",
+  "duplicate_window": 120000000000
+}

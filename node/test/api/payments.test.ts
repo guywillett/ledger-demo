@@ -12,9 +12,10 @@ import {
   notification,
   postPayment,
   refusingDb,
+  unusedEvents,
 } from '../helpers.ts';
 
-const { app, pool, close } = createTestApp();
+const { app, pool, close } = await createTestApp();
 
 afterAll(close);
 
@@ -295,7 +296,7 @@ describe('POST /payments: request IDs', () => {
 describe('POST /payments: logging', () => {
   it('logs each outcome at its level, masks IBANs and never logs the body', async () => {
     const { logger, lines } = capturingLogger();
-    const logged = createTestApp(logger);
+    const logged = await createTestApp({ logger });
     try {
       const body = notification({ payer_name: 'Jane Doe' });
       await postPayment(logged.app, body); // created
@@ -307,7 +308,10 @@ describe('POST /payments: logging', () => {
       await logged.close();
     }
 
-    const domain = lines().filter((line) => line.msg !== 'request completed');
+    // The request's own lines (they carry request_id), not the access lines or connection status.
+    const domain = lines().filter(
+      (line) => line.request_id !== undefined && line.msg !== 'request completed',
+    );
     expect(domain.map((line) => [line.level, line.msg])).toEqual([
       ['info', 'payment created'],
       ['info', 'duplicate payment notification'],
@@ -341,7 +345,7 @@ describe('POST /payments: logging', () => {
 describe('POST /payments: access log', () => {
   it('logs the path without the query string', async () => {
     const { logger, lines } = capturingLogger();
-    const logged = createTestApp(logger);
+    const logged = await createTestApp({ logger });
     try {
       const response = await logged.app.inject({
         method: 'POST',
@@ -370,6 +374,7 @@ describe('POST /payments: internal inconsistency', () => {
     const { logger, lines } = capturingLogger();
     const stubbed = buildApp({
       db: refusingDb({ creditor_iban: ALICE.iban, amount_minor: 1250n, currency: 'EUR' }),
+      events: unusedEvents,
       logger,
     });
     try {

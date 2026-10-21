@@ -97,3 +97,29 @@ export function contractRequestExample(method: string, path: string): unknown {
     { requestBody?: { content: Record<string, { example?: unknown }> } } | undefined;
   return operation?.requestBody?.content['application/json']?.example;
 }
+
+// Event contracts: contracts/events/<event_type>.v<version>.json, plain JSON Schema 2020-12.
+const eventValidators = new Map<string, ValidateFunction>();
+
+// Throws unless `event` matches the contract for its event_type and schema_version.
+export function expectEventMatchesContract(event: unknown): void {
+  const { event_type: type, schema_version: version } = event as {
+    event_type?: unknown;
+    schema_version?: unknown;
+  };
+  const key = `${String(type)}.v${String(version)}`;
+  let validate = eventValidators.get(key);
+  if (validate === undefined) {
+    const schema = JSON.parse(
+      readFileSync(new URL(`../../contracts/events/${key}.json`, import.meta.url), 'utf8'),
+    ) as object;
+    validate = ajv.compile(schema);
+    eventValidators.set(key, validate);
+  }
+  if (!validate(event)) {
+    throw new Error(
+      `${key} event does not match the contract: ${ajv.errorsText(validate.errors)}\n` +
+        `event: ${JSON.stringify(event)}`,
+    );
+  }
+}

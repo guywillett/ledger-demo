@@ -48,6 +48,42 @@ services:
       postgres:
         condition: service_healthy
 
+  # Applies the JetStream stream definitions in nats/streams/ and exits, like migrate does for
+  # the schema (see nats/setup.sh).
+  nats-setup:
+    image: natsio/nats-box:0.20.0
+    environment:
+      NATS_URL: nats://nats:4222
+    volumes:
+      - ./nats:/nats:ro
+    entrypoint: ["/bin/sh", "/nats/setup.sh"]
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  api:
+    build: ./node
+    # Named so the worker (later) can reuse the same image with a different command.
+    image: ledger-demo-node
+    # The API exits with a failing code if it can't start or loses NATS for good; restart it.
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      NATS_URL: nats://nats:4222
+      PORT: "3000"
+      LOG_LEVEL: info
+    # No healthcheck yet (no health endpoint; see Known gaps in the slice spec): nothing waits
+    # on this service.
+    # Host port 3000: stop this service (docker compose stop api) before running
+    # npm run dev:api on the host, which wants the same port.
+    ports:
+      - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats-setup:
+        condition: service_completed_successfully
+
 volumes:
   pgdata:
   natsdata:
