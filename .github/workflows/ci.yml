@@ -1,0 +1,78 @@
+# Runs on every push (any branch) and on demand. Everything a reviewer would check by hand on
+# a clean clone: format, lint and types; the whole compose stack built from scratch; the
+# integration and e2e tests; and the demo, which ends by reconciling the books.
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      # Actions are pinned by commit SHA (a tag can be moved; a SHA can't), with the version in
+      # a comment for humans.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Format, lint (type-aware) and types: no services needed, so fail fast before the stack.
+      - name: Check
+        run: npm run check
+
+      # The whole stack from scratch, as from a clean clone: images built, migrations and stream
+      # definitions applied to both the development and the test services.
+      - name: Start the stack
+        working-directory: .
+        run: |
+          docker compose up -d --build
+          # The one-shot setup services must have finished successfully before anything runs.
+          # docker wait (not docker compose wait, which only sees running containers) returns the
+          # exit code whether the container is still running or has already exited.
+          for service in migrate migrate-test nats-setup nats-setup-test; do
+            code=$(docker wait "$(docker compose ps -a -q "$service")")
+            if [ "$code" != "0" ]; then
+              echo "$service exited with $code"
+              exit 1
+            fi
+          done
+          # The API is the last service to start; wait until it answers.
+          timeout 60 bash -c 'until curl -sf -o /dev/null localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance; do sleep 1; done'
+
+      - name: Integration tests
+        run: npm test
+
+      # After the integration tests, never alongside them: the e2e tests purge the test stream.
+      - name: End-to-end tests
+        run: npm run test:e2e
+
+      # Against the development services: duplicates, conflicts, a killed worker, two workers,
+      # then reconciliation of the whole (fresh) database.
+      - name: Demo
+        working-directory: .
+        run: scripts/demo.sh
+
+      - name: Service logs
+        if: failure()
+        working-directory: .
+        run: docker compose logs --no-color --timestamps

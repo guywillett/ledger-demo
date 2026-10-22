@@ -1,5 +1,7 @@
 # ledger-demo
 
+[![CI](https://github.com/guywillett/ledger-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/guywillett/ledger-demo/actions/workflows/ci.yml)
+
 A small payment event-processing system (incoming payments, pseudo compliance review, ledger balances) built to demonstrate correctness under duplicates, retries, crashes and concurrency: **however often a notification or event is repeated, redelivered or processed concurrently, and wherever a process crashes, every balance changes exactly once.** Implemented in Node.js/TypeScript; a Go implementation against the same database schema and contracts comes later.
 
 The specs and decisions are in [`docs/`](docs/): [slice 1](docs/slices/slice-1-incoming-payments.md) is what's built so far.
@@ -38,6 +40,8 @@ docker compose up -d --build     # Postgres, NATS, migrations, stream setup, API
 scripts/demo.sh                  # duplicates, conflicts, a killed worker, two workers; then reconciles
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance    # alice
 ```
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) does the same from a clean checkout on every push: `npm run check`, the stack built from scratch, the integration and e2e tests, then `scripts/demo.sh`.
 
 `scripts/demo.sh` exits `0` only if every expectation holds and, once every payment has finished, the books agree and nothing is stuck. That last check covers the whole development database, so a payment left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so it will work unchanged against the Go implementation.
 
@@ -242,7 +246,7 @@ curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?li
 #### Lint and format
 
 ```sh
-npm run check                   # format:check + lint + typecheck (what CI will run)
+npm run check                   # format:check + lint + typecheck (CI's first step)
 npm run format                  # Prettier: rewrite files in place
 npm run lint                    # oxlint, including type-aware rules
 ```
