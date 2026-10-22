@@ -14,7 +14,7 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY src ./src
-# Operational scripts (e.g. docker compose run --rm worker node scripts/reconcile.ts).
+# Operational scripts (e.g. reconciliation: the reconcile compose service runs scripts/reconcile.ts).
 COPY scripts ./scripts
 # The image's unprivileged user rather than root.
 USER node

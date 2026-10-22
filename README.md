@@ -1,8 +1,54 @@
 # ledger-demo
 
-A small payment event-processing system (incoming payments, pseudo compliance review, ledger balances) built to demonstrate correctness under duplicates, retries, crashes and concurrency.
+A small payment event-processing system (incoming payments, pseudo compliance review, ledger balances) built to demonstrate correctness under duplicates, retries, crashes and concurrency: **however often a notification or event is repeated, redelivered or processed concurrently, and wherever a process crashes, every balance changes exactly once.** Implemented in Node.js/TypeScript; a Go implementation against the same database schema and contracts comes later.
 
-See [`docs/slices/`](docs/slices/) for the specs.
+The specs and decisions are in [`docs/`](docs/): [slice 1](docs/slices/slice-1-incoming-payments.md) is what's built so far.
+
+```text
+provider ──POST /payments──► API ──┬──► Postgres: payment `created` (no balance change)
+(webhook)                          └──► JetStream: payment.created
+                                               │
+                                               ▼
+                                 worker (any number of instances)
+                    book ──► start review ──► decide ──► post the decision
+                (pending_in)                (approve/reject)   (available, or returned)
+                          each step one transaction, through ledger/move()
+
+  GET /accounts/:id/balance, /transactions          reconciliation: do the books agree?
+```
+
+## What it demonstrates
+
+| Guarantee | How | Proved by |
+|---|---|---|
+| A repeated notification changes nothing | `UNIQUE (network, network_transaction_id)` and one upsert statement; same details → `200`, different → `409` | `test/api/payments.test.ts` (5 repeats, 10 concurrent, conflicts) |
+| A repeated or concurrent event moves money once | every step is a conditional transition (`UPDATE … WHERE status = $expected`), never check-then-act | `test/worker/handler.test.ts` (same event twice, two consumers at once) |
+| The ledger protects itself | `move()` records each movement under `UNIQUE (reference_type, reference_id, reference_step)`; a reused reference with other details is refused | `test/ledger/move.test.ts` |
+| Crash safety | each step commits on its own; a redelivery skips what's done, and a recorded decision is never re-made | `test/worker/handler.test.ts` (crash after booking, after deciding); `test/e2e/worker.e2e.ts` (real `kill -9` mid-review) |
+| Horizontal scaling | instances share one durable JetStream consumer; each fetches only as many messages as it has free slots | `test/e2e/worker.e2e.ts` (two workers; long reviews never redelivered) |
+| Audit trail | `balance_movements` and `payment_status_history` are append-only, enforced by triggers | `test/ledger/move.test.ts`, `test/ledger/lifecycle.test.ts` |
+| Exact money | integer minor units as `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON ([decision 0001](docs/decisions/0001-money-representation.md)) | amounts above 2^53 in the API, ledger, database and logging tests |
+| The books agree | reconciliation checks balances against payment statuses and against the movement journal, per account and per payment | `test/reconciliation/reconcile.test.ts`; `scripts/demo.sh`; the last e2e test |
+| One contract for every implementation | hand-written `contracts/openapi.yaml` and `contracts/events/`; every test response and published event is checked against them | `test/contract.ts`, `test/shared/events.test.ts` |
+
+## Quick start
+
+```sh
+docker compose up -d --build     # Postgres, NATS, migrations, stream setup, API and worker
+scripts/demo.sh                  # duplicates, conflicts, a killed worker, two workers; then reconciles
+curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance    # alice
+```
+
+`scripts/demo.sh` exits `0` only if every expectation holds and, once every payment has finished, the books agree and nothing is stuck. That last check covers the whole development database, so a payment left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so it will work unchanged against the Go implementation.
+
+## Known gaps
+
+Deliberate, and described with their evolution path under *Known gaps* in the [slice 1 spec](docs/slices/slice-1-incoming-payments.md):
+
+- **Commit-then-publish:** if the API crashes after storing a payment but before publishing its event, only a provider retry announces it; a transactional outbox closes this later. Reconciliation lists such payments as stuck in `created`.
+- **No dead-letter handling:** a message that exhausts `max_deliver`, or that the worker terminates, is only logged; reconciliation shows the payment as stuck.
+- **Security:** no authentication on the API (including webhook signatures) or on NATS, and one database user for everything (append-only is enforced by triggers rather than per-service roles).
+- **Simplifications:** approve/reject is random; demo HTTP status codes rather than a real webhook contract; one IBAN per account and a single provider; no health endpoint; the SEPA country list in `node/src/shared/iban.ts` is not yet verified against the EPC's official list.
 
 ## Local development
 
@@ -19,6 +65,7 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `worker` | the Node worker (same image): books, reviews and posts payments | — |
 | `nats-test` | a separate NATS for the tests, so test events never reach the development stream | `4223`, `8223` |
 | `nats-setup-test` | the same definitions applied to `nats-test` | — |
+| `reconcile` | reconciliation on demand (`docker compose run --rm reconcile`); not started by `up` (profile `tools`) | — |
 
 Connection details from the host:
 
@@ -125,7 +172,7 @@ Checks that balances, movements and payment statuses agree (see *Reconciliation*
 cd node && npm run reconcile                                  # the development database (via .env)
 npm run reconcile -- --json --account acct_01m564xr00fx7rjvqryn5dzwxx   # one account, as JSON
 npm run reconcile -- --stuck-after 0 --fail-on-stuck          # also fail on any unfinished payment
-docker compose run --rm --no-deps worker node scripts/reconcile.ts      # from inside compose
+docker compose run --rm reconcile --stuck-after 0                       # from compose, no local Node needed
 ```
 
 Exit code `0` means the books agree, `1` that they disagree, `2` stuck payments with `--fail-on-stuck`, `3` that it couldn't run. Run against `ledger_test` it reports differences by design: some tests leave deliberate inconsistencies behind.

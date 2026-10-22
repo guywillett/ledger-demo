@@ -53,6 +53,14 @@ describe('move', () => {
     expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 1250n });
   });
 
+  it('moves amounts beyond 2^53 exactly', async () => {
+    const account = await createTestAccount(pool);
+    // 2^53 + 1: the smallest integer a JavaScript number can't hold.
+    const amountMinor = 9007199254740993n;
+    await withTransaction(pool, (tx) => move(tx, booking(account, { amountMinor })));
+    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: amountMinor, available: 0n });
+  });
+
   it('is a no-op when called twice with the same reference', async () => {
     const account = await createTestAccount(pool);
     const m = booking(account);

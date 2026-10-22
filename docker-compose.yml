@@ -155,6 +155,21 @@ services:
       nats-setup:
         condition: service_completed_successfully
 
+  # Reconciliation on demand: docker compose run --rm reconcile [options]. It only reads the
+  # shared database, so it checks whichever implementation wrote the data; scripts/demo.sh
+  # uses it rather than a script inside the worker image, which the Go worker won't have.
+  # The "tools" profile keeps it out of docker compose up.
+  reconcile:
+    build: ./node
+    image: ledger-demo-node
+    entrypoint: ["node", "scripts/reconcile.ts"]
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+    profiles: ["tools"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   pgdata:
   natsdata:

@@ -52,6 +52,7 @@ ledger-demo/
 │   ├── openapi.yaml
 │   └── events/payment.created.v1.json
 ├── db/migrations/
+├── scripts/demo.sh       # language-neutral demo: HTTP and compose only
 ├── nats/
 │   ├── streams/          # JetStream stream definitions
 │   ├── consumers/        # durable consumer definitions, per stream
@@ -399,7 +400,7 @@ Because each of Tx 1–4 commits on its own, "crashed after Tx N" is exactly the
 
 ## Reconciliation
 
-The ledger keeps three views of the same money: **balances** (`account_balances`, the current figures, a cache only `move()` changes), **movements** (`balance_movements`, the append-only journal) and **payments** (what each status says should be booked). Reconciliation checks that they agree. `scripts/reconcile.ts` (`npm run reconcile`, or `docker compose run --rm --no-deps worker node scripts/reconcile.ts`) runs every query in one `REPEATABLE READ READ ONLY` transaction, so it sees one consistent snapshot while the worker carries on (each worker step commits its status, movement and balance change together). The checks live in `src/reconciliation/reconcile.ts`.
+The ledger keeps three views of the same money: **balances** (`account_balances`, the current figures, a cache only `move()` changes), **movements** (`balance_movements`, the append-only journal) and **payments** (what each status says should be booked). Reconciliation checks that they agree. `node/scripts/reconcile.ts` (`npm run reconcile`, or the on-demand compose service: `docker compose run --rm reconcile`) runs every query in one `REPEATABLE READ READ ONLY` transaction, so it sees one consistent snapshot while the worker carries on (each worker step commits its status, movement and balance change together). The checks live in `src/reconciliation/reconcile.ts`.
 
 Per account:
 
