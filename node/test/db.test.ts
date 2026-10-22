@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { loadSharedConfig } from '../src/shared/config.ts';
 import { createPool, withTransaction, type Tx } from '../src/shared/db.ts';
 import { createLogger } from '../src/shared/logger.ts';
+import { balancesOf, createTestAccount } from './helpers.ts';
 
 // Runs against the compose Postgres (docker compose up -d).
 const config = loadSharedConfig();
@@ -23,6 +24,12 @@ describe('database', () => {
       [['alice', 'bob', 'carol']],
     );
     expect(result.rows.map((r) => r.name)).toEqual(['alice', 'bob', 'carol']);
+  });
+
+  // createTestAccount inserts only the account; the accounts_create_balance trigger adds the row.
+  it('creates a zero balance row with every account', async () => {
+    const account = await createTestAccount(pool);
+    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 0n });
   });
 
   it('returns bigint columns as BigInt', async () => {

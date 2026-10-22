@@ -7,13 +7,7 @@ import {
 } from '../../src/ledger/move.ts';
 import { withTransaction } from '../../src/shared/db.ts';
 import { newUuid } from '../../src/shared/ids.ts';
-import {
-  balancesOf,
-  createTestAccount,
-  createTestPool,
-  newTestIban,
-  type TestAccount,
-} from '../helpers.ts';
+import { balancesOf, createTestAccount, createTestPool, type TestAccount } from '../helpers.ts';
 
 // move() against the test database. Each test uses its own account, so balances start at zero.
 
@@ -119,15 +113,12 @@ describe('move', () => {
   });
 
   it('throws if the account has no balance row, recording nothing', async () => {
-    // An account inserted without its balance row (createTestAccount always adds one).
-    const id = newUuid('acct');
-    await pool.query('INSERT INTO accounts (id, name, iban) VALUES ($1, $2, $3)', [
-      id,
-      `test-no-balance-${id}`,
-      newTestIban(),
-    ]);
+    // The trigger creates the row with the account, so delete it to get here (reconciliation
+    // reports such accounts too).
+    const account = await createTestAccount(pool);
+    await pool.query('DELETE FROM account_balances WHERE account_id = $1', [account.id]);
     const m: Movement = {
-      accountId: id,
+      accountId: account.id,
       from: 'external',
       to: 'pending_in',
       amountMinor: 1250n,

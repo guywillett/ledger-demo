@@ -6,7 +6,7 @@ import { paymentEvents, type PaymentEvents } from '../src/ingestion/events.ts';
 import type { App } from '../src/api/types.ts';
 import { loadSharedConfig } from '../src/shared/config.ts';
 import { recordNotification, type Payment } from '../src/ingestion/payments.ts';
-import { createPool, withTransaction, type Queryable } from '../src/shared/db.ts';
+import { createPool, type Queryable } from '../src/shared/db.ts';
 import { parseIban, type Iban } from '../src/shared/iban.ts';
 import { newUuid, toTypeId, type TypeIdString, type Uuid } from '../src/shared/ids.ts';
 import {
@@ -243,19 +243,17 @@ export type TestAccount = {
   readonly iban: Iban;
 };
 
-// An account of the test's own, with a zero balance row, so balance assertions don't depend
-// on other tests. Never deleted: the test database is reset as a whole (npm run test:db:reset).
+// An account of the test's own (with the zero balance row the database trigger adds), so
+// balance assertions don't depend on other tests. Never deleted: the test database is reset as
+// a whole (npm run test:db:reset).
 export async function createTestAccount(pool: pg.Pool): Promise<TestAccount> {
   const id = newUuid('acct');
   const iban = newTestIban();
-  await withTransaction(pool, async (tx) => {
-    await tx.query('INSERT INTO accounts (id, name, iban) VALUES ($1, $2, $3)', [
-      id,
-      `test-${id}`,
-      iban,
-    ]);
-    await tx.query('INSERT INTO account_balances (account_id) VALUES ($1)', [id]);
-  });
+  await pool.query('INSERT INTO accounts (id, name, iban) VALUES ($1, $2, $3)', [
+    id,
+    `test-${id}`,
+    iban,
+  ]);
   return { id, typeId: toTypeId('acct', id), iban };
 }
 

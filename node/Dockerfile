@@ -14,6 +14,8 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY src ./src
+# Operational scripts (e.g. docker compose run --rm worker node scripts/reconcile.ts).
+COPY scripts ./scripts
 # The image's unprivileged user rather than root.
 USER node
 # Node is PID 1 and handles SIGTERM itself (see src/api/main.ts), so docker compose stop

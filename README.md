@@ -117,6 +117,19 @@ Seeded by `db/migrations/20261018000002_seed_demo_accounts.sql`, with zero balan
 | bob | `acct_01m564xr01ecrvnckn84evqsax` | `01a14c4e-e001-7331-bab2-75411dbbe55d` | `FR7612345000010000000000290` |
 | carol | `acct_01m564xr02e70a25p2hkva3gbn` | `01a14c4e-e002-71c0-a116-c28cf6a1c175` | `FR7612345000010000000000387` |
 
+### Reconciliation
+
+Checks that balances, movements and payment statuses agree (see *Reconciliation* in the slice spec):
+
+```sh
+cd node && npm run reconcile                                  # the development database (via .env)
+npm run reconcile -- --json --account acct_01m564xr00fx7rjvqryn5dzwxx   # one account, as JSON
+npm run reconcile -- --stuck-after 0 --fail-on-stuck          # also fail on any unfinished payment
+docker compose run --rm --no-deps worker node scripts/reconcile.ts      # from inside compose
+```
+
+Exit code `0` means the books agree, `1` that they disagree, `2` stuck payments with `--fail-on-stuck`, `3` that it couldn't run. Run against `ledger_test` it reports differences by design: some tests leave deliberate inconsistencies behind.
+
 ### Node
 
 The Node.js implementation lives in `node/`. The Node version is in `.nvmrc` (major version only); `package.json` `engines` and `engine-strict` in `node/.npmrc` make npm refuse other majors.

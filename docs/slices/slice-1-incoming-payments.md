@@ -108,7 +108,7 @@ with `UNIQUE (provider, provider_account_id)` and `UNIQUE (provider, iban)`, plu
 Transaction identifiers have the same problem in practice: a provider may expose several IDs for one transaction (network-level, provider-internal, general) across different endpoints and webhooks. Slice 1 has one `network_transaction_id`; a later `provider_transaction_refs (payment_id, provider, kind, value)` table would hold the rest, with the idempotency key chosen per provider.
 
 ### `account_balances`
-One row per account.
+One row per account, created at zero with the account by an `AFTER INSERT` trigger on `accounts` (so it holds however the account is inserted: seed migration, tests, `psql`). `move()` updates the row but never creates it, and `GET /accounts/:id/balance` treats a missing row as a missing account. Nothing stops the row being deleted later; reconciliation reports any account without one.
 | Column | Type | Notes |
 |---|---|---|
 | account_id | uuid PK, FK | |
@@ -393,7 +393,9 @@ Because each of Tx 1–4 commits on its own, "crashed after Tx N" is exactly the
 
 ## Reconciliation
 
-`scripts/reconcile.ts` checks, per account:
+The ledger keeps three views of the same money: **balances** (`account_balances`, the current figures, a cache only `move()` changes), **movements** (`balance_movements`, the append-only journal) and **payments** (what each status says should be booked). Reconciliation checks that they agree. `scripts/reconcile.ts` (`npm run reconcile`, or `docker compose run --rm --no-deps worker node scripts/reconcile.ts`) runs every query in one `REPEATABLE READ READ ONLY` transaction, so it sees one consistent snapshot while the worker carries on (each worker step commits its status, movement and balance change together). The checks live in `src/reconciliation/reconcile.ts`.
+
+Per account:
 
 ```text
 pending_in == sum(amount) of payments in (received, under_review, approved, rejected)
@@ -403,11 +405,21 @@ pending_in == net of balance_movements into/out of pending_in
 available  == net of balance_movements into/out of available
 ```
 
-Prints a per-account table and an overall difference; exit code non-zero if any difference ≠ 0. Also prints:
+An account without a balance row is reported as a difference too (the checks start from `accounts`, not `account_balances`).
+
+Per payment, its movements must match its status, because sums can hide two errors that cancel out: `created` none; `received`, `under_review`, `approved`, `rejected` exactly `book`; `credited` `book` and `credit`; `returned` `book` and `return`; all on the payment's own account and for the payment's amount. Movements that reference no payment are reported too.
+
+Also reported:
 - payments stuck in a non-final status (`created`, `received`, `under_review`, `approved`, `rejected`) beyond a threshold since they entered it, listed with their status and age. The balance checks can't see these: a stuck payment's funds are fully accounted for (in `pending_in`, or not booked at all), the payment just never finishes. The status tells the cause apart:
   - `created`: received by the bank but never booked, e.g. the commit-then-publish gap (see *Known gaps*);
   - any later non-final status: processing stopped half-way, e.g. a message that exhausted `max_deliver` or was terminated by the worker (see the dead-letter gap under *Known gaps*), with the funds held in `pending_in`.
-- deliveries vs applied: count of `event_deliveries` by outcome, and duplicate notifications from `notification_count`
+- deliveries: `event_deliveries` by outcome (all accounts), `in_progress` rows older than the threshold (the trace a crash leaves), and duplicate notifications (`notification_count - 1`, summed).
+
+Output is a table of the accounts and payments that disagree plus a summary, or `--json`. Options: `--account acct_…` (repeatable) to check only some accounts, `--stuck-after <minutes>` (default 10), `--fail-on-stuck`. Exit codes: `0` the books agree; `1` they disagree (any difference or mismatch); `2` they agree but payments are stuck and `--fail-on-stuck` was given; `3` it couldn't run. Stuck payments alone don't make the books wrong, so they don't fail it by default.
+
+In production this would run on a schedule (alerting on a non-zero exit), after incidents, deploys and data migrations, and before a financial close. Comparing our books with the provider's statement (external reconciliation) is the other half, out of scope here. The test database holds deliberate inconsistencies left by tests (e.g. movements for no payment, corrupted balances), so a whole-database run there reports differences by design; the e2e tests reconcile the accounts they used instead.
+
+**At scale** it would need reworking (noted in the code): the per-payment check reads every payment into memory (node-postgres buffers a whole result), so it should compare in SQL and return only mismatches, or stream through a cursor; and every query scans whole tables inside one long snapshot, which stops `VACUUM` cleaning up behind it. Run it on a read replica, in batches of accounts, or incrementally from a checkpoint.
 
 ## Configuration
 

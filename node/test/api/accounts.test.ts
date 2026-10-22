@@ -23,7 +23,7 @@ afterAll(testApp.close);
 const BALANCE = '/accounts/{account_id}/balance';
 const TRANSACTIONS = '/accounts/{account_id}/transactions';
 
-async function process(payment: Payment, decision: Decision): Promise<void> {
+async function processPayment(payment: Payment, decision: Decision): Promise<void> {
   await withTransaction(pool, (tx) => book(tx, payment.id));
   await withTransaction(pool, (tx) => startReview(tx, payment.id));
   await withTransaction(pool, (tx) => decide(tx, payment.id, decision));
@@ -94,7 +94,7 @@ describe('GET /accounts/:id/transactions', () => {
     const first = await createTestPayment(pool, account, 100n);
     await createTestPayment(pool, other, 999n);
     const second = await createTestPayment(pool, account, 200n);
-    await process(first, { outcome: 'approved' });
+    await processPayment(first, { outcome: 'approved' });
 
     const response = await getJson(app, `/accounts/${account.typeId}/transactions`, TRANSACTIONS);
     expect(response.statusCode).toBe(200);
@@ -145,8 +145,8 @@ describe('GET /accounts/:id/transactions', () => {
     const account = await createTestAccount(pool);
     const approved = await createTestPayment(pool, account);
     const rejected = await createTestPayment(pool, account);
-    await process(approved, { outcome: 'approved' });
-    await process(rejected, { outcome: 'rejected', reason: 'sanctions screening hit' });
+    await processPayment(approved, { outcome: 'approved' });
+    await processPayment(rejected, { outcome: 'rejected', reason: 'sanctions screening hit' });
 
     const response = await getJson(
       app,

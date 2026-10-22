@@ -9,6 +9,7 @@
   "scripts": {
     "start:api": "node --env-file-if-exists=.env src/api/main.ts",
     "dev:api": "node --env-file-if-exists=.env --watch src/api/main.ts",
+    "reconcile": "node --env-file-if-exists=.env scripts/reconcile.ts",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --type-aware",
     "format": "prettier --write .",

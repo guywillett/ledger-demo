@@ -38,13 +38,26 @@ export function createPool(options: { databaseUrl: string; logger: Logger }): pg
   return pool;
 }
 
+export type TransactionOptions = {
+  // Default: Postgres's READ COMMITTED (each statement sees the latest committed data).
+  // REPEATABLE READ: every statement in the transaction sees one snapshot, taken at its first
+  // statement, e.g. for a consistent multi-query report while writers carry on.
+  readonly isolation?: 'read committed' | 'repeatable read' | 'serializable';
+  // READ ONLY: any write in the transaction fails.
+  readonly readOnly?: boolean;
+};
+
 // Runs `fn` in a transaction on a single connection: COMMIT if it resolves,
 // ROLLBACK (and rethrow) if it throws.
-export async function withTransaction<T>(pool: pg.Pool, fn: (tx: Tx) => Promise<T>): Promise<T> {
+export async function withTransaction<T>(
+  pool: pg.Pool,
+  fn: (tx: Tx) => Promise<T>,
+  options: TransactionOptions = {},
+): Promise<T> {
   const client = await pool.connect();
   let broken: Error | undefined;
   try {
-    await client.query('BEGIN');
+    await client.query(beginStatement(options));
     // The one place a Tx is made: BEGIN has just been sent on this connection.
     const result = await fn(client as Tx);
     await client.query('COMMIT');
@@ -61,4 +74,13 @@ export async function withTransaction<T>(pool: pg.Pool, fn: (tx: Tx) => Promise<
   } finally {
     client.release(broken);
   }
+}
+
+// Built only from the fixed option values above, never from input.
+function beginStatement(options: TransactionOptions): string {
+  const parts = ['BEGIN'];
+  if (options.isolation !== undefined)
+    parts.push(`ISOLATION LEVEL ${options.isolation.toUpperCase()}`);
+  if (options.readOnly === true) parts.push('READ ONLY');
+  return parts.join(' ');
 }

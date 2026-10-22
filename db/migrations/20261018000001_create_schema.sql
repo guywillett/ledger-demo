@@ -33,6 +33,24 @@ CREATE TABLE account_balances (
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- Every account gets its zero balance row in the same statement that creates it. move()
+-- updates balance rows but never creates them, and GET balance treats a missing row as a
+-- missing account, so the row must exist. A trigger rather than application code, so it holds
+-- whoever inserts the account (seed migration, tests, psql). It doesn't stop the row being
+-- deleted later, or a superuser disabling triggers: reconciliation reports any account without
+-- a balance row.
+CREATE FUNCTION create_account_balance() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO account_balances (account_id) VALUES (NEW.id);
+    RETURN NULL; -- ignored for AFTER triggers
+END;
+$$;
+
+CREATE TRIGGER accounts_create_balance
+    AFTER INSERT ON accounts
+    FOR EACH ROW EXECUTE FUNCTION create_account_balance();
+
 CREATE TABLE incoming_payments (
     id                      uuid        PRIMARY KEY DEFAULT uuidv7()
         CHECK (uuid_extract_version(id) = 7),
@@ -167,4 +185,5 @@ DROP TABLE payment_status_history;
 DROP TABLE incoming_payments;
 DROP TABLE account_balances;
 DROP TABLE accounts;
+DROP FUNCTION create_account_balance();
 DROP FUNCTION reject_audit_log_change();

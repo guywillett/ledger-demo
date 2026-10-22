@@ -4,6 +4,7 @@ import { jetstreamManager } from '@nats-io/jetstream';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { Uuid } from '../../src/shared/ids.ts';
 import { fromTypeId } from '../../src/shared/ids.ts';
+import { reconcile } from '../../src/reconciliation/reconcile.ts';
 import { CONSUMERS, STREAMS } from '../../src/shared/nats.ts';
 import {
   balancesOf,
@@ -64,7 +65,11 @@ async function waitFor(
   }
 }
 
+// Every account the tests post to, for the final reconciliation.
+const accountsUsed: Uuid<'acct'>[] = [];
+
 async function post(account: TestAccount): Promise<Uuid<'pay'>> {
+  if (!accountsUsed.includes(account.id)) accountsUsed.push(account.id);
   const response = await postPayment(app, notification({ creditor_iban: account.iban }));
   expect(response.statusCode).toBe(201);
   return fromTypeId('pay', String(response.json.id));
@@ -222,5 +227,17 @@ describe('worker process', () => {
     for (const id of payments) {
       expect(await deliveriesFor(id)).toEqual([{ outcome: 'applied', delivery_attempt: 1 }]);
     }
+  });
+
+  // After everything above (a kill -9 mid-review, two workers sharing the consumer, reviews
+  // longer than ack_wait), the books must still agree: the "Done when" reconciliation check.
+  it('leaves the books consistent for every account it used', async () => {
+    const report = await reconcile(pool, { accountIds: accountsUsed, stuckAfterMs: 0 });
+    expect(report.accountsChecked).toBe(accountsUsed.length);
+    expect(report.differences).toEqual([]);
+    expect(report.mismatches).toEqual([]);
+    // Every payment finished: none left in a non-final status.
+    expect(report.stuck).toEqual([]);
+    expect(report.consistent).toBe(true);
   });
 });

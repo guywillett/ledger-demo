@@ -17,7 +17,8 @@ WHERE account_id = $1
 `;
 
 // undefined if there is no such account: every account gets its balance row when it is
-// created, so a missing row means a missing account.
+// created (a trigger on accounts, see the schema migration), so a missing row means a missing
+// account. Reconciliation reports any account whose row has gone missing anyway.
 export async function getBalance(
   db: Queryable,
   accountId: Uuid<'acct'>,

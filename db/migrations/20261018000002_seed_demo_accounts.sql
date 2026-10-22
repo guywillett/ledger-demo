@@ -8,20 +8,16 @@
 -- The IBANs are made up (bank code 12345, branch 00001) but valid: both the French RIB key
 -- and the IBAN mod-97 check digits are correct.
 -- alice and bob have provider account IDs; carol has none, as with some vIBAN setups.
+-- Each gets its zero balance row from the accounts_create_balance trigger.
 
 INSERT INTO accounts (id, name, iban, provider_account_id) VALUES
     ('01a14c4e-e000-7f4f-896e-f8f54adff3bd', 'alice', 'FR7612345000010000000000193', 'prov_acc_0001'),
     ('01a14c4e-e001-7331-bab2-75411dbbe55d', 'bob',   'FR7612345000010000000000290', 'prov_acc_0002'),
     ('01a14c4e-e002-71c0-a116-c28cf6a1c175', 'carol', 'FR7612345000010000000000387', NULL);
 
--- One balance row per account, at zero. move() updates these rows; it never creates them.
-INSERT INTO account_balances (account_id) VALUES
-    ('01a14c4e-e000-7f4f-896e-f8f54adff3bd'),
-    ('01a14c4e-e001-7331-bab2-75411dbbe55d'),
-    ('01a14c4e-e002-71c0-a116-c28cf6a1c175');
-
 -- migrate:down
 
+-- The balance rows first: they reference the accounts.
 DELETE FROM account_balances WHERE account_id IN (
     '01a14c4e-e000-7f4f-896e-f8f54adff3bd',
     '01a14c4e-e001-7331-bab2-75411dbbe55d',
