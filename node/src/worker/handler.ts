@@ -10,6 +10,7 @@ import { paymentCreatedV1Schema, type PaymentCreatedV1 } from '../shared/events.
 import { fromTypeId, toTypeId, type Uuid } from '../shared/ids.ts';
 import type { Logger } from '../shared/logger.ts';
 import { paymentExists } from '../payments/payments.ts';
+import type { DeliveredMessage } from '../consumer/messages.ts';
 import {
   finishDelivery,
   startDelivery,
@@ -23,24 +24,6 @@ import {
 //   Tx 3 decide (compliance) -> Tx 4 post the decision (posting)
 // Every step is a conditional transition, so a redelivery (after a crash, a timeout or a
 // duplicate publish) repeats only the steps that haven't happened yet: completed ones skip.
-
-// What the handler needs from a message. The JetStream message is adapted to this in the
-// worker's main loop; tests pass a fake. JetStream's ack methods are fire-and-forget.
-export type DeliveredMessage = {
-  readonly body: string;
-  // The Nats-Msg-Id header (transport only).
-  readonly natsMsgId: string | null;
-  // 1 for the first delivery, then 2, 3, ... for redeliveries.
-  readonly deliveryAttempt: number;
-  // Done: don't deliver again.
-  ack(): void;
-  // Invalid: never deliver again (redelivering can't help).
-  term(reason: string): void;
-  // Failed: deliver again after the delay.
-  nak(delayMs: number): void;
-  // Still working: reset the redelivery timer (ack_wait).
-  working(): void;
-};
 
 export type HandlerDeps = {
   readonly pool: pg.Pool;

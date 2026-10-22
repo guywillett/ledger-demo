@@ -9,11 +9,8 @@ import { createPool, withTransaction } from '../../src/shared/db.ts';
 import { newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { createLogger } from '../../src/shared/logger.ts';
 import { startDelivery } from '../../src/worker/deliveries.ts';
-import {
-  handleDelivery,
-  type DeliveredMessage,
-  type HandlerDeps,
-} from '../../src/worker/handler.ts';
+import type { DeliveredMessage } from '../../src/consumer/messages.ts';
+import { handleDelivery, type HandlerDeps } from '../../src/worker/handler.ts';
 import {
   balancesOf,
   capturingLogger,
