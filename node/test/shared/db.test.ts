@@ -29,7 +29,7 @@ describe('database', () => {
   // createTestAccount inserts only the account; the accounts_create_balance trigger adds the row.
   it('creates a zero balance row with every account', async () => {
     const account = await createTestAccount(pool);
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 0n });
+    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 0n, held: 0n });
   });
 
   it('returns bigint columns as BigInt', async () => {

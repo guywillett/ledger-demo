@@ -1,6 +1,8 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import {
+  LedgerInconsistencyError,
   move,
+  moveOnce,
   MovementConflictError,
   OverdraftError,
   type Movement,
@@ -14,7 +16,11 @@ import { balancesOf, createTestAccount, createTestPool, type TestAccount } from 
 const pool = createTestPool();
 afterAll(() => pool.end());
 
-function booking(account: TestAccount, overrides: Partial<Movement> = {}): Movement {
+// The payment branch of Movement: spreading overrides onto the whole union would lose the
+// pairing of referenceType with its ID and steps.
+type PaymentMovement = Extract<Movement, { referenceType: 'payment' }>;
+
+function booking(account: TestAccount, overrides: Partial<PaymentMovement> = {}): PaymentMovement {
   return {
     accountId: account.id,
     from: 'external',
@@ -41,7 +47,11 @@ describe('move', () => {
     const account = await createTestAccount(pool);
     const book = booking(account);
     expect(await withTransaction(pool, (tx) => move(tx, book))).toBe('applied');
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 1250n, available: 0n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 1250n,
+      available: 0n,
+      held: 0n,
+    });
 
     const credit = {
       ...book,
@@ -50,7 +60,11 @@ describe('move', () => {
       referenceStep: 'credit',
     } as const;
     expect(await withTransaction(pool, (tx) => move(tx, credit))).toBe('applied');
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
   });
 
   it('moves amounts beyond 2^53 exactly', async () => {
@@ -58,7 +72,11 @@ describe('move', () => {
     // 2^53 + 1: the smallest integer a JavaScript number can't hold.
     const amountMinor = 9007199254740993n;
     await withTransaction(pool, (tx) => move(tx, booking(account, { amountMinor })));
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: amountMinor, available: 0n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: amountMinor,
+      available: 0n,
+      held: 0n,
+    });
   });
 
   it('is a no-op when called twice with the same reference', async () => {
@@ -69,7 +87,11 @@ describe('move', () => {
     // Also within one transaction.
     expect(await withTransaction(pool, (tx) => move(tx, m))).toBe('duplicate');
 
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 1250n, available: 0n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 1250n,
+      available: 0n,
+      held: 0n,
+    });
     expect(await movementCount(m)).toBe(1);
   });
 
@@ -88,8 +110,12 @@ describe('move', () => {
         MovementConflictError,
       );
     }
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 1250n, available: 0n });
-    expect(await balancesOf(pool, other.id)).toEqual({ pendingIn: 0n, available: 0n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 1250n,
+      available: 0n,
+      held: 0n,
+    });
+    expect(await balancesOf(pool, other.id)).toEqual({ pendingIn: 0n, available: 0n, held: 0n });
   });
 
   it('applies exactly once when called concurrently with the same reference', async () => {
@@ -101,7 +127,11 @@ describe('move', () => {
 
     expect(outcomes.filter((o) => o === 'applied')).toHaveLength(1);
     expect(outcomes.filter((o) => o === 'duplicate')).toHaveLength(9);
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 1250n, available: 0n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 1250n,
+      available: 0n,
+      held: 0n,
+    });
     expect(await movementCount(m)).toBe(1);
   });
 
@@ -116,8 +146,76 @@ describe('move', () => {
       amountMinor: 1250n,
       cause: { code: '23514' }, // check_violation, kept as the cause
     });
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 0n });
+    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 0n, held: 0n });
     expect(await movementCount(m)).toBe(0);
+  });
+
+  it('moves money through the held bucket', async () => {
+    const account = await createTestAccount(pool);
+    const book = booking(account, { to: 'available' });
+    await withTransaction(pool, (tx) => move(tx, book));
+
+    const withdrawal = newUuid('wd');
+    const reserve = {
+      accountId: account.id,
+      from: 'available',
+      to: 'held',
+      amountMinor: 1000n,
+      referenceType: 'withdrawal',
+      referenceId: withdrawal,
+      referenceStep: 'hold',
+    } as const;
+    expect(await withTransaction(pool, (tx) => move(tx, reserve))).toBe('applied');
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 250n,
+      held: 1000n,
+    });
+
+    const leave = { ...reserve, from: 'held', to: 'external', referenceStep: 'execute' } as const;
+    expect(await withTransaction(pool, (tx) => move(tx, leave))).toBe('applied');
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 250n,
+      held: 0n,
+    });
+  });
+
+  it('reports overdrawing held as an OverdraftError on held', async () => {
+    const account = await createTestAccount(pool);
+    const attempt = withTransaction(pool, (tx) =>
+      move(tx, {
+        accountId: account.id,
+        from: 'held',
+        to: 'available',
+        amountMinor: 1n,
+        referenceType: 'withdrawal',
+        referenceId: newUuid('wd'),
+        referenceStep: 'release',
+      }),
+    );
+    await expect(attempt).rejects.toThrow(OverdraftError);
+    await expect(attempt).rejects.toMatchObject({ bucket: 'held', accountId: account.id });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 0n,
+      held: 0n,
+    });
+  });
+
+  it('moveOnce throws LedgerInconsistencyError on a duplicate, rolling back the transaction', async () => {
+    const account = await createTestAccount(pool);
+    const book = booking(account);
+    await withTransaction(pool, (tx) => moveOnce(tx, book));
+
+    const again = withTransaction(pool, (tx) => moveOnce(tx, book));
+    await expect(again).rejects.toThrow(LedgerInconsistencyError);
+    await expect(again).rejects.toThrow(
+      `payment ${book.referenceId}: its book movement already exists, but the payment's state ` +
+        "says that step hasn't happened yet",
+    );
+    expect(await movementCount(book)).toBe(1);
+    expect(await balancesOf(pool, account.id)).toMatchObject({ pendingIn: 1250n });
   });
 
   it('throws if the account has no balance row, recording nothing', async () => {

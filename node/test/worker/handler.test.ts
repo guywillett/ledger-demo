@@ -112,7 +112,11 @@ describe('handleDelivery', () => {
     expect(await handleDelivery(deps({ logger }), msg)).toBe('applied');
     expect(msg.calls).toEqual(['ack']);
     expect(await statusOf(pool, payment.id)).toBe('credited');
-    expect(await balancesOf(pool, payment.accountId)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, payment.accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(payment.id)).toEqual(['book', 'credit']);
     expect(await deliveriesOf(eventId)).toEqual([
       { outcome: 'applied', nats_msg_id: msg.natsMsgId, delivery_attempt: 1 },
@@ -131,7 +135,11 @@ describe('handleDelivery', () => {
     const msg = message(eventFor(payment).body);
     expect(await handleDelivery(deps({ decide: () => REJECT }), msg)).toBe('applied');
     expect(await statusOf(pool, payment.id)).toBe('returned');
-    expect(await balancesOf(pool, payment.accountId)).toEqual({ pendingIn: 0n, available: 0n });
+    expect(await balancesOf(pool, payment.accountId)).toEqual({
+      pendingIn: 0n,
+      available: 0n,
+      held: 0n,
+    });
     expect(await movementSteps(payment.id)).toEqual(['book', 'return']);
   });
 
@@ -148,7 +156,11 @@ describe('handleDelivery', () => {
       { outcome: 'applied', nats_msg_id: 'first', delivery_attempt: 1 },
       { outcome: 'duplicate', nats_msg_id: 'second', delivery_attempt: 1 },
     ]);
-    expect(await balancesOf(pool, payment.accountId)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, payment.accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(payment.id)).toEqual(['book', 'credit']);
   });
 
@@ -163,7 +175,11 @@ describe('handleDelivery', () => {
     ]);
 
     // Each did whatever steps it got to first; the money moved once.
-    expect(await balancesOf(pool, payment.accountId)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, payment.accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(payment.id)).toEqual(['book', 'credit']);
     expect(await historyOf(payment.id)).toEqual([
       'created',
@@ -184,7 +200,11 @@ describe('handleDelivery', () => {
     await withTransaction(pool, (tx) => book(tx, payment.id)); // Tx 1, then the crash
 
     expect(await handleDelivery(deps(), message(body, 'crashed', 2))).toBe('applied');
-    expect(await balancesOf(pool, payment.accountId)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, payment.accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(payment.id)).toEqual(['book', 'credit']);
     expect(await deliveriesOf(eventId)).toEqual([
       { outcome: 'in_progress', nats_msg_id: 'crashed', delivery_attempt: 1 },

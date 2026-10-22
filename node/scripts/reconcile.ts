@@ -14,13 +14,13 @@ import { createLogger } from '../src/shared/logger.ts';
 // Reconciles the ledger: node scripts/reconcile.ts [options] (npm run reconcile).
 //
 //   --account acct_…     only this account (repeatable); default all accounts
-//   --stuck-after <min>  report payments in a non-final status, and events unpublished, for
-//                        longer (default 10)
-//   --fail-on-stuck      exit 2 if any payment or event is stuck
+//   --stuck-after <min>  report payments and withdrawals in a non-final status, and events
+//                        unpublished, for longer (default 10)
+//   --fail-on-stuck      exit 2 if any payment, withdrawal or event is stuck
 //   --json               print the report as JSON instead of a table
 //
 // Exit codes: 0 consistent; 1 the books disagree (any difference or mismatch); 2 consistent
-// but stuck payments or events and --fail-on-stuck; 3 couldn't run (bad arguments, database down).
+// but stuck payments, withdrawals or events and --fail-on-stuck; 3 couldn't run (bad arguments, database down).
 // Reads DATABASE_URL (and LOG_LEVEL) like the services; no NATS needed.
 
 const EXIT = { consistent: 0, inconsistent: 1, stuck: 2, error: 3 } as const;
@@ -61,7 +61,10 @@ async function main(): Promise<number> {
     );
     console.log(values.json ? toJson(report) : toText(report, stuckAfterMinutes));
     if (!report.consistent) return EXIT.inconsistent;
-    const stuck = report.stuck.length > 0 || report.outbox.stuckUnpublished > 0;
+    const stuck =
+      report.stuck.length > 0 ||
+      report.stuckWithdrawals.length > 0 ||
+      report.outbox.stuckUnpublished > 0;
     if (values['fail-on-stuck'] && stuck) return EXIT.stuck;
     return EXIT.consistent;
   } finally {
@@ -98,6 +101,16 @@ function toJson(report: ReconcileReport): string {
         paymentId: toTypeId('pay', s.paymentId),
         accountId: toTypeId('acct', s.accountId),
       })),
+      withdrawalMismatches: report.withdrawalMismatches.map((m) => ({
+        ...m,
+        withdrawalId: toTypeId('wd', m.withdrawalId),
+        accountId: toTypeId('acct', m.accountId),
+      })),
+      stuckWithdrawals: report.stuckWithdrawals.map((s) => ({
+        ...s,
+        withdrawalId: toTypeId('wd', s.withdrawalId),
+        accountId: toTypeId('acct', s.accountId),
+      })),
     },
     (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value),
     2,
@@ -107,24 +120,25 @@ function toJson(report: ReconcileReport): string {
 function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
   const lines: string[] = [];
   lines.push(
-    `Checked ${report.accountsChecked} accounts, ${report.paymentsChecked} payments: ` +
+    `Checked ${report.accountsChecked} accounts, ${report.paymentsChecked} payments, ` +
+      `${report.withdrawalsChecked} withdrawals: ` +
       (report.consistent ? 'the books agree.' : 'THE BOOKS DISAGREE.'),
   );
 
   if (report.differences.length > 0) {
     lines.push(
       '',
-      'Accounts whose balance disagrees (minor units; balance / from payments / from movements):',
+      'Accounts whose balance disagrees (minor units; balance / from statuses / from movements):',
     );
     const show = (b: Buckets | null): string =>
-      b === null ? '(no balance row)' : `${b.pendingIn}/${b.available}`;
+      b === null ? '(no balance row)' : `${b.pendingIn}/${b.available}/${b.held}`;
     lines.push(
       table([
-        ['account', 'pending_in/available', 'payments say', 'movements say'],
+        ['account', 'pending_in/available/held', 'statuses say', 'movements say'],
         ...report.differences.map((d) => [
           toTypeId('acct', d.accountId),
           show(d.balance),
-          show(d.fromPayments),
+          show(d.fromStatuses),
           show(d.fromMovements),
         ]),
       ]),
@@ -148,6 +162,24 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
     );
   }
 
+  if (report.withdrawalMismatches.length > 0) {
+    lines.push('', 'Withdrawals whose movements don’t match their status:');
+    lines.push(
+      table([
+        ['withdrawal', 'status', 'movements', 'expected', ''],
+        ...report.withdrawalMismatches.map((m) => [
+          toTypeId('wd', m.withdrawalId),
+          m.status ?? '(no such withdrawal)',
+          m.steps.join(',') || '-',
+          m.expectedSteps.join(',') || '-',
+          [m.otherAccount ? 'posted to another account' : '', m.wrongAmount ? 'wrong amount' : '']
+            .filter((note) => note !== '')
+            .join('; '),
+        ]),
+      ]),
+    );
+  }
+
   lines.push(
     '',
     `Stuck (non-final for more than ${stuckAfterMinutes} min): ${report.stuck.length}`,
@@ -161,6 +193,24 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
           s.status,
           `${Math.round(s.ageSeconds / 60)} min`,
           s.event === null ? '' : EVENT_STATE[s.event],
+        ]),
+      ]),
+    );
+  }
+
+  lines.push(
+    '',
+    `Stuck withdrawals (held or submitted for more than ${stuckAfterMinutes} min): ` +
+      `${report.stuckWithdrawals.length}`,
+  );
+  if (report.stuckWithdrawals.length > 0) {
+    lines.push(
+      table([
+        ['withdrawal', 'status', 'for'],
+        ...report.stuckWithdrawals.map((s) => [
+          toTypeId('wd', s.withdrawalId),
+          s.status,
+          `${Math.round(s.ageSeconds / 60)} min`,
         ]),
       ]),
     );

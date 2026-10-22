@@ -4,7 +4,7 @@ Portfolio project: a small payment event-processing system (incoming payments, p
 
 ## Specs
 
-- Work is done in slices. The current slice spec is the source of truth: `docs/slices/slice-1-incoming-payments.md`.
+- Work is done in slices. The current slice spec is the source of truth: `docs/slices/slice-2-outbox-and-withdrawals.md`.
 - Design decisions live in the spec's *Decisions* section and in `docs/decisions/`. Don't contradict them silently: if something in a spec looks wrong or unworkable, stop and raise it.
 
 ## How we work
@@ -25,9 +25,9 @@ Portfolio project: a small payment event-processing system (incoming payments, p
 - **SQL:** raw parameterised SQL via `pg` (`$1`, `$2`), no ORM, no query builder. All SQL lives in the data-access layer, never in route handlers. Explicit typed row mapping.
 - **No check-then-act:** never `SELECT` to decide whether something has happened and then act. Use conditional `UPDATE … WHERE status = $expected`, `INSERT … ON CONFLICT DO NOTHING`, `rowCount` and `RETURNING`.
 - **Result vocabularies:** conditional transitions return `'applied' | 'skipped'` (skipped: not in the expected state); idempotent inserts return `'applied' | 'duplicate'` (duplicate: already recorded). Name new results the same way.
-- **Balances** change only through `ledger/move()`. The API never changes balances.
+- **Balances** change only through `ledger/move()`, called by the ledger's posting functions. The API calls a posting function only inside its own request transaction, and only when the response depends on the outcome (slice 2 decision 25: holding a withdrawal's funds); everything else is posted asynchronously (the worker).
 - **Transactions:** callers own transaction boundaries via `withTransaction`; data-access functions never `BEGIN`/`COMMIT`. A function whose statements must be atomic together takes a `Tx` (branded: only `withTransaction` creates one); a single-statement function takes a `Queryable` (pool or `Tx`). Never call `withTransaction` inside another (that opens a second, independent transaction), and never wait on the network (NATS, HTTP) inside one.
-- **IDs:** UUIDv7 in `uuid` columns; TypeIDs (`typeid-js`, prefixes `acct`, `pay`, `evt`, `mov`) outside the database. Convert only at boundaries. Never store IDs as text.
+- **IDs:** UUIDv7 in `uuid` columns; TypeIDs (`typeid-js`, prefixes `acct`, `pay`, `wd`, `evt`, `mov`) outside the database. Convert only at boundaries. Never store IDs as text.
 - **Money:** integer minor units: `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON (`"amount_minor": "1250"`). Never floats. Cast counts to `::int` in SQL. Any division goes through one helper with an explicit rounding mode. See `docs/decisions/0001-money-representation.md`.
 - **Validation:** Zod at every boundary (HTTP bodies, NATS messages).
 - **Migrations:** plain SQL in `db/migrations/`, run by dbmate. Language-neutral (shared with Go later).
@@ -36,5 +36,5 @@ Portfolio project: a small payment event-processing system (incoming payments, p
 
 ## Running
 
-- `docker compose up` starts Postgres, NATS (JetStream), migrations, API and worker.
+- `docker compose up` starts Postgres, NATS (JetStream), migrations, API, relay and worker.
 - Integration tests (Vitest) run against the compose services.

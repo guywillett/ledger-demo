@@ -4,7 +4,9 @@ import { decide, startReview } from '../../src/compliance/transitions.ts';
 import type { Decision } from '../../src/compliance/decision.ts';
 import { recordNotification } from '../../src/ingestion/notifications.ts';
 import { type Payment } from '../../src/payments/payments.ts';
+import { move } from '../../src/ledger/move.ts';
 import { book, postDecision } from '../../src/ledger/posting.ts';
+import { execute, markSubmitted, release } from '../../src/ledger/withdrawals.ts';
 import { markPublished } from '../../src/outbox/outbox.ts';
 import { reconcile, type ReconcileReport } from '../../src/reconciliation/reconcile.ts';
 import { withTransaction, type Tx } from '../../src/shared/db.ts';
@@ -13,6 +15,8 @@ import {
   createTestAccount,
   createTestPayment,
   createTestPool,
+  createTestWithdrawal,
+  fundTestAccount,
   newNetworkTransactionId,
   outboxRowsFor,
   type TestAccount,
@@ -100,9 +104,9 @@ describe('reconcile', () => {
     expect(report.differences).toEqual([
       {
         accountId: account.id,
-        balance: { pendingIn: 300n, available: 101n },
-        fromPayments: { pendingIn: 300n, available: 100n },
-        fromMovements: { pendingIn: 300n, available: 100n },
+        balance: { pendingIn: 300n, available: 101n, held: 0n },
+        fromStatuses: { pendingIn: 300n, available: 100n, held: 0n },
+        fromMovements: { pendingIn: 300n, available: 100n, held: 0n },
       },
     ]);
     expect(report.mismatches).toEqual([]);
@@ -120,8 +124,8 @@ describe('reconcile', () => {
       {
         accountId: account.id,
         balance: null,
-        fromPayments: { pendingIn: 300n, available: 100n },
-        fromMovements: { pendingIn: 300n, available: 100n },
+        fromStatuses: { pendingIn: 300n, available: 100n, held: 0n },
+        fromMovements: { pendingIn: 300n, available: 100n, held: 0n },
       },
     ]);
   });
@@ -134,7 +138,11 @@ describe('reconcile', () => {
     });
     expect(report.consistent).toBe(false);
     // Payments now say 300 is available; balance and movements still have it pending.
-    expect(report.differences[0]?.fromPayments).toEqual({ pendingIn: 0n, available: 400n });
+    expect(report.differences[0]?.fromStatuses).toEqual({
+      pendingIn: 0n,
+      available: 400n,
+      held: 0n,
+    });
     expect(report.mismatches).toEqual([
       expect.objectContaining({
         paymentId: booked.id,
@@ -167,7 +175,7 @@ describe('reconcile', () => {
     expect(report.differences[0]).toMatchObject({
       balance: { pendingIn: 350n },
       fromMovements: { pendingIn: 350n },
-      fromPayments: { pendingIn: 300n },
+      fromStatuses: { pendingIn: 300n },
     });
     expect(report.mismatches).toEqual([
       expect.objectContaining({ paymentId: ghost, status: null, steps: ['book'] }),
@@ -328,6 +336,134 @@ describe('reconcile', () => {
   });
 });
 
+// An account funded with 1000, with one withdrawal in each status: held 100, submitted 200,
+// executed 300, failed 50 (released). Available 1000 - 100 - 200 - 300 = 400; held 300.
+async function withdrawingAccount(): Promise<{
+  account: TestAccount;
+  ids: { held: Uuid<'wd'>; submitted: Uuid<'wd'>; executed: Uuid<'wd'>; failed: Uuid<'wd'> };
+}> {
+  const account = await createTestAccount(pool);
+  await fundTestAccount(pool, account, 1000n);
+  const held = await createTestWithdrawal(pool, account, 100n);
+  const submitted = await createTestWithdrawal(pool, account, 200n);
+  const executed = await createTestWithdrawal(pool, account, 300n);
+  const failed = await createTestWithdrawal(pool, account, 50n);
+  await withTransaction(pool, (tx) => markSubmitted(tx, submitted.id, 'tr_1'));
+  await withTransaction(pool, (tx) => markSubmitted(tx, executed.id, 'tr_2'));
+  await withTransaction(pool, (tx) => execute(tx, executed.id));
+  await withTransaction(pool, (tx) => release(tx, failed.id, 'refused'));
+  return {
+    account,
+    ids: { held: held.id, submitted: submitted.id, executed: executed.id, failed: failed.id },
+  };
+}
+
+describe('reconcile: withdrawals', () => {
+  it('finds the books consistent with a withdrawal in every status', async () => {
+    const { account } = await withdrawingAccount();
+    const report = await check(pool, account);
+    expect(report).toMatchObject({
+      accountsChecked: 1,
+      paymentsChecked: 1,
+      withdrawalsChecked: 4,
+      differences: [],
+      mismatches: [],
+      withdrawalMismatches: [],
+      consistent: true,
+    });
+    const balance = await pool.query<{ available: bigint; held: bigint }>(
+      'SELECT available, held FROM account_balances WHERE account_id = $1',
+      [account.id],
+    );
+    expect(balance.rows).toEqual([{ available: 400n, held: 300n }]);
+  });
+
+  it('detects a withdrawal whose status changed without its movement', async () => {
+    const { account, ids } = await withdrawingAccount();
+    const report = await inRolledBackTransaction(async (tx) => {
+      await tx.query(`UPDATE withdrawals SET status = 'executed' WHERE id = $1`, [ids.held]);
+      return check(tx, account);
+    });
+    expect(report.consistent).toBe(false);
+    expect(report.withdrawalMismatches).toEqual([
+      {
+        withdrawalId: ids.held,
+        accountId: account.id,
+        status: 'executed',
+        steps: ['hold'],
+        expectedSteps: ['execute', 'hold'],
+        otherAccount: false,
+        wrongAmount: false,
+      },
+    ]);
+    // The statuses now say 100 less is held (and spent), but the balance and movements still
+    // hold it.
+    expect(report.differences).toEqual([
+      expect.objectContaining({
+        balance: { pendingIn: 0n, available: 400n, held: 300n },
+        fromStatuses: { pendingIn: 0n, available: 400n, held: 200n },
+        fromMovements: { pendingIn: 0n, available: 400n, held: 300n },
+      }),
+    ]);
+  });
+
+  it('detects a held balance changed outside move()', async () => {
+    const { account } = await withdrawingAccount();
+    const report = await inRolledBackTransaction(async (tx) => {
+      await tx.query('UPDATE account_balances SET held = held + 1 WHERE account_id = $1', [
+        account.id,
+      ]);
+      return check(tx, account);
+    });
+    expect(report.consistent).toBe(false);
+    expect(report.withdrawalMismatches).toEqual([]);
+    expect(report.differences).toEqual([
+      {
+        accountId: account.id,
+        balance: { pendingIn: 0n, available: 400n, held: 301n },
+        fromStatuses: { pendingIn: 0n, available: 400n, held: 300n },
+        fromMovements: { pendingIn: 0n, available: 400n, held: 300n },
+      },
+    ]);
+  });
+
+  it('detects movements for a withdrawal that does not exist', async () => {
+    const { account } = await withdrawingAccount();
+    const ghost = newUuid('wd');
+    const report = await inRolledBackTransaction(async (tx) => {
+      await move(tx, {
+        accountId: account.id,
+        from: 'available',
+        to: 'held',
+        amountMinor: 10n,
+        referenceType: 'withdrawal',
+        referenceId: ghost,
+        referenceStep: 'hold',
+      });
+      return check(tx, account);
+    });
+    expect(report.consistent).toBe(false);
+    expect(report.withdrawalMismatches).toEqual([
+      expect.objectContaining({ withdrawalId: ghost, status: null, steps: ['hold'] }),
+    ]);
+  });
+
+  it('reports withdrawals stuck in held or submitted, and never settled ones', async () => {
+    const { account, ids } = await withdrawingAccount();
+    const report = await reconcile(pool, { accountIds: [account.id], stuckAfterMs: 0 });
+    const stuck = new Map(report.stuckWithdrawals.map((s) => [s.withdrawalId, s.status]));
+    expect(stuck).toEqual(
+      new Map([
+        [ids.held, 'held'],
+        [ids.submitted, 'submitted'],
+      ]),
+    );
+    // Stuck withdrawals don't make the books inconsistent.
+    expect(report.consistent).toBe(true);
+    expect((await check(pool, account)).stuckWithdrawals).toEqual([]);
+  });
+});
+
 describe('scripts/reconcile.ts', () => {
   function run(args: string[]): { status: number | null; stdout: string; stderr: string } {
     const result = spawnSync(process.execPath, ['scripts/reconcile.ts', ...args], {
@@ -366,6 +502,17 @@ describe('scripts/reconcile.ts', () => {
     const { account } = await busyAccount();
     exitCode(run(['--account', account.typeId, '--stuck-after', '0'])).toBe(0);
     exitCode(run(['--account', account.typeId, '--stuck-after', '0', '--fail-on-stuck'])).toBe(2);
+  });
+
+  it('exits 2 with --fail-on-stuck for a stuck withdrawal, and lists it', async () => {
+    const account = await createTestAccount(pool);
+    await fundTestAccount(pool, account, 1000n);
+    const withdrawal = await createTestWithdrawal(pool, account, 100n);
+    const result = run(['--account', account.typeId, '--stuck-after', '0', '--fail-on-stuck']);
+    exitCode(result).toBe(2);
+    expect(result.stdout).toContain('1 payments, 1 withdrawals: the books agree.');
+    expect(result.stdout).toContain('Stuck withdrawals (held or submitted for more than 0 min): 1');
+    expect(result.stdout).toContain(toTypeId('wd', withdrawal.id));
   });
 
   it('exits 2 with --fail-on-stuck for an unpublished event alone, saying which side stalled', async () => {

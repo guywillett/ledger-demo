@@ -4,7 +4,10 @@ import type pg from 'pg';
 import { buildApp } from '../src/api/app.ts';
 import type { App } from '../src/api/types.ts';
 import { loadSharedConfig, natsEnvSchema, parseEnv } from '../src/shared/config.ts';
+import { decide, startReview } from '../src/compliance/transitions.ts';
 import { recordNotification } from '../src/ingestion/notifications.ts';
+import { book, postDecision } from '../src/ledger/posting.ts';
+import { createWithdrawal } from '../src/ledger/withdrawals.ts';
 import { type Payment } from '../src/payments/payments.ts';
 import { relayBatch, type RelayDeps } from '../src/relay/relay.ts';
 import { createPool, withTransaction } from '../src/shared/db.ts';
@@ -20,6 +23,7 @@ import {
   type PublishResult,
 } from '../src/shared/nats.ts';
 import { createLogger, type Logger } from '../src/shared/logger.ts';
+import type { Withdrawal } from '../src/withdrawals/withdrawals.ts';
 import { expectEventMatchesContract, expectMatchesContract } from './contract.ts';
 
 // Seeded demo accounts (db/migrations/20261018000002_seed_demo_accounts.sql).
@@ -327,17 +331,56 @@ export async function createTestPayment(
   return result.payment;
 }
 
+// Puts `amountMinor` into the account's available balance the real way: a payment booked,
+// reviewed, approved and credited. So the account stays consistent for reconciliation.
+export async function fundTestAccount(
+  pool: pg.Pool,
+  account: TestAccount,
+  amountMinor: bigint,
+): Promise<Payment> {
+  const payment = await createTestPayment(pool, account, amountMinor);
+  await withTransaction(pool, (tx) => book(tx, payment.id));
+  await withTransaction(pool, (tx) => startReview(tx, payment.id));
+  await withTransaction(pool, (tx) => decide(tx, payment.id, { outcome: 'approved' }));
+  await withTransaction(pool, (tx) => postDecision(tx, payment.id));
+  return payment;
+}
+
+// A withdrawal in `held` with its funds reserved, as the API will create it (createWithdrawal in
+// its own transaction). Throws InsufficientFundsError (and stores nothing) if the account is
+// short.
+export async function createTestWithdrawal(
+  pool: pg.Pool,
+  account: TestAccount,
+  amountMinor: bigint,
+  idempotencyKey = randomUUID(),
+): Promise<Withdrawal> {
+  return withTransaction(pool, async (tx) => {
+    const withdrawal = await createWithdrawal(tx, {
+      accountId: account.id,
+      idempotencyKey,
+      amountMinor,
+      currency: 'EUR',
+      creditorIban: newTestIban(),
+      creditorName: 'Jane Doe',
+      remittanceInfo: 'test withdrawal',
+    });
+    if (withdrawal === undefined) throw new Error(`idempotency key ${idempotencyKey} is taken`);
+    return withdrawal;
+  });
+}
+
 export async function balancesOf(
   pool: pg.Pool,
   accountId: Uuid<'acct'>,
-): Promise<{ pendingIn: bigint; available: bigint }> {
-  const result = await pool.query<{ pending_in: bigint; available: bigint }>(
-    'SELECT pending_in, available FROM account_balances WHERE account_id = $1',
+): Promise<{ pendingIn: bigint; available: bigint; held: bigint }> {
+  const result = await pool.query<{ pending_in: bigint; available: bigint; held: bigint }>(
+    'SELECT pending_in, available, held FROM account_balances WHERE account_id = $1',
     [accountId],
   );
   const row = result.rows[0];
   if (row === undefined) throw new Error(`no balance row for ${accountId}`);
-  return { pendingIn: row.pending_in, available: row.available };
+  return { pendingIn: row.pending_in, available: row.available, held: row.held };
 }
 
 export async function statusOf(pool: pg.Pool, paymentId: Uuid<'pay'>): Promise<string> {

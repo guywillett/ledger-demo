@@ -165,7 +165,11 @@ describe('worker process', () => {
     const paymentId = await post(account);
 
     await waitFor(async () => (await statusOf(pool, paymentId)) === 'credited', 'credited');
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(paymentId)).toEqual(['book', 'credit']);
     expect(await deliveriesFor(paymentId)).toEqual([{ outcome: 'applied', delivery_attempt: 1 }]);
 
@@ -192,7 +196,11 @@ describe('worker process', () => {
     await startWorker({ REVIEW_DELAY_MS: '5000' });
     await waitFor(async () => (await statusOf(pool, paymentId)) === 'credited', 'credited');
 
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(paymentId)).toEqual(['book', 'credit']);
     expect(await deliveriesFor(paymentId)).toEqual([
       { outcome: 'in_progress', delivery_attempt: 1 },
@@ -212,7 +220,11 @@ describe('worker process', () => {
       return statuses.every((s) => s === 'credited');
     }, 'all credited');
 
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 6n * 1250n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 6n * 1250n,
+      held: 0n,
+    });
     for (const id of paymentIds) {
       expect(await movementSteps(id)).toEqual(['book', 'credit']);
       expect(await deliveriesFor(id)).toEqual([{ outcome: 'applied', delivery_attempt: 1 }]);

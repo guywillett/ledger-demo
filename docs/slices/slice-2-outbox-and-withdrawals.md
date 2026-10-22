@@ -92,20 +92,20 @@ The API no longer connects to NATS at all; the relay is the only publisher.
 |---|---|---|
 | id | uuid PK | TypeID prefix `wd` |
 | account_id | uuid FK | |
-| idempotency_key | text | the client's `Idempotency-Key`; `UNIQUE (account_id, idempotency_key)` |
+| idempotency_key | text | the client's `Idempotency-Key`, 1–255 characters; `UNIQUE (account_id, idempotency_key)` |
 | amount_minor | bigint | `CHECK (amount_minor > 0)` |
 | currency | text | `CHECK (currency = 'EUR')` |
 | creditor_iban | text | destination, normalised, format CHECK as elsewhere |
-| creditor_name | text | required by SEPA |
-| remittance_info | text null | the payment reference shown to the recipient |
+| creditor_name | text | required by SEPA; 1–70 characters (the SEPA Credit Transfer limit), from the SEPA basic character set (decision 32), not only spaces |
+| remittance_info | text null | the payment reference shown to the recipient; 1–140 characters (SEPA unstructured remittance information), from the SEPA basic character set; none is `NULL`, never `''`, so a repeat compares equal |
 | status | text | `held`, `submitted`, `executed`, `failed` |
-| failure_reason | text null | set with `failed` |
+| failure_reason | text null | set exactly when `failed`: `CHECK ((status = 'failed') = (failure_reason IS NOT NULL))` |
 | provider_transfer_id | text null | the provider's ID, once known |
 | created_at / updated_at | timestamptz | |
 
 `withdrawal_status_history`: as `payment_status_history` (append-only, triggers).
 
-**`balance_movements`**: `reference_type` adds `withdrawal`; `reference_step` adds `hold`, `execute`, `release`. Same unique reference, so every withdrawal movement is applied at most once whatever the caller does.
+**`balance_movements`**: `reference_type` adds `withdrawal`; `reference_step` adds `hold`, `execute`, `release`. The two are checked as a pair (one CHECK replaces the per-column ones): `payment` with `book | credit | return`, `withdrawal` with `hold | execute | release`. `move()`'s `Movement` type mirrors the pairing as a discriminated union, so a payment reference with a withdrawal step is a compile error. Same unique reference, so every withdrawal movement is applied at most once whatever the caller does. `outbox.entity_type` also allows `withdrawal`.
 
 Schema changes are **new migrations**: slice 1 is merged, so its migrations are no longer edited.
 
@@ -124,7 +124,7 @@ held ──► submitted ──► executed
 |---|---|---|---|
 | (create) → held | `available` → `held` | `hold` | API request (decision 25) |
 | held → submitted | none: the provider has accepted the instruction | — | submitter |
-| held \| submitted → executed | `held` → external | `execute` | transfer-update webhook |
+| held \| submitted → executed | `held` → external | `execute` | transfer-update webhook (stores the update's transfer ID if none was recorded at submission; an ID that differs from the stored one is a contradiction: `TransferIdMismatchError`, nothing changes) |
 | held \| submitted → failed | `held` → `available` (released) | `release` | submitter (permanent refusal) or webhook |
 
 **Why `held → executed` and `held → failed` exist:** the provider may send its result before the submitter has processed the response to its own request (the provider accepts, fires the webhook, then our HTTP response arrives, or our process crashed in between). The webhook must not wait for, or depend on, the submitter's bookkeeping. Whichever conditional transition commits first wins; the other finds the withdrawal already past `held` and skips. `executed` and `failed` are final, and a final status never changes (an update contradicting one is a conflict, below).
@@ -138,8 +138,10 @@ Event naming as slice 1: `withdrawal.<new status>`. Only `withdrawal.held` is pu
 Client-initiated. Header `Idempotency-Key` (required; 1–255 characters from `[A-Za-z0-9._:-]`, e.g. a UUID the client generates per intended withdrawal). Body: `{ amount_minor, currency: "EUR", creditor_iban, creditor_name, remittance_info? }` (amounts as digit strings, IBAN through `parseIban`, as slice 1).
 
 One transaction:
+Steps 1 and 2 are one function, `createWithdrawal()` (`ledger/withdrawals.ts`), the only way to create a withdrawal: a `held` withdrawal without its hold would let settling it spend other withdrawals' reserved funds (`held` is one bucket per account).
+
 1. Insert the withdrawal (`held`) and its history row: `INSERT … ON CONFLICT (account_id, idempotency_key) DO NOTHING RETURNING …`.
-2. If inserted: `hold()`: `move(available → held, step hold)`. An `OverdraftError` on `available` rolls the whole transaction back: nothing is stored, `422` with problem type `insufficient-funds`.
+2. If inserted: `hold()`: `move(available → held, step hold)`. On insufficient funds, `hold()` translates the `OverdraftError` on `available` into a thrown `InsufficientFundsError` (a business outcome, kept distinct from `OverdraftError`, which the worker treats as a bug). It throws rather than returning a result because Postgres aborts the transaction after the failed statement: the whole transaction rolls back, nothing is stored, and the API catches the error outside the transaction and answers `422` with problem type `insufficient-funds`.
 3. If inserted: the outbox row for `withdrawal.held`.
 4. If not inserted (the key exists): compare the stored withdrawal's details with the request (`amount_minor`, `currency`, `creditor_iban`, `creditor_name`, `remittance_info`), directly, as slice 1 decision 16: same → `200` with the withdrawal **in its current status**; different → `409` with `differing_fields`. The read only classifies; the insert already decided.
 
@@ -247,6 +249,7 @@ Also reported:
 Slice 1's gaps stand, except the commit-then-publish gap (closed by the outbox). New:
 - **Outbox growth:** published rows are kept; a pruning job (or partitioning by month) is the evolution.
 - **No backfill from slice 1:** the outbox migration creates no rows for existing payments. A slice 1 payment left in `created` (its publish failed) has no outbox row, and a duplicate notification no longer re-announces it, so it would stay there; reconciliation reports it as `missing`. A real upgrade from slice 1 would need a one-off backfill of `payment.created` rows for such payments, built by the application's event builder. Not done here: there is no slice 1 deployment, and the development database has none.
+- **Single scheme:** field validation (lengths, the SEPA basic character set) is SEPA-specific and partly enforced by database CHECKs. With several schemes (Faster Payments, SWIFT, …), the scheme becomes a routing decision and validation moves to per-scheme rules in code, with the database keeping only scheme-independent constraints.
 - **Relay latency:** idle polling adds up to the poll interval (≤ 1 s) per event; `LISTEN/NOTIFY` is the evolution.
 - **No compliance review of withdrawals** (decision 30); in reality outgoing payments are screened (sanctions, fraud) before submission.
 - **No polling of the provider:** a withdrawal whose webhook never arrives stays `submitted`; reconciliation lists it. Real systems poll the provider's transfer status after a timeout.
@@ -270,3 +273,4 @@ Numbering continues from slice 1.
 29. **Provider transfer updates are applied in the webhook's own transaction:** record the update, transition the withdrawal and post its movement together, then answer. Unlike an incoming payment there is no asynchronous decision left to make, so a worker hop would add latency and an event type for nothing. It is fast enough: a handful of single-row statements, milliseconds against a provider's webhook timeout of seconds, so well inside the window before the provider gives up and resends. If it fails (e.g. the database is unavailable), the `5xx` makes the provider resend, and the conditional transition makes the resend safe. The one thing that could slow it is contention on a hot account's balance row (see slice 1's *Scaling notes*), which the load-testing slice should measure. Extends decision 25's revision of slice 1 decision 7: the API calls a posting function in its request transaction here too. In production an event hop may well be preferred anyway, for separation of concerns: ingestion only records, posting applies, and the webhook endpoint stays independent of ledger load and contention. That is the pattern incoming payments already demonstrate, so repeating it here would show nothing new (scope principle).
 30. **No compliance review of withdrawals** in this slice. In reality there would be one: outgoing payments are screened (sanctions, fraud, unusual activity) before they are sent, and it would sit between `held` and `submitted` (`held → under_review → approved → submitted`, the funds already reserved), with rejection releasing the hold. It would repeat slice 1's pseudo review without demonstrating anything new (scope principle).
 31. **The fake provider is test infrastructure in the Node codebase:** `node/src/provider-sim/`, run by compose as `provider-sim` from the same image, with failure modes switched on by environment variables. It belongs to neither implementation, so the Go stack reuses it unchanged, as it reuses `scripts/demo.sh` and the reconcile service.
+32. **Outgoing text fields use the SEPA basic character set** (the EPC's basic Latin set: `a-z A-Z 0-9 / - ? : ( ) . , ' +` and space; extended sets exist only by national agreement, so they are not assumed). Requests outside it are rejected (`400` from step 3), never transliterated, so what the client sees is exactly what is sent. Enforced by CHECKs on `withdrawals.creditor_name` and `remittance_info`.
