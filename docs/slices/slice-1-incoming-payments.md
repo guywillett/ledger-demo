@@ -1,6 +1,6 @@
 # Slice 1 — Incoming payments with pseudo approval
 
-Status: agreed — ready to build
+Status: done (Node.js / TypeScript); every item under *Done when* is met
 Implementation: Node.js / TypeScript (Go to follow in a later slice)
 
 ## Goal
@@ -434,20 +434,20 @@ In production this would run on a schedule (alerting on a non-zero exit), after 
 
 ## Done when
 
-- [ ] `docker compose up` starts Postgres, NATS, migrations, API and worker from a clean clone
-- [ ] Same notification (same `network_transaction_id`) sent 5 times → one payment, `notification_count` = 5, balance changes once
-- [ ] 10 concurrent notifications with the same `network_transaction_id` → one payment
-- [ ] Same `network_transaction_id` with a different amount or `creditor_iban` → `409`, nothing changed
-- [ ] Notification for a valid IBAN that matches none of our accounts → `422`, nothing stored; invalid IBAN (bad checksum) → `400`
-- [ ] Same `payment.created` event published twice with different NATS message IDs → applied once, two delivery rows (`applied` + `duplicate`)
-- [ ] Same event processed by two concurrent consumers → applied once
-- [ ] Worker crashes after booking (Tx 1) and before the decision (Tx 3), message redelivered → `pending_in` credited once, payment completes
-- [ ] Worker crashes after the decision (Tx 3) and before posting it (Tx 4), message redelivered → the decision is not re-made; the recorded one is posted once
-- [ ] Calling `move()` twice with the same reference → second call is a no-op
-- [ ] Worker killed mid-processing and restarted → every payment ends `credited` or `returned`
-- [ ] Reconciliation reports zero difference (against payments and against movements) after all of the above
-- [ ] Integration tests cover the duplicate, concurrency, crash, `409` and unmatched-IBAN checks above
-- [ ] README: how to run, what it demonstrates, known gaps
+- [x] `docker compose up` starts Postgres, NATS, migrations, API and worker from a clean clone: checked with a fresh `git clone` as its own compose project (`up -d --build`, then `scripts/demo.sh`, `npm ci`, `npm test`, `npm run test:e2e`)
+- [x] Same notification (same `network_transaction_id`) sent 5 times → one payment, `notification_count` = 5, balance changes once: `test/api/payments.test.ts` ("records the same notification sent 5 times once"); `scripts/demo.sh` step 1
+- [x] 10 concurrent notifications with the same `network_transaction_id` → one payment: `test/api/payments.test.ts` ("records 10 concurrent identical notifications once"); `scripts/demo.sh` step 2
+- [x] Same `network_transaction_id` with a different amount or `creditor_iban` → `409`, nothing changed: `test/api/payments.test.ts` ("rejects a different amount with 409 and changes nothing", "rejects a different IBAN of ours with 409"); `scripts/demo.sh` step 3
+- [x] Notification for a valid IBAN that matches none of our accounts → `422`, nothing stored; invalid IBAN (bad checksum) → `400`: `test/api/payments.test.ts` ("answers 422 for a valid IBAN that is not ours, storing nothing", "answers 400 for a bad IBAN checksum"); `scripts/demo.sh` step 4
+- [x] Same `payment.created` event published twice with different NATS message IDs → applied once, two delivery rows (`applied` + `duplicate`): `test/worker/handler.test.ts` ("applies the same event once when delivered twice with different message IDs")
+- [x] Same event processed by two concurrent consumers → applied once: `test/worker/handler.test.ts` ("applies the same event once when two consumers process it concurrently"); `test/e2e/worker.e2e.ts` (two workers sharing the consumer)
+- [x] Worker crashes after booking (Tx 1) and before the decision (Tx 3), message redelivered → `pending_in` credited once, payment completes: `test/worker/handler.test.ts` ("completes after a crash between booking and the decision")
+- [x] Worker crashes after the decision (Tx 3) and before posting it (Tx 4), message redelivered → the decision is not re-made; the recorded one is posted once: `test/worker/handler.test.ts` ("posts the recorded decision after a crash between deciding and posting, never re-deciding")
+- [x] Calling `move()` twice with the same reference → second call is a no-op: `test/ledger/move.test.ts` ("is a no-op when called twice with the same reference", and concurrently)
+- [x] Worker killed mid-processing and restarted → every payment ends `credited` or `returned`: `test/e2e/worker.e2e.ts` ("completes a payment once after the worker is killed mid-review and restarted"); `scripts/demo.sh` step 5
+- [x] Reconciliation reports zero difference (against payments and against movements) after all of the above: `test/e2e/worker.e2e.ts` ("leaves the books consistent for every account it used"); `scripts/demo.sh` (reconciles the whole database, nothing stuck), on a fresh clone and on the development database
+- [x] Integration tests cover the duplicate, concurrency, crash, `409` and unmatched-IBAN checks above: as listed (`npm test`, `npm run test:e2e`)
+- [x] README: how to run, what it demonstrates, known gaps
 - (No tag for this slice: `v0.1-simple-ledger` is tagged once withdrawals are also in.)
 
 ## Scaling notes: hot accounts
