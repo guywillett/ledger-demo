@@ -1,0 +1,175 @@
+name: ledger-demo
+
+services:
+  postgres:
+    image: postgres:18.6-alpine3.24
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  nats:
+    image: nats:2.15.1-alpine
+    # -js enables JetStream; -sd is where it persists streams; -m exposes the monitoring port.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      # ?js-enabled-only=true makes /healthz fail unless JetStream is up.
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # NATS for the tests, like ledger_test for the database: test events never reach the
+  # development stream (or the compose worker). No volume: test streams needn't survive a
+  # restart.
+  nats-test:
+    image: nats:2.15.1-alpine
+    # -n names the server: the e2e tests check for this name before purging its stream.
+    command: ["-js", "-sd", "/data", "-m", "8222", "-n", "ledger-demo-test"]
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2.36.0
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      # Set as env vars rather than flags so they also apply to ad-hoc
+      # `docker compose run --rm migrate <command>` invocations.
+      DBMATE_WAIT: "true"
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes:
+      - ./db:/db
+    command: ["up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The same migrations against the test database (ledger_test), so tests never touch the
+  # development data. dbmate creates the database if it doesn't exist.
+  migrate-test:
+    image: ghcr.io/amacneil/dbmate:2.36.0
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger_test?sslmode=disable
+      DBMATE_WAIT: "true"
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes:
+      - ./db:/db
+    command: ["up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Applies the JetStream definitions in nats/ (streams and consumers) and exits, like migrate
+  # does for the schema (see nats/setup.sh).
+  nats-setup:
+    image: natsio/nats-box:0.20.0
+    environment:
+      NATS_URL: nats://nats:4222
+    volumes:
+      - ./nats:/nats:ro
+    entrypoint: ["/bin/sh", "/nats/setup.sh"]
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  # The same definitions on the test NATS.
+  nats-setup-test:
+    image: natsio/nats-box:0.20.0
+    environment:
+      NATS_URL: nats://nats-test:4222
+    volumes:
+      - ./nats:/nats:ro
+    entrypoint: ["/bin/sh", "/nats/setup.sh"]
+    depends_on:
+      nats-test:
+        condition: service_healthy
+
+  api:
+    build: ./node
+    # Named, and built the same way by the worker service: one image for both.
+    image: ledger-demo-node
+    # The API exits with a failing code if it can't start or loses NATS for good; restart it.
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      NATS_URL: nats://nats:4222
+      PORT: "3000"
+      LOG_LEVEL: info
+    # No healthcheck yet (no health endpoint; see Known gaps in the slice spec): nothing waits
+    # on this service.
+    # Host port 3000: stop this service (docker compose stop api) before running
+    # npm run dev:api on the host, which wants the same port.
+    ports:
+      - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats-setup:
+        condition: service_completed_successfully
+
+  # Books, reviews and posts payments (src/worker/). Several instances can run at once
+  # (docker compose up -d --scale worker=3): they share the durable consumer, and each
+  # message goes to one of them.
+  worker:
+    # The same image as the api (one Dockerfile for the Node processes), with another command.
+    build: ./node
+    image: ledger-demo-node
+    command: ["node", "src/worker/main.ts"]
+    # Exits with a failing code if it can't start or loses NATS for good; restart it.
+    restart: unless-stopped
+    # Graceful shutdown can take just over Docker's default 10 s: a waiting fetch is closed at
+    # once, then up to 5 s for in-flight messages (SHUTDOWN_GRACE_MS), up to 5 s to drain NATS,
+    # then closing the pool. After this, Docker sends SIGKILL (unfinished messages are
+    # redelivered either way).
+    stop_grace_period: 15s
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      NATS_URL: nats://nats:4222
+      REVIEW_DELAY_MS: "2000"
+      APPROVE_RATE: "0.8"
+      WORKER_CONCURRENCY: "10"
+      LOG_LEVEL: info
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats-setup:
+        condition: service_completed_successfully
+
+  # Reconciliation on demand: docker compose run --rm reconcile [options]. It only reads the
+  # shared database, so it checks whichever implementation wrote the data; scripts/demo.sh
+  # uses it rather than a script inside the worker image, which the Go worker won't have.
+  # The "tools" profile keeps it out of docker compose up.
+  reconcile:
+    build: ./node
+    image: ledger-demo-node
+    entrypoint: ["node", "scripts/reconcile.ts"]
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+    profiles: ["tools"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  natsdata:
