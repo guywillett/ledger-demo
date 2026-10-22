@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { maskIban, parseIban, type Iban } from '../src/shared/iban.ts';
+import { maskIban, parseIban, type Iban } from '../../src/shared/iban.ts';
 
 function reasonFor(input: string): string {
   const result = parseIban(input);

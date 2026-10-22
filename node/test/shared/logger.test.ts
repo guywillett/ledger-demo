@@ -1,6 +1,6 @@
 import { Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
-import { createLogger, stringifyBigInts } from '../src/shared/logger.ts';
+import { createLogger, stringifyBigInts } from '../../src/shared/logger.ts';
 
 describe('stringifyBigInts', () => {
   it('turns BigInt values into digit strings, including nested ones', () => {

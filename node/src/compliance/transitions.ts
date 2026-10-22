@@ -1,10 +1,10 @@
 import type { Tx } from '../shared/db.ts';
 import type { Uuid } from '../shared/ids.ts';
 import {
-  transitionStatus,
   type ComplianceTransition,
   type TransitionResult,
-} from '../shared/payment-status.ts';
+  transitionStatus,
+} from '../payments/status.ts';
 
 // Compliance: the transitions it owns. They record the review and its decision and never move
 // money; posting the decision (crediting or returning the funds) is the ledger's job

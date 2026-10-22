@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { paymentCreatedV1Schema } from '../src/shared/events.ts';
-import { expectEventMatchesContract } from './contract.ts';
+import { paymentCreatedV1Schema } from '../../src/shared/events.ts';
+import { expectEventMatchesContract } from '../contract.ts';
 
 // The Zod schema (what Node consumers use) and the hand-written JSON Schema in contracts/events/
 // (what Go will use) must agree. Each case must be accepted by both or rejected by both.

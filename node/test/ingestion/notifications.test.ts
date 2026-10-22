@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { recordNotification, type Notification } from '../src/ingestion/payments.ts';
-import { parseIban, type Iban } from '../src/shared/iban.ts';
-import { refusingDb } from './helpers.ts';
+import { type Notification, recordNotification } from '../../src/ingestion/notifications.ts';
+import { parseIban, type Iban } from '../../src/shared/iban.ts';
+import { refusingDb } from '../helpers.ts';
 
 // Unit tests for the classification after a refused notification. The inconsistent case can't
 // be produced against the real database without changing shared seed data, so these use a stub

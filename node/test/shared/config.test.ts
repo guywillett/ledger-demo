@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadSharedConfig } from '../src/shared/config.ts';
+import { loadSharedConfig } from '../../src/shared/config.ts';
 
 describe('loadSharedConfig', () => {
   it('parses a valid environment and defaults LOG_LEVEL', () => {

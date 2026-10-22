@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { decide, startReview, type Decision } from '../../src/compliance/transitions.ts';
-import type { Payment } from '../../src/ingestion/payments.ts';
+import type { Payment } from '../../src/payments/payments.ts';
 import { book, postDecision } from '../../src/ledger/posting.ts';
 import { withTransaction } from '../../src/shared/db.ts';
 import { newUuid, toTypeId } from '../../src/shared/ids.ts';

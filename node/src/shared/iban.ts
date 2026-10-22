@@ -11,7 +11,7 @@ export type IbanResult = { ok: true; iban: Iban } | { ok: false; reason: string 
 // Sources (fetched 2026-10-20):
 // - Lengths: https://www.iban.com/structure ("data updated on 8 May 2026"), a reproduction of
 //   the SWIFT IBAN Registry; swift.com refused automated access. Every length was cross-checked
-//   against that page's example IBAN (length and mod-97), see test/iban.test.ts.
+//   against that page's example IBAN (length and mod-97), see test/shared/iban.test.ts.
 // - Membership: NOT yet verified against the EPC's "List of SEPA Scheme Countries" (EPC409-09;
 //   europeanpaymentscouncil.eu refused automated access). In particular, check the recently
 //   admitted or pending members AL, MD, ME, MK and RS before relying on this list.

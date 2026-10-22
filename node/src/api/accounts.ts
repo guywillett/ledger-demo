@@ -1,8 +1,8 @@
-import { listPayments } from '../ingestion/payments.ts';
+import { listPayments } from '../payments/payments.ts';
 import { getBalance } from '../ledger/balances.ts';
 import type { Queryable } from '../shared/db.ts';
 import { toTypeId } from '../shared/ids.ts';
-import { statusHistories } from '../shared/payment-status.ts';
+import { statusHistories } from '../payments/status.ts';
 import { problems, sendProblem, validationErrors } from './problem.ts';
 import {
   accountParamsSchema,

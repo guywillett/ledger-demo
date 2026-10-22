@@ -1,6 +1,6 @@
 import type { Queryable } from '../shared/db.ts';
 import type { Uuid } from '../shared/ids.ts';
-import { parseStatus, type PaymentStatus } from '../shared/payment-status.ts';
+import { parseStatus, type PaymentStatus } from '../payments/status.ts';
 
 // Reconciliation: checks that the ledger's three views of the money agree.
 //   balances  (account_balances)  the current figures, a cache only move() changes

@@ -1,10 +1,10 @@
 import type { Tx } from '../shared/db.ts';
 import type { Uuid } from '../shared/ids.ts';
 import {
-  transitionStatus,
   type PostingTransition,
   type TransitionResult,
-} from '../shared/payment-status.ts';
+  transitionStatus,
+} from '../payments/status.ts';
 import { move, type Bucket, type ReferenceStep } from './move.ts';
 
 // Posting: the transitions that move money. Each one changes the payment's status and posts

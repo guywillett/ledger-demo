@@ -7,9 +7,10 @@ import {
   type TypeIdString,
   type Uuid,
 } from '../shared/ids.ts';
-import type { Notification, Payment } from '../ingestion/payments.ts';
+import type { Notification } from '../ingestion/notifications.ts';
+import type { Payment } from '../payments/payments.ts';
 import type { Balance } from '../ledger/balances.ts';
-import type { PaymentStatus, StatusChange } from '../shared/payment-status.ts';
+import type { PaymentStatus, StatusChange } from '../payments/status.ts';
 
 const INT8_MAX = 9223372036854775807n;
 

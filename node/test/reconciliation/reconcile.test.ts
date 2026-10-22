@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { afterAll, describe, expect, it } from 'vitest';
 import { decide, startReview, type Decision } from '../../src/compliance/transitions.ts';
-import { recordNotification, type Payment } from '../../src/ingestion/payments.ts';
+import { recordNotification } from '../../src/ingestion/notifications.ts';
+import { type Payment } from '../../src/payments/payments.ts';
 import { book, postDecision } from '../../src/ledger/posting.ts';
 import { reconcile, type ReconcileReport } from '../../src/reconciliation/reconcile.ts';
 import { withTransaction, type Tx } from '../../src/shared/db.ts';

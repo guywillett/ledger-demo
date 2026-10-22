@@ -1,7 +1,7 @@
 import { STATUS_CODES } from 'node:http';
 import type { FastifyReply } from 'fastify';
 import type { z } from 'zod';
-import type { ComparedField } from '../ingestion/payments.ts';
+import type { ComparedField } from '../ingestion/notifications.ts';
 
 // RFC 9457 problem details. `type` identifies the kind of problem: a URN for our own types
 // (an identifier, not a URL that pretends to resolve), or "about:blank" for plain HTTP errors,

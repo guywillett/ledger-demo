@@ -10,7 +10,7 @@ import {
 } from '../../src/ledger/posting.ts';
 import { withTransaction, type Tx } from '../../src/shared/db.ts';
 import { newUuid, type Uuid } from '../../src/shared/ids.ts';
-import { transitionStatus } from '../../src/shared/payment-status.ts';
+import { transitionStatus } from '../../src/payments/status.ts';
 import {
   balancesOf,
   createTestAccount,

@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { loadSharedConfig } from '../src/shared/config.ts';
-import { createPool, withTransaction, type Tx } from '../src/shared/db.ts';
-import { createLogger } from '../src/shared/logger.ts';
-import { balancesOf, createTestAccount } from './helpers.ts';
+import { loadSharedConfig } from '../../src/shared/config.ts';
+import { createPool, withTransaction, type Tx } from '../../src/shared/db.ts';
+import { createLogger } from '../../src/shared/logger.ts';
+import { balancesOf, createTestAccount } from '../helpers.ts';
 
 // Runs against the compose Postgres (docker compose up -d).
 const config = loadSharedConfig();

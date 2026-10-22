@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fromTypeId, newUuid, toTypeId, type Uuid } from '../src/shared/ids.ts';
+import { fromTypeId, newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 
 describe('ids', () => {
   it('generates UUIDv7', () => {

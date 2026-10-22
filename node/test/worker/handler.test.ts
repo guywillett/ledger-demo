@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { decideRandomly } from '../../src/compliance/decision.ts';
 import { decide, startReview, type Decision } from '../../src/compliance/transitions.ts';
 import { paymentCreatedEvent } from '../../src/ingestion/events.ts';
-import type { Payment } from '../../src/ingestion/payments.ts';
+import type { Payment } from '../../src/payments/payments.ts';
 import { move } from '../../src/ledger/move.ts';
 import { book } from '../../src/ledger/posting.ts';
 import { createPool, withTransaction } from '../../src/shared/db.ts';

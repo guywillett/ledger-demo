@@ -4,7 +4,8 @@ import {
   type PaymentEvents,
   type PublishedEvent,
 } from '../ingestion/events.ts';
-import { recordNotification, type Payment } from '../ingestion/payments.ts';
+import { recordNotification } from '../ingestion/notifications.ts';
+import { type Payment } from '../payments/payments.ts';
 import type { Queryable } from '../shared/db.ts';
 import { maskIban } from '../shared/iban.ts';
 import { toTypeId } from '../shared/ids.ts';

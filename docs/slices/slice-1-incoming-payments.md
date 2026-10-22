@@ -52,15 +52,21 @@ ledger-demo/
 │   ├── openapi.yaml
 │   └── events/payment.created.v1.json
 ├── db/migrations/
+├── nats/
+│   ├── streams/          # JetStream stream definitions
+│   ├── consumers/        # durable consumer definitions, per stream
+│   └── setup.sh          # applies them (the nats-setup compose service)
 ├── node/
 │   ├── package.json
 │   ├── src/
-│   │   ├── api/          # Fastify app
-│   │   ├── worker/       # consumer: wires compliance decision to ledger effects
-│   │   ├── compliance/   # decides approve/reject and owns the review transitions — knows nothing about balances
-│   │   ├── ingestion/    # records provider notifications; maps provider identifiers (IBAN) to our accounts
-│   │   ├── ledger/       # posting transitions + move() — the only code that touches balances
-│   │   └── shared/       # config, db pool, nats client, logging
+│   │   ├── api/            # Fastify app
+│   │   ├── worker/         # consumer: wires compliance decision to ledger effects
+│   │   ├── payments/       # the payment entity: lifecycle, status transitions, reads
+│   │   ├── ingestion/      # the provider-facing edge: records notifications, maps provider identifiers (IBAN) to our accounts, announces new payments
+│   │   ├── compliance/     # decides approve/reject and owns the review transitions — knows nothing about balances
+│   │   ├── ledger/         # posting transitions + move() — the only code that touches balances
+│   │   ├── reconciliation/ # checks that balances, movements and payment statuses agree
+│   │   └── shared/         # infrastructure (config, db, nats, logging) and shared value types (ids, iban, event contracts)
 │   ├── scripts/reconcile.ts
 │   └── test/
 └── docs/
@@ -242,7 +248,7 @@ move(tx, { accountId, from, to, amountMinor, referenceType, referenceId, referen
 2. If no row was inserted → read the existing movement: if its account, buckets or amount differ, throw (the reference is being reused for something else: a bug, not a retry); otherwise return `'duplicate'`; balances untouched.
 3. Otherwise update the `account_balances` columns for the non-external side(s) in one fixed statement (`SET pending_in = pending_in + $2, available = available + $3`, the changes computed per bucket) and return `'applied'`. The `CHECK (… >= 0)` constraints reject an overdraft, reported as an `OverdraftError` naming the account and bucket (the database error kept as its `cause`), and a missing balance row is an error.
 
-The transitions are split by owner, each a conditional status update plus its history row in the caller's transaction: `ledger/posting.ts` has `book`, `credit`, `returnToSender` (each also calls `move()`) and `postDecision` (tries `credit`, then `returnToSender`); `compliance/transitions.ts` has `startReview` and `decide`. Each returns `'applied'` or `'skipped'` (already done, or the payment is in another state). The legal transitions are a TypeScript union grouped by owner (`PostingTransition`, `ComplianceTransition` in `shared/payment-status.ts`), and `transitionStatus` accepts only those: an illegal pair such as `credited → created` does not compile, and a `@ts-expect-error` test proves it.
+The transitions are split by owner, each a conditional status update plus its history row in the caller's transaction: `ledger/posting.ts` has `book`, `credit`, `returnToSender` (each also calls `move()`) and `postDecision` (tries `credit`, then `returnToSender`); `compliance/transitions.ts` has `startReview` and `decide`. Each returns `'applied'` or `'skipped'` (already done, or the payment is in another state). The legal transitions are a TypeScript union grouped by owner (`PostingTransition`, `ComplianceTransition` in `payments/status.ts`), and `transitionStatus` accepts only those: an illegal pair such as `credited → created` does not compile, and a `@ts-expect-error` test proves it.
 
 Nothing else may update balances. Because the guard lives in the ledger, `move()` is safe whatever the caller does — which is what lets compliance and posting become separate services later without relying on each other's state. If a transition succeeds but `move()` reports a duplicate, something is inconsistent: log an error and roll back.
 

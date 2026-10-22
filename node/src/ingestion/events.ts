@@ -1,7 +1,7 @@
 import { SUBJECTS, type PaymentCreatedV1Wire } from '../shared/events.ts';
 import { newUuid, toTypeId, type TypeIdString } from '../shared/ids.ts';
 import type { EventPublisher, PublishResult } from '../shared/nats.ts';
-import type { Payment } from './payments.ts';
+import type { Payment } from '../payments/payments.ts';
 
 // The events ingestion produces. Only payment.created in slice 1.
 

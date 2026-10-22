@@ -1,5 +1,5 @@
-import type { Queryable, Tx } from './db.ts';
-import type { Uuid } from './ids.ts';
+import type { Queryable, Tx } from '../shared/db.ts';
+import type { Uuid } from '../shared/ids.ts';
 
 // The payment lifecycle, shared by the modules that own its transitions:
 //   created -> received -> under_review -> approved -> credited
@@ -83,15 +83,6 @@ export async function transitionStatus(
   if (row === undefined) return undefined;
   await tx.query(HISTORY_SQL, [t.paymentId, t.from, t.to, t.reason ?? null]);
   return { accountId: row.account_id as Uuid<'acct'>, amountMinor: row.amount_minor };
-}
-
-const EXISTS_SQL = 'SELECT 1 FROM incoming_payments WHERE id = $1';
-
-// For classifying an outcome after the fact (e.g. an event whose transitions all skipped:
-// already processed, or a payment that doesn't exist). Never used to decide whether to act.
-export async function paymentExists(db: Queryable, paymentId: Uuid<'pay'>): Promise<boolean> {
-  const result = await db.query(EXISTS_SQL, [paymentId]);
-  return result.rowCount === 1;
 }
 
 // One row of a payment's status history.

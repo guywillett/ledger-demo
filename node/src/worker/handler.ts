@@ -7,7 +7,7 @@ import { withTransaction } from '../shared/db.ts';
 import { paymentCreatedV1Schema, type PaymentCreatedV1 } from '../shared/events.ts';
 import { fromTypeId, toTypeId, type Uuid } from '../shared/ids.ts';
 import type { Logger } from '../shared/logger.ts';
-import { paymentExists } from '../shared/payment-status.ts';
+import { paymentExists } from '../payments/payments.ts';
 import {
   finishDelivery,
   startDelivery,
