@@ -158,6 +158,143 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /accounts/{account_id}/withdrawals:
+    post:
+      summary: Request a withdrawal (a SEPA transfer out of the account)
+      description: |
+        Holds the funds at once, in the request's own transaction: 201 means accepted, with the
+        amount moved from available to held; 422 means refused for insufficient funds, with
+        nothing stored. Idempotent on (account, Idempotency-Key): repeating a request with the
+        same key and the same details returns the withdrawal in its current status (200); the
+        same key with other details is a 409. Only a successful request takes a key: after a
+        400, 404, 422 or 5xx the same key can be used again.
+
+        The body is strict: unknown fields are rejected (unlike the provider webhook POST
+        /payments, which ignores them). creditor_name and remittance_info are trimmed of
+        leading and trailing whitespace and must use the SEPA basic character set (letters,
+        digits, spaces and / - ? : ( ) . , ' +); text outside it is rejected, never
+        transliterated.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Chosen by the client, one per intended withdrawal (e.g. a UUID).
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._:-]{1,255}$'
+        - name: x-request-id
+          in: header
+          required: false
+          description: Reused as the request ID if it matches the pattern; otherwise one is generated.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WithdrawalRequest'
+            example:
+              amount_minor: '2500'
+              currency: EUR
+              creditor_iban: DE75512108001245126199
+              creditor_name: Jane Doe
+              remittance_info: Rent October
+      responses:
+        '201':
+          description: Withdrawal created, funds held (status held)
+          headers:
+            location:
+              description: The withdrawal's URL, /withdrawals/{withdrawal_id}
+              schema:
+                type: string
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Withdrawal'
+        '200':
+          description: A repeat of an earlier request (same key and details); the withdrawal in its current status
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Withdrawal'
+        '400':
+          description: Invalid Idempotency-Key, account_id or body (including an unknown field)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such account
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: The Idempotency-Key was used for a withdrawal with other details
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/IdempotencyKeyConflictProblem'
+        '415':
+          description: Unsupported content type
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Insufficient available funds; nothing stored
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure; nothing stored
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /withdrawals/{withdrawal_id}:
+    get:
+      summary: A withdrawal in its current status
+      parameters:
+        - name: withdrawal_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        - name: include
+          in: query
+          required: false
+          description: '`history` adds the withdrawal''s status history.'
+          schema:
+            const: history
+      responses:
+        '200':
+          description: The withdrawal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Withdrawal'
+        '400':
+          description: withdrawal_id is not a wd_ ID, or an invalid query parameter
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such withdrawal
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 components:
   parameters:
     AccountId:
@@ -305,12 +442,15 @@ components:
     Balance:
       type: object
       additionalProperties: false
-      required: [pending_in, available, currency]
+      required: [pending_in, available, held, currency]
       properties:
         pending_in:
           description: Booked but not yet credited (under review, or decided and not yet posted).
           $ref: '#/components/schemas/Money'
         available:
+          $ref: '#/components/schemas/Money'
+        held:
+          description: Reserved for withdrawals in flight (held or submitted, not yet settled).
           $ref: '#/components/schemas/Money'
         currency:
           const: EUR
@@ -322,6 +462,111 @@ components:
     PaymentStatus:
       type: string
       enum: [created, received, under_review, approved, rejected, credited, returned]
+    SepaText:
+      description: |
+        Trimmed of leading and trailing whitespace, then letters, digits, spaces and
+        / - ? : ( ) . , ' + only (the SEPA basic character set).
+      type: string
+      pattern: '^\s*[A-Za-z0-9/?:().,''+ -]+\s*$'
+    WithdrawalRequest:
+      type: object
+      description: Unknown fields are rejected.
+      additionalProperties: false
+      required: [amount_minor, currency, creditor_iban, creditor_name]
+      properties:
+        amount_minor:
+          $ref: '#/components/schemas/AmountMinor'
+        currency:
+          const: EUR
+        creditor_iban:
+          type: string
+          description: The destination, a SEPA IBAN; spaces and lower case are accepted and normalised.
+          maxLength: 64
+        creditor_name:
+          description: Required; at most 70 characters after trimming, not blank.
+          $ref: '#/components/schemas/SepaText'
+        remittance_info:
+          description: |
+            Optional reference shown to the recipient, at most 140 characters after trimming.
+            Absent, null, empty or only whitespace all mean none (null in the response).
+          type: [string, 'null']
+    Withdrawal:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - account_id
+        - idempotency_key
+        - amount_minor
+        - currency
+        - creditor_iban
+        - creditor_name
+        - remittance_info
+        - status
+        - failure_reason
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          pattern: '^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        account_id:
+          type: string
+          pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        idempotency_key:
+          type: string
+        amount_minor:
+          $ref: '#/components/schemas/AmountMinor'
+        currency:
+          const: EUR
+        creditor_iban:
+          type: string
+          description: Normalised (no spaces, upper case).
+          pattern: '^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$'
+        creditor_name:
+          type: string
+          minLength: 1
+          maxLength: 70
+        remittance_info:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 140
+        status:
+          $ref: '#/components/schemas/WithdrawalStatus'
+        failure_reason:
+          description: Set when the withdrawal failed (status failed); null otherwise.
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        history:
+          description: Present with include=history. Oldest change first.
+          type: array
+          items:
+            $ref: '#/components/schemas/WithdrawalStatusChange'
+    WithdrawalStatus:
+      type: string
+      enum: [held, submitted, executed, failed]
+    WithdrawalStatusChange:
+      type: object
+      additionalProperties: false
+      required: [from_status, to_status, reason, at]
+      properties:
+        from_status:
+          description: null for the first entry (the withdrawal was created).
+          oneOf:
+            - $ref: '#/components/schemas/WithdrawalStatus'
+            - type: 'null'
+        to_status:
+          $ref: '#/components/schemas/WithdrawalStatus'
+        reason:
+          type: [string, 'null']
+        at:
+          type: string
+          format: date-time
     Problem:
       type: object
       description: RFC 9457 problem details.
@@ -338,7 +583,7 @@ components:
           type: string
         errors:
           type: array
-          description: For invalid notifications, one entry per problem found.
+          description: For invalid notifications and requests, one entry per problem found.
           items:
             type: object
             additionalProperties: false
@@ -361,3 +606,16 @@ components:
               items:
                 type: string
                 enum: [creditor_iban, amount_minor, currency]
+    IdempotencyKeyConflictProblem:
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          required: [differing_fields]
+          properties:
+            differing_fields:
+              type: array
+              description: Names of the stored fields that differ (never their values).
+              minItems: 1
+              items:
+                type: string
+                enum: [amount_minor, currency, creditor_iban, creditor_name, remittance_info]

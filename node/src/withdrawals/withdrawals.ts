@@ -61,6 +61,28 @@ function withdrawalFromRow(row: WithdrawalRow): Withdrawal {
   };
 }
 
+// The withdrawal's account doesn't exist: the insert's foreign key refused it (no existence
+// read before the insert). Thrown, like InsufficientFundsError, because the failed statement has
+// aborted the transaction; the caller handles it after the rollback (the API answers 404).
+export class AccountNotFoundError extends Error {
+  readonly accountId: Uuid<'acct'>;
+
+  constructor(accountId: Uuid<'acct'>, cause: unknown) {
+    super(`account ${accountId} does not exist`, { cause });
+    this.name = 'AccountNotFoundError';
+    this.accountId = accountId;
+  }
+}
+
+// A foreign_key_violation (SQLSTATE 23503) on the withdrawal's account becomes an
+// AccountNotFoundError; anything else is returned unchanged, to be rethrown as it was.
+function asAccountNotFound(err: unknown, accountId: Uuid<'acct'>): unknown {
+  if (typeof err !== 'object' || err === null) return err;
+  if (!('code' in err) || err.code !== '23503') return err;
+  if (!('constraint' in err) || err.constraint !== 'withdrawals_account_id_fkey') return err;
+  return new AccountNotFoundError(accountId, err);
+}
+
 export type NewWithdrawal = {
   readonly accountId: Uuid<'acct'>;
   readonly idempotencyKey: string;
@@ -96,24 +118,44 @@ SELECT * FROM inserted
 // also holds the funds in the same transaction. A `held` withdrawal is only valid together with
 // its hold; inserted alone, it would have nothing reserved.
 //
+// Throws AccountNotFoundError if the account doesn't exist (the foreign key decides).
+//
 // Concurrency: if another transaction is inserting the same key, ON CONFLICT waits for it; if it
 // commits, this insert does nothing (undefined); if it rolls back, this one inserts.
 export async function insertWithdrawal(tx: Tx, w: NewWithdrawal): Promise<Withdrawal | undefined> {
-  const result = await tx.query<WithdrawalRow>(INSERT_SQL, [
-    newUuid('wd'),
-    w.accountId,
-    w.idempotencyKey,
-    w.amountMinor,
-    w.currency,
-    w.creditorIban,
-    w.creditorName,
-    w.remittanceInfo,
-  ]);
+  const result = await tx
+    .query<WithdrawalRow>(INSERT_SQL, [
+      newUuid('wd'),
+      w.accountId,
+      w.idempotencyKey,
+      w.amountMinor,
+      w.currency,
+      w.creditorIban,
+      w.creditorName,
+      w.remittanceInfo,
+    ])
+    .catch((err: unknown) => {
+      throw asAccountNotFound(err, w.accountId);
+    });
   const row = result.rows[0];
   return row === undefined ? undefined : withdrawalFromRow(row);
 }
 
 const GET_SQL = 'SELECT * FROM withdrawals WHERE id = $1';
+
+const BY_KEY_SQL = 'SELECT * FROM withdrawals WHERE account_id = $1 AND idempotency_key = $2';
+
+// The withdrawal holding an account's idempotency key. For classifying a request whose insert
+// found the key taken; never used to decide whether to insert.
+export async function getWithdrawalByKey(
+  db: Queryable,
+  accountId: Uuid<'acct'>,
+  idempotencyKey: string,
+): Promise<Withdrawal | undefined> {
+  const result = await db.query<WithdrawalRow>(BY_KEY_SQL, [accountId, idempotencyKey]);
+  const row = result.rows[0];
+  return row === undefined ? undefined : withdrawalFromRow(row);
+}
 
 export async function getWithdrawal(
   db: Queryable,

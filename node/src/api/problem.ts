@@ -2,6 +2,7 @@ import { STATUS_CODES } from 'node:http';
 import type { FastifyReply } from 'fastify';
 import type { z } from 'zod';
 import type { ComparedField } from '../ingestion/notifications.ts';
+import type { ComparedWithdrawalField } from '../withdrawals/requests.ts';
 
 // RFC 9457 problem details. `type` identifies the kind of problem: a URN for our own types
 // (an identifier, not a URL that pretends to resolve), or "about:blank" for plain HTTP errors,
@@ -55,6 +56,28 @@ export const problems = {
     type: 'urn:ledger-demo:problem:account-not-found',
     title: 'Account not found',
     status: 404,
+  }),
+  withdrawalNotFound: () => ({
+    type: 'urn:ledger-demo:problem:withdrawal-not-found',
+    title: 'Withdrawal not found',
+    status: 404,
+  }),
+  insufficientFunds: () => ({
+    type: 'urn:ledger-demo:problem:insufficient-funds',
+    title: 'Insufficient funds',
+    status: 422,
+    detail:
+      'The available balance does not cover the withdrawal. Nothing was stored, so the same ' +
+      'Idempotency-Key can be used again.',
+  }),
+  idempotencyKeyConflict: (differingFields: readonly ComparedWithdrawalField[]) => ({
+    type: 'urn:ledger-demo:problem:idempotency-key-conflict',
+    title: 'Idempotency key reused with different details',
+    status: 409,
+    detail:
+      'This account already has a withdrawal with this Idempotency-Key and different details. ' +
+      'Use a new key for a new withdrawal.',
+    differing_fields: differingFields,
   }),
   // A plain HTTP error (Fastify's own 4xx, unknown routes, unexpected 500s).
   http: (status: number, detail?: string) => ({

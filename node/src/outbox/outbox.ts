@@ -5,32 +5,33 @@ import type { Uuid } from '../shared/ids.ts';
 // in the same transaction as the state change they announce, and the relay (src/relay/)
 // publishes them. Nothing else publishes events.
 
-export type EntityType = 'payment';
+// What an event is about. A discriminated union, like move()'s MovementReference: entityType
+// decides which entity's UUID entityId is, so a payment event can't carry a withdrawal's ID.
+export type OutboxEntity =
+  | { readonly entityType: 'payment'; readonly entityId: Uuid<'pay'> }
+  | { readonly entityType: 'withdrawal'; readonly entityId: Uuid<'wd'> };
+export type EntityType = OutboxEntity['entityType'];
 
 export type NewOutboxEvent = {
   // The event's event_id: the row's primary key, so it never changes however often the event
   // is published.
   readonly id: Uuid<'evt'>;
-  readonly entityType: EntityType;
-  readonly entityId: Uuid<'pay'>;
   readonly subject: string;
   // The Nats-Msg-Id: <entity TypeID>.<status>.
   readonly msgId: string;
   // The event in its wire format (strings, TypeIDs), as built by the event's builder.
   readonly payload: object;
-};
+} & OutboxEntity;
 
 // A claimed event, ready to publish.
 export type OutboxEvent = {
   readonly id: Uuid<'evt'>;
-  readonly entityType: EntityType;
-  readonly entityId: Uuid<'pay'>;
   readonly subject: string;
   readonly msgId: string;
   readonly payload: object;
   // Including this claim: 1 on the first attempt.
   readonly attempts: number;
-};
+} & OutboxEntity;
 
 // The payload goes in as JSON text cast to jsonb, explicitly. pg would serialise a plain object
 // to JSON itself, but an array would become a Postgres array literal; JSON.stringify is
@@ -108,8 +109,7 @@ export async function claim(
   }>(CLAIM_SQL, [opts.limit, opts.leaseMs]);
   return result.rows.map((row) => ({
     id: row.id as Uuid<'evt'>,
-    entityType: parseEntityType(row.entity_type),
-    entityId: row.entity_id as Uuid<'pay'>,
+    ...entityFromRow(row.entity_type, row.entity_id),
     subject: row.subject,
     msgId: row.msg_id,
     payload: row.payload,
@@ -118,9 +118,15 @@ export async function claim(
 }
 
 // The column's CHECK allows only these.
-function parseEntityType(value: string): EntityType {
-  if (value !== 'payment') throw new Error(`unexpected outbox entity_type in database: ${value}`);
-  return value;
+function entityFromRow(type: string, id: string): OutboxEntity {
+  switch (type) {
+    case 'payment':
+      return { entityType: 'payment', entityId: id as Uuid<'pay'> };
+    case 'withdrawal':
+      return { entityType: 'withdrawal', entityId: id as Uuid<'wd'> };
+    default:
+      throw new Error(`unexpected outbox entity_type in database: ${type}`);
+  }
 }
 
 const MARK_PUBLISHED_SQL = `

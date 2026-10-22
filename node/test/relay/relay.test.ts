@@ -1,10 +1,12 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { jetstreamManager } from '@nats-io/jetstream';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { claim } from '../../src/outbox/outbox.ts';
+import { readFileSync } from 'node:fs';
+import { claim, enqueue } from '../../src/outbox/outbox.ts';
+import { withTransaction } from '../../src/shared/db.ts';
 import { relayBatch } from '../../src/relay/relay.ts';
 import { paymentCreatedV1Schema } from '../../src/shared/events.ts';
-import { toTypeId } from '../../src/shared/ids.ts';
+import { newUuid, toTypeId } from '../../src/shared/ids.ts';
 import { STREAMS } from '../../src/shared/nats.ts';
 import type { Payment } from '../../src/payments/payments.ts';
 import {
@@ -13,8 +15,10 @@ import {
   createTestAccount,
   createTestPayment,
   createTestPool,
+  createTestWithdrawal,
   drainOutbox,
   failingPublisher,
+  fundTestAccount,
   outboxRowsFor,
   recordingPublisher,
   testRelayDeps,
@@ -164,5 +168,77 @@ describe('relayBatch', () => {
       event_id: toTypeId('evt', event.id),
       stream_duplicate: true,
     });
+  });
+});
+
+describe('relay routing', () => {
+  it('publishes each event to its own stream: payment.created to PAYMENTS, withdrawal.held to WITHDRAWALS', async () => {
+    const account = await createTestAccount(pool);
+    const payment = await fundTestAccount(pool, account, 1000n);
+    const withdrawal = await createTestWithdrawal(pool, account, 400n);
+    const { publisher, published } = recordingPublisher(streamPublisher);
+    const { logger, lines } = capturingLogger();
+
+    await relayBatch(testRelayDeps(pool, publisher, { logger }));
+
+    const paymentEvent = published.find((p) => p.msgId === msgIdOf(payment));
+    const withdrawalEvent = published.find(
+      (p) => p.msgId === `${toTypeId('wd', withdrawal.id)}.held`,
+    );
+    expect(paymentEvent?.result.stream).toBe(STREAMS.payments);
+    expect(withdrawalEvent?.result.stream).toBe(STREAMS.withdrawals);
+    expect(withdrawalEvent?.subject).toBe('withdrawal.held');
+
+    const jsm = await jetstreamManager(nc);
+    const stored = await jsm.streams.getMessage(STREAMS.withdrawals, {
+      seq: withdrawalEvent?.result.seq ?? 0,
+    });
+    expect(stored?.json<unknown>()).toEqual(withdrawalEvent?.event);
+    const [row] = await outboxRowsFor(pool, withdrawal.id);
+    expect(row?.published_at).toBeInstanceOf(Date);
+
+    // The relay's log line names the withdrawal.
+    expect(lines().find((l) => l.withdrawal_id === toTypeId('wd', withdrawal.id))).toMatchObject({
+      msg: 'event published',
+      subject: 'withdrawal.held',
+    });
+  });
+
+  it('records an event with an unknown subject as a publish failure', async () => {
+    const id = newUuid('evt');
+    const paymentId = newUuid('pay');
+    await withTransaction(pool, (tx) =>
+      enqueue(tx, {
+        id,
+        entityType: 'payment',
+        entityId: paymentId,
+        subject: 'refund.created',
+        msgId: `${toTypeId('pay', paymentId)}.refunded`,
+        payload: { event_id: toTypeId('evt', id) },
+      }),
+    );
+    try {
+      await relayBatch(testRelayDeps(pool, streamPublisher));
+      const [row] = await outboxRowsFor(pool, paymentId);
+      expect(row).toMatchObject({
+        attempts: 1,
+        last_error: 'no stream for subject refund.created',
+        published_at: null,
+      });
+    } finally {
+      // Not a real event: take it out of later drains.
+      await pool.query('UPDATE outbox SET published_at = now() WHERE id = $1', [id]);
+    }
+  });
+
+  it('streams match their definitions in nats/streams/', async () => {
+    const jsm = await jetstreamManager(nc);
+    for (const stream of Object.values(STREAMS)) {
+      const definition = JSON.parse(
+        readFileSync(new URL(`../../../nats/streams/${stream}.json`, import.meta.url), 'utf8'),
+      ) as Record<string, unknown>;
+      const { config } = await jsm.streams.info(stream);
+      expect(config).toMatchObject(definition);
+    }
   });
 });

@@ -7,7 +7,6 @@ import { loadSharedConfig, natsEnvSchema, parseEnv } from '../src/shared/config.
 import { decide, startReview } from '../src/compliance/transitions.ts';
 import { recordNotification } from '../src/ingestion/notifications.ts';
 import { book, postDecision } from '../src/ledger/posting.ts';
-import { createWithdrawal } from '../src/ledger/withdrawals.ts';
 import { type Payment } from '../src/payments/payments.ts';
 import { relayBatch, type RelayDeps } from '../src/relay/relay.ts';
 import { createPool, withTransaction } from '../src/shared/db.ts';
@@ -17,12 +16,12 @@ import {
   connectNats,
   jetStreamPublisher,
   PUBLISH_TIMEOUT_MS,
-  STREAMS,
   type EventPublisher,
   type NatsConnection,
   type PublishResult,
 } from '../src/shared/nats.ts';
 import { createLogger, type Logger } from '../src/shared/logger.ts';
+import { requestWithdrawal } from '../src/withdrawals/requests.ts';
 import type { Withdrawal } from '../src/withdrawals/withdrawals.ts';
 import { expectEventMatchesContract, expectMatchesContract } from './contract.ts';
 
@@ -92,9 +91,9 @@ export async function connectTestNats(): Promise<NatsConnection> {
   });
 }
 
-// The relay's real publisher, on the test stream.
+// The relay's real publisher, on the test streams.
 export function testStreamPublisher(nc: NatsConnection): EventPublisher {
-  return jetStreamPublisher(nc, { stream: STREAMS.payments, timeoutMs: PUBLISH_TIMEOUT_MS });
+  return jetStreamPublisher(nc, { timeoutMs: PUBLISH_TIMEOUT_MS });
 }
 
 export type RecordedEvent = {
@@ -167,13 +166,16 @@ export type OutboxRow = {
   published_at: Date | null;
 };
 
-// The outbox rows for one payment.
-export async function outboxRowsFor(pool: pg.Pool, paymentId: Uuid<'pay'>): Promise<OutboxRow[]> {
+// The outbox rows for one payment or withdrawal.
+export async function outboxRowsFor(
+  pool: pg.Pool,
+  entityId: Uuid<'pay'> | Uuid<'wd'>,
+): Promise<OutboxRow[]> {
   const result = await pool.query<OutboxRow>(
     `SELECT id, entity_type, entity_id, subject, msg_id, payload, attempts, claimed_until,
             last_error, published_at
-     FROM outbox WHERE entity_type = 'payment' AND entity_id = $1 ORDER BY id`,
-    [paymentId],
+     FROM outbox WHERE entity_id = $1 ORDER BY id`,
+    [entityId],
   );
   return result.rows;
 }
@@ -204,6 +206,44 @@ export async function postPayment(
     headers: response.headers,
     body: response.body,
     json: JSON.parse(response.body) as Record<string, unknown>,
+  };
+}
+
+// POSTs a withdrawal request for the account (an acct_ TypeID) with an Idempotency-Key (none if
+// undefined) and checks the response against the contract.
+export async function postWithdrawal(
+  app: App,
+  accountTypeId: string,
+  payload: unknown,
+  idempotencyKey: string | undefined,
+): Promise<JsonResponse> {
+  const response = await app.inject({
+    method: 'POST',
+    url: `/accounts/${accountTypeId}/withdrawals`,
+    headers: {
+      'content-type': 'application/json',
+      ...(idempotencyKey === undefined ? {} : { 'idempotency-key': idempotencyKey }),
+    },
+    payload: typeof payload === 'string' ? payload : JSON.stringify(payload),
+  });
+  expectMatchesContract('POST', '/accounts/{account_id}/withdrawals', response);
+  return {
+    statusCode: response.statusCode,
+    headers: response.headers,
+    body: response.body,
+    json: JSON.parse(response.body) as Record<string, unknown>,
+  };
+}
+
+// A withdrawal request body (the wire format).
+export function withdrawalBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    amount_minor: '400',
+    currency: 'EUR',
+    creditor_iban: FOREIGN_IBAN,
+    creditor_name: 'Jane Doe',
+    remittance_info: 'Rent October',
+    ...overrides,
   };
 }
 
@@ -346,9 +386,9 @@ export async function fundTestAccount(
   return payment;
 }
 
-// A withdrawal in `held` with its funds reserved, as the API will create it (createWithdrawal in
-// its own transaction). Throws InsufficientFundsError (and stores nothing) if the account is
-// short.
+// A withdrawal in `held` with its funds reserved and its withdrawal.held event in the outbox, as
+// the API creates it (requestWithdrawal in its own transaction). Throws InsufficientFundsError
+// (and stores nothing) if the account is short.
 export async function createTestWithdrawal(
   pool: pg.Pool,
   account: TestAccount,
@@ -356,7 +396,7 @@ export async function createTestWithdrawal(
   idempotencyKey = randomUUID(),
 ): Promise<Withdrawal> {
   return withTransaction(pool, async (tx) => {
-    const withdrawal = await createWithdrawal(tx, {
+    const result = await requestWithdrawal(tx, {
       accountId: account.id,
       idempotencyKey,
       amountMinor,
@@ -365,8 +405,8 @@ export async function createTestWithdrawal(
       creditorName: 'Jane Doe',
       remittanceInfo: 'test withdrawal',
     });
-    if (withdrawal === undefined) throw new Error(`idempotency key ${idempotencyKey} is taken`);
-    return withdrawal;
+    if (result.kind !== 'created') throw new Error(`idempotency key ${idempotencyKey} is taken`);
+    return result.withdrawal;
   });
 }
 

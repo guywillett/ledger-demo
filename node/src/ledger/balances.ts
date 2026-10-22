@@ -6,12 +6,14 @@ import type { Uuid } from '../shared/ids.ts';
 export type Balance = {
   readonly pendingIn: bigint;
   readonly available: bigint;
+  // Reserved for withdrawals in flight.
+  readonly held: bigint;
   // Single currency in slice 1 (amounts are EUR minor units throughout).
   readonly currency: 'EUR';
 };
 
 const BALANCE_SQL = `
-SELECT pending_in, available
+SELECT pending_in, available, held
 FROM account_balances
 WHERE account_id = $1
 `;
@@ -23,10 +25,16 @@ export async function getBalance(
   db: Queryable,
   accountId: Uuid<'acct'>,
 ): Promise<Balance | undefined> {
-  const result = await db.query<{ pending_in: bigint; available: bigint }>(BALANCE_SQL, [
-    accountId,
-  ]);
+  const result = await db.query<{ pending_in: bigint; available: bigint; held: bigint }>(
+    BALANCE_SQL,
+    [accountId],
+  );
   const row = result.rows[0];
   if (row === undefined) return undefined;
-  return { pendingIn: row.pending_in, available: row.available, currency: 'EUR' };
+  return {
+    pendingIn: row.pending_in,
+    available: row.available,
+    held: row.held,
+    currency: 'EUR',
+  };
 }

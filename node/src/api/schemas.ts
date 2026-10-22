@@ -1,32 +1,27 @@
 import { z } from 'zod';
-import { parseIban, type Iban } from '../shared/iban.ts';
 import { toTypeId, type TypeIdString } from '../shared/ids.ts';
-import { amountMinorSchema, typeIdSchema } from '../shared/schemas.ts';
+import {
+  amountMinorSchema,
+  ibanSchema,
+  optionalSepaTextSchema,
+  sepaTextSchema,
+  typeIdSchema,
+} from '../shared/schemas.ts';
 import type { Notification } from '../ingestion/notifications.ts';
 import type { Payment } from '../payments/payments.ts';
 import type { Balance } from '../ledger/balances.ts';
 import type { PaymentStatus, StatusChange } from '../payments/status.ts';
+import type { WithdrawalStatus, WithdrawalStatusChange } from '../withdrawals/status.ts';
+import type { NewWithdrawal, Withdrawal } from '../withdrawals/withdrawals.ts';
+import type { Uuid } from '../shared/ids.ts';
 
 // POST /payments body. z.object (not strictObject) drops unknown fields instead of rejecting
 // them: providers add fields to webhooks over time ("tolerant reader"). Dropped fields are
-// neither stored nor logged.
+// neither stored nor logged. Client requests are the opposite (withdrawalBodySchema, slice 2
+// decision 33).
 export const notificationBodySchema = z.object({
   network_transaction_id: z.string().min(1).max(255),
-  creditor_iban: z
-    .string()
-    .max(64)
-    .transform((value, ctx): Iban => {
-      const result = parseIban(value);
-      if (!result.ok) {
-        ctx.issues.push({
-          code: 'custom',
-          message: `invalid IBAN: ${result.reason}`,
-          input: value,
-        });
-        return z.NEVER;
-      }
-      return result.iban;
-    }),
+  creditor_iban: ibanSchema,
   provider_account_id: z.string().min(1).max(255).optional(),
   amount_minor: amountMinorSchema,
   currency: z.literal('EUR'),
@@ -91,6 +86,7 @@ export const transactionsQuerySchema = z.object({
 export type BalanceResponse = {
   readonly pending_in: string;
   readonly available: string;
+  readonly held: string;
   readonly currency: 'EUR';
 };
 
@@ -98,6 +94,7 @@ export function toBalanceResponse(balance: Balance): BalanceResponse {
   return {
     pending_in: balance.pendingIn.toString(),
     available: balance.available.toString(),
+    held: balance.held.toString(),
     currency: balance.currency,
   };
 }
@@ -119,6 +116,101 @@ export type TransactionListResponse = {
 };
 
 export function toStatusChangeResponse(change: StatusChange): StatusChangeResponse {
+  return {
+    from_status: change.from,
+    to_status: change.to,
+    reason: change.reason,
+    at: change.at.toISOString(),
+  };
+}
+
+// The Idempotency-Key header of POST /accounts/:account_id/withdrawals: required, 1-255
+// characters from a plain set (it ends up in logs). Fastify lowercases header names; a header
+// sent twice arrives as an array, which fails the string check.
+export const idempotencyKeyHeadersSchema = z.object({
+  'idempotency-key': z
+    .string({ error: 'is required' })
+    .regex(/^[A-Za-z0-9._:-]{1,255}$/, 'must be 1-255 characters from A-Z a-z 0-9 . _ : -'),
+});
+
+// POST /accounts/:account_id/withdrawals body. z.strictObject: unknown fields are rejected, the
+// opposite of the provider webhook (notificationBodySchema). This is our own client's request
+// to move money, so a misspelt optional field (remitance_info) must fail rather than be
+// silently dropped (slice 2 decision 33).
+export const withdrawalBodySchema = z.strictObject({
+  amount_minor: amountMinorSchema,
+  currency: z.literal('EUR'),
+  creditor_iban: ibanSchema,
+  // SEPA: required, at most 70 characters, the basic character set (decision 32).
+  creditor_name: sepaTextSchema(70),
+  // SEPA unstructured remittance information: optional, at most 140 characters.
+  remittance_info: optionalSepaTextSchema(140),
+});
+
+export function toNewWithdrawal(
+  accountId: Uuid<'acct'>,
+  idempotencyKey: string,
+  body: z.infer<typeof withdrawalBodySchema>,
+): NewWithdrawal {
+  return {
+    accountId,
+    idempotencyKey,
+    amountMinor: body.amount_minor,
+    currency: body.currency,
+    creditorIban: body.creditor_iban,
+    creditorName: body.creditor_name,
+    remittanceInfo: body.remittance_info,
+  };
+}
+
+export const withdrawalParamsSchema = z.object({ withdrawal_id: typeIdSchema('wd') });
+
+export const withdrawalQuerySchema = z.object({ include: z.literal('history').optional() });
+
+export type WithdrawalStatusChangeResponse = {
+  readonly from_status: WithdrawalStatus | null;
+  readonly to_status: WithdrawalStatus;
+  readonly reason: string | null;
+  readonly at: string;
+};
+
+// No provider_transfer_id: provider identifiers stay at the edge, as for payments' events.
+export type WithdrawalResponse = {
+  readonly id: TypeIdString<'wd'>;
+  readonly account_id: TypeIdString<'acct'>;
+  readonly idempotency_key: string;
+  readonly amount_minor: string;
+  readonly currency: 'EUR';
+  readonly creditor_iban: string;
+  readonly creditor_name: string;
+  readonly remittance_info: string | null;
+  readonly status: WithdrawalStatus;
+  readonly failure_reason: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly history?: readonly WithdrawalStatusChangeResponse[];
+};
+
+export function toWithdrawalResponse(withdrawal: Withdrawal): WithdrawalResponse {
+  return {
+    id: toTypeId('wd', withdrawal.id),
+    account_id: toTypeId('acct', withdrawal.accountId),
+    idempotency_key: withdrawal.idempotencyKey,
+    amount_minor: withdrawal.amountMinor.toString(),
+    currency: withdrawal.currency,
+    creditor_iban: withdrawal.creditorIban,
+    creditor_name: withdrawal.creditorName,
+    remittance_info: withdrawal.remittanceInfo,
+    status: withdrawal.status,
+    failure_reason: withdrawal.failureReason,
+    created_at: withdrawal.createdAt.toISOString(),
+    updated_at: withdrawal.updatedAt.toISOString(),
+  };
+}
+
+export function toWithdrawalStatusChangeResponse(
+  change: WithdrawalStatusChange,
+): WithdrawalStatusChangeResponse {
   return {
     from_status: change.from,
     to_status: change.to,

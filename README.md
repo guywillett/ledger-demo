@@ -32,6 +32,7 @@ provider ──POST /payments──► API ──► Postgres, one transaction:
 |---|---|---|
 | A repeated notification changes nothing | `UNIQUE (network, network_transaction_id)` and one upsert statement; same details → `200`, different → `409` | `test/api/payments.test.ts` (5 repeats, 10 concurrent, conflicts) |
 | An event is never lost between commit and publish | the event is written to `outbox` in the same transaction as the payment; a relay publishes it at least once (claims leased with `FOR UPDATE SKIP LOCKED`, marked after the stream's acknowledgement); the stream drops a repeat by its `msg_id` | `test/api/payment-events.test.ts` (one outbox row, same transaction); `test/outbox/outbox.test.ts` (rollback, leases, disjoint concurrent claims); `test/relay/relay.test.ts` (failure and retry; a relay "crashing" after publishing, before marking: published again, dropped by the stream) |
+| A retried withdrawal request never pays twice | the client's `Idempotency-Key` is unique per account on the withdrawal itself, so only a request that commits takes it (a `422`, `404` or crash leaves it free); the funds are held in the request's own transaction, and the balance CHECK is the insufficient-funds check; a repeat returns the withdrawal's current state, a reused key with other details is a `409` | `test/api/withdrawals.test.ts` (5 repeats, 10 concurrent, conflicts, `422` then the same key succeeds, two concurrent withdrawals exceeding the balance) |
 | A repeated or concurrent event moves money once | every step is a conditional transition (`UPDATE … WHERE status = $expected`), never check-then-act | `test/worker/handler.test.ts` (same event twice, two consumers at once) |
 | The ledger protects itself | `move()` records each movement under `UNIQUE (reference_type, reference_id, reference_step)`; a reused reference with other details is refused; a reference's type and step are checked as a pair, in the database and in the `Movement` type. Withdrawals reserve funds with a `held` bucket, and the balance CHECK is the insufficient-funds check, so concurrent withdrawals can't overspend | `test/ledger/move.test.ts`, `test/ledger/withdrawals.test.ts` (two concurrent withdrawals exceeding the balance: exactly one commits) |
 | Crash safety | each step commits on its own; a redelivery skips what's done, and a recorded decision is never re-made | `test/worker/handler.test.ts` (crash after booking, after deciding); `test/e2e/worker.e2e.ts` (real `kill -9` mid-review) |
@@ -74,7 +75,7 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `migrate-test` | the same migrations against the test database `ledger_test` | — |
 | `nats-setup` | nats-box: applies the stream and consumer definitions in `nats/` and exits | — |
 | `api` | the Node API (`node/`, image `ledger-demo-node`); Postgres only, no NATS | `3000` |
-| `relay` | the Node relay (same image): publishes the outbox to JetStream | — |
+| `relay` | the Node relay (same image): publishes the outbox to JetStream (`PAYMENTS`, `WITHDRAWALS`) | — |
 | `worker` | the Node worker (same image): books, reviews and posts payments | — |
 | `nats-test` | a separate NATS for the tests, so test events never reach the development stream | `4223`, `8223` |
 | `nats-setup-test` | the same definitions applied to `nats-test` | — |
@@ -112,6 +113,7 @@ JetStream streams are defined in `nats/streams/<NAME>.json` and durable consumer
 NATS="docker run --rm --network ledger-demo_default natsio/nats-box:0.20.0 nats -s nats://nats:4222"
 $NATS stream info PAYMENTS                       # configuration and message counts
 $NATS stream get PAYMENTS --last-for payment.created   # the latest payment.created event
+$NATS stream get WITHDRAWALS --last-for withdrawal.held # the latest withdrawal.held event (IDs and amount only)
 $NATS consumer info PAYMENTS worker              # the worker's consumer: pending, unacked, redelivered
 ```
 
@@ -263,6 +265,20 @@ Read an account (alice here; TypeIDs of the demo accounts are listed under *Demo
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance
 curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=10&include=history'
 # next page: add &before=<next_before from the previous response>
+```
+
+Request a withdrawal from alice (repeat it with the same key to get `200` and the same withdrawal; change the amount to see a `409`; ask for more than `available` to see a `422`), then read it back with the `Location` it returns. Nothing submits withdrawals yet, so it stays `held`, with its amount in the balance's `held`. Until the submitter exists, reconciliation counts such a withdrawal as stuck, so `scripts/demo.sh`'s final check fails while one is left in the development database:
+
+```sh
+curl -i -X POST localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/withdrawals \
+  -H 'content-type: application/json' -H 'Idempotency-Key: rent-2026-10' -d '{
+  "amount_minor": "2500",
+  "currency": "EUR",
+  "creditor_iban": "DE75 5121 0800 1245 1261 99",
+  "creditor_name": "Jane Doe",
+  "remittance_info": "Rent October"
+}'
+curl -s 'localhost:3000/withdrawals/wd_…?include=history'
 ```
 
 #### Lint and format

@@ -8,6 +8,7 @@ import { amountMinorSchema, typeIdSchema } from './schemas.ts';
 
 export const SUBJECTS = {
   paymentCreated: 'payment.created',
+  withdrawalHeld: 'withdrawal.held',
 } as const;
 
 // One schema, two types. z.input is the wire format a producer builds (strings, TypeIDs);
@@ -32,3 +33,21 @@ export const paymentCreatedV1Schema = z.object({
 export type PaymentCreatedV1Wire = z.input<typeof paymentCreatedV1Schema>;
 // What a consumer works with after parsing.
 export type PaymentCreatedV1 = z.output<typeof paymentCreatedV1Schema>;
+
+// withdrawal.held: a withdrawal was created and its funds held. Deliberately without the
+// destination IBAN, the creditor name or the remittance text: those are personal data, and a
+// stream keeps messages (7 days here) beyond the database's control. As slice 1's events carry
+// our IDs only, consumers (the submitter) read the details from the database by withdrawal_id.
+export const withdrawalHeldV1Schema = z.object({
+  event_id: typeIdSchema('evt'),
+  event_type: z.literal('withdrawal.held'),
+  schema_version: z.literal(1),
+  withdrawal_id: typeIdSchema('wd'),
+  account_id: typeIdSchema('acct'),
+  amount_minor: amountMinorSchema,
+  currency: z.literal('EUR'),
+  occurred_at: z.iso.datetime().transform((value) => new Date(value)),
+});
+
+export type WithdrawalHeldV1Wire = z.input<typeof withdrawalHeldV1Schema>;
+export type WithdrawalHeldV1 = z.output<typeof withdrawalHeldV1Schema>;

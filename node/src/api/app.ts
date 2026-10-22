@@ -4,6 +4,7 @@ import type pg from 'pg';
 import type { Logger } from '../shared/logger.ts';
 import { registerAccountRoutes } from './accounts.ts';
 import { registerPaymentRoutes } from './payments.ts';
+import { registerWithdrawalRoutes } from './withdrawals.ts';
 import { problems, sendProblem } from './problem.ts';
 import type { App } from './types.ts';
 
@@ -83,5 +84,6 @@ export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
 
   registerPaymentRoutes(app, { pool: deps.pool });
   registerAccountRoutes(app, { db: deps.pool });
+  registerWithdrawalRoutes(app, { pool: deps.pool });
   return app;
 }

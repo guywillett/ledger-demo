@@ -46,12 +46,12 @@ let polling: Promise<void> = Promise.resolve();
 // startup failure.
 async function start(): Promise<RelayDeps> {
   const nc = await connectNats({ url: config.natsUrl, name: 'ledger-demo-relay', logger });
-  await assertStreamExists(nc, STREAMS.payments);
+  for (const stream of Object.values(STREAMS)) await assertStreamExists(nc, stream);
   const pool = createPool({ databaseUrl: config.databaseUrl, logger });
 
   const deps: RelayDeps = {
     pool,
-    publisher: jetStreamPublisher(nc, { stream: STREAMS.payments, timeoutMs: PUBLISH_TIMEOUT_MS }),
+    publisher: jetStreamPublisher(nc, { timeoutMs: PUBLISH_TIMEOUT_MS }),
     logger,
     batchSize: config.batchSize,
     leaseMs: config.leaseMs,

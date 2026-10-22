@@ -86,6 +86,8 @@ function entityLogFields(event: OutboxEvent): Record<string, string> {
   switch (event.entityType) {
     case 'payment':
       return { payment_id: toTypeId('pay', event.entityId) };
+    case 'withdrawal':
+      return { withdrawal_id: toTypeId('wd', event.entityId) };
   }
 }
 

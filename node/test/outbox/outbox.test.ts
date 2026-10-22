@@ -42,7 +42,8 @@ afterAll(async () => {
 });
 
 // A minimal event about a fresh (never stored) payment; the outbox doesn't check that it exists.
-function testEvent(): NewOutboxEvent {
+// Typed as the payment branch, so tests can spread overrides onto it.
+function testEvent(): Extract<NewOutboxEvent, { entityType: 'payment' }> {
   const id = newUuid('evt');
   const paymentId = newUuid('pay');
   created.push(id);
