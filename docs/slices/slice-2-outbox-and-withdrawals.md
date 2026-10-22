@@ -1,0 +1,267 @@
+# Slice 2 — Transactional outbox and withdrawals
+
+Status: agreed — ready to build
+Implementation: Node.js / TypeScript (Go to follow in a later slice)
+Builds on: [slice 1](slice-1-incoming-payments.md). Its conventions, decisions and vocabulary hold unless this spec says otherwise.
+
+**Scope principle:** this is a demonstration, so each pattern is shown once. Where a production system would repeat a pattern this slice leaves out (a compliance review, an extra event hop), the spec says so and why, rather than building it a second time.
+
+## Goal
+
+Two things slice 1 could not do:
+
+1. **Never lose an event.** Replace publish-after-commit with a **transactional outbox**: every event is stored in the same transaction as the state change it announces, and a relay publishes it. Closes the commit-then-publish gap (stranded money) for good.
+2. **Send money out, exactly once.** Client-initiated **withdrawals** with an `Idempotency-Key`, funds held while the transfer is in flight, an outgoing call to a provider that can time out with an unknown outcome, and the provider's asynchronous result coming back by webhook. Whatever is repeated, retried, raced or crashed, each withdrawal debits the account at most once, and the funds are either executed or released, never both and never neither.
+
+`v0.1-simple-ledger` is tagged when this slice is merged (slice 1 decision 2).
+
+## In scope
+
+- Outbox table, writers inside transactions, relay process; slice 1's `payment.created` moves onto it
+- `held` balance bucket; withdrawals table, state machine and ledger postings (hold, execute, release)
+- `POST /accounts/:id/withdrawals` (with `Idempotency-Key`), `GET /withdrawals/:id`, `held` in the balance response
+- Submitter: a consumer that sends held withdrawals to the provider, with retries under an unknown outcome
+- `POST /provider/transfer-updates`: the provider's webhook for transfer results
+- Fake provider service with failure injection
+- Extracting the pull loop from the worker so the submitter (and later consumers) share it
+- Reconciliation, demo script, e2e tests and README extended to withdrawals and the outbox
+
+## Out of scope (later slices)
+
+- Cancelling a withdrawal (a nice race to demonstrate later: cancel vs submit, settled by a conditional transition)
+- Returns after execution (SEPA R-transactions): a separate flow with compensating movements, as for incoming payments
+- Compliance review of withdrawals (decision 30)
+- Polling the provider for transfers whose webhook never arrives
+- Authentication (clients, webhook signatures), double-entry, Go implementation, load testing
+
+## Part A — Transactional outbox
+
+### The problem it closes
+
+Slice 1 commits the payment, then publishes `payment.created`. A crash in between leaves the payment `created` forever (stranded money), narrowed only by provider retries re-announcing it. Publishing *before* commit is worse (an event for a payment that may roll back). The two writes can't be made atomic across Postgres and NATS, so make them one write: store the event in Postgres with the state change, and publish it from there.
+
+### `outbox`
+
+| Column | Type | Notes |
+|---|---|---|
+| id | uuid PK | UUIDv7; **is the event's `event_id`**, so an event keeps one ID however often it is published |
+| subject | text | e.g. `payment.created`, `withdrawal.held` |
+| msg_id | text | `Nats-Msg-Id`, `<entity TypeID>.<status>` as in slice 1 decision 20; `UNIQUE`: an entity enters a status once, so one event per entity and status (a backstop: the conditional transitions already guarantee it) |
+| payload | jsonb | the event exactly as published (the wire format, built by the same TypeScript builders as before) |
+| created_at | timestamptz | |
+| claimed_until | timestamptz null | relay lease (below) |
+| attempts | int | publish attempts, for alerting on a stuck event |
+| last_error | text null | |
+| published_at | timestamptz null | set once the stream has acknowledged it |
+
+Partial index on `(id) WHERE published_at IS NULL`: the relay's query stays fast however many published rows accumulate.
+
+### Writers
+
+Whoever makes a state change that has an event inserts the outbox row **in the same transaction**. A data-access function that writes an event therefore takes a `Tx`, per the transactions convention. For `payment.created`, `recordNotification` becomes two statements in one transaction (the existing upsert, then the outbox insert when a payment was created); the payload is built in TypeScript by the existing event builder, so there is one definition of the event's shape, checked against `contracts/events/`.
+
+Consequences for slice 1's `POST /payments`: the request no longer publishes, so the `503`, the re-publish on duplicate and the "new `event_id` per re-publish" caveat all go (decisions 18 and 20's logging detail are superseded). A duplicate is just a duplicate.
+
+### Relay
+
+A new process (`node/src/relay/`, compose service `relay`, same image), several instances allowed:
+
+1. **Claim** a batch in a short transaction: `UPDATE outbox SET claimed_until = now() + lease, attempts = attempts + 1 WHERE id IN (SELECT id FROM outbox WHERE published_at IS NULL AND (claimed_until IS NULL OR claimed_until < now()) ORDER BY id LIMIT $n FOR UPDATE SKIP LOCKED) RETURNING …`. `SKIP LOCKED` lets instances claim disjoint batches without waiting on each other.
+2. **Publish** each claimed event in `id` order, outside any transaction (convention: never wait on the network inside one), with its `msg_id`, waiting for the stream's acknowledgement.
+3. **Mark** each acknowledged event: `UPDATE outbox SET published_at = now(), claimed_until = NULL WHERE id = $1`. A failed publish records `last_error` and leaves the lease to expire (or shortens it), so the event is retried.
+
+When a batch comes back empty, poll again after an idle delay (e.g. 200 ms, growing to 1 s). `LISTEN/NOTIFY` to wake the relay at once is a later optimisation.
+
+**Delivery guarantee: at least once.** A relay that crashes after publishing but before marking leaves the lease to expire, and the event is published again: within the stream's duplicate window the `msg_id` makes the stream drop it; beyond it, consumers are idempotent on state (they already are). **Order:** one relay publishes a batch in `id` order, but nothing orders events across instances or retries; consumers must not depend on order (they don't: every step is a conditional transition).
+
+The API no longer connects to NATS at all; the relay is the only publisher.
+
+## Part B — Withdrawals
+
+### Data model
+
+**`account_balances`** gains `held bigint NOT NULL DEFAULT 0 CHECK (held >= 0)`: funds reserved for withdrawals in flight. `move()`'s `Bucket` becomes `external | pending_in | available | held`, with the same fixed-statement update (one more column) and the CHECK reported as an `OverdraftError` naming the bucket.
+
+**`withdrawals`**
+
+| Column | Type | Notes |
+|---|---|---|
+| id | uuid PK | TypeID prefix `wd` |
+| account_id | uuid FK | |
+| idempotency_key | text | the client's `Idempotency-Key`; `UNIQUE (account_id, idempotency_key)` |
+| amount_minor | bigint | `CHECK (amount_minor > 0)` |
+| currency | text | `CHECK (currency = 'EUR')` |
+| creditor_iban | text | destination, normalised, format CHECK as elsewhere |
+| creditor_name | text | required by SEPA |
+| remittance_info | text null | the payment reference shown to the recipient |
+| status | text | `held`, `submitted`, `executed`, `failed` |
+| failure_reason | text null | set with `failed` |
+| provider_transfer_id | text null | the provider's ID, once known |
+| created_at / updated_at | timestamptz | |
+
+`withdrawal_status_history`: as `payment_status_history` (append-only, triggers).
+
+**`balance_movements`**: `reference_type` adds `withdrawal`; `reference_step` adds `hold`, `execute`, `release`. Same unique reference, so every withdrawal movement is applied at most once whatever the caller does.
+
+Schema changes are **new migrations**: slice 1 is merged, so its migrations are no longer edited.
+
+### State machine
+
+```text
+(insufficient funds: nothing stored, 422)
+
+held ──► submitted ──► executed
+  │          └───────► failed
+  ├──────────────────► executed   (provider's update arrived before our submit response)
+  └──────────────────► failed     (provider refused the submission, or its update arrived first)
+```
+
+| Transition | Movement | `reference_step` | Owner |
+|---|---|---|---|
+| (create) → held | `available` → `held` | `hold` | API request (decision 25) |
+| held → submitted | none: the provider has accepted the instruction | — | submitter |
+| held \| submitted → executed | `held` → external | `execute` | transfer-update webhook |
+| held \| submitted → failed | `held` → `available` (released) | `release` | submitter (permanent refusal) or webhook |
+
+**Why `held → executed` and `held → failed` exist:** the provider may send its result before the submitter has processed the response to its own request (the provider accepts, fires the webhook, then our HTTP response arrives, or our process crashed in between). The webhook must not wait for, or depend on, the submitter's bookkeeping. Whichever conditional transition commits first wins; the other finds the withdrawal already past `held` and skips. `executed` and `failed` are final, and a final status never changes (an update contradicting one is a conflict, below).
+
+`executed` means the money has left: the provider has executed the SEPA transfer. A return after that is a new flow (*Out of scope*).
+
+Event naming as slice 1: `withdrawal.<new status>`. Only `withdrawal.held` is published in this slice (the submitter consumes it); the others are added when something consumes them.
+
+### `POST /accounts/:account_id/withdrawals`
+
+Client-initiated. Header `Idempotency-Key` (required; 1–255 characters from `[A-Za-z0-9._:-]`, e.g. a UUID the client generates per intended withdrawal). Body: `{ amount_minor, currency: "EUR", creditor_iban, creditor_name, remittance_info? }` (amounts as digit strings, IBAN through `parseIban`, as slice 1).
+
+One transaction:
+1. Insert the withdrawal (`held`) and its history row: `INSERT … ON CONFLICT (account_id, idempotency_key) DO NOTHING RETURNING …`.
+2. If inserted: `hold()`: `move(available → held, step hold)`. An `OverdraftError` on `available` rolls the whole transaction back: nothing is stored, `422` with problem type `insufficient-funds`.
+3. If inserted: the outbox row for `withdrawal.held`.
+4. If not inserted (the key exists): compare the stored withdrawal's details with the request (`amount_minor`, `currency`, `creditor_iban`, `creditor_name`, `remittance_info`), directly, as slice 1 decision 16: same → `200` with the withdrawal **in its current status**; different → `409` with `differing_fields`. The read only classifies; the insert already decided.
+
+Responses: `201` created (status `held`); `200` repeat; `400` invalid body, IBAN or key; `404` no such account; `409` key reused with other details; `422` insufficient funds.
+
+**The insufficient-funds check is the database's**, not a read: the `CHECK (available >= 0)` rejects the `move()` atomically, so two concurrent withdrawals that together exceed the balance can never both succeed (no check-then-act). Concurrent requests with the *same* key: `ON CONFLICT` makes one insert and the others wait for it, then see a repeat (or, if it rolled back for insufficient funds, each tries afresh).
+
+What the key does and doesn't do:
+- It makes **retrying a request** safe: a client that timed out can resend the same request and gets the same withdrawal, never a second one.
+- **Only a successful request consumes a key.** The key is a unique column on the withdrawal row, so it is taken only when a withdrawal commits. Every failure rolls back and leaves the key free for a retry: invalid input (`400`), insufficient funds (`422`), and above all our own failures (`500`, the database unavailable, a crash mid-request). Nothing is cached, so a transient fault can never be replayed as a permanent answer.
+- The response to a repeat is the withdrawal's **current state**, not a stored copy of the first response (simpler, and more useful to a client that is catching up). A stored-response design is the alternative when responses aren't derivable from state.
+- Scope is per account (no clients or auth yet; with auth it becomes per client). Keys never expire here; real APIs expire them (e.g. after 24 h) so the table doesn't grow forever.
+
+### `GET /withdrawals/:id`
+
+The withdrawal and, with `?include=history`, its status history. `GET /accounts/:id/balance` adds `held`. The transactions list stays payments only (*Known gaps*).
+
+### Submitter
+
+A consumer of `withdrawal.held` (stream `WITHDRAWALS`, subjects `withdrawal.>`, durable consumer `submitter`; definitions in `nats/` as for `PAYMENTS`). It runs in its own process (`node/src/submitter/`), sharing the pull loop extracted from the worker (fetch exactly the free slots, bounded concurrency, graceful shutdown), so its scaling and failure behaviour match the worker's.
+
+For each message:
+1. Log the delivery (`event_deliveries`, as the worker).
+2. Send the transfer to the provider: `POST /transfers` with `Idempotency-Key: <withdrawal TypeID>`, the amount, destination and reference, and a timeout (e.g. 5 s). **Never inside a transaction.**
+3. By response:
+   - `2xx` → `held → submitted`, storing `provider_transfer_id`. Skipped if the webhook already moved it on.
+   - Timeout, connection error or `5xx` → **the outcome is unknown**: the provider may or may not have created the transfer. `nak` with a growing delay and send again: the provider's idempotency on our key turns the retry into "tell me what happened to this one". Never send a new key for the same withdrawal.
+   - `4xx` permanent refusal (e.g. the provider rejects the destination) → `held → failed` with `release` (funds back to `available`), reason recorded. Skipped if already final.
+4. Ack.
+
+If the provider can never be reached, the withdrawal stays `held` (funds reserved, nothing sent) until `max_deliver` is exhausted; reconciliation lists it as stuck. Releasing it automatically would be wrong: the provider may have executed it. That decision needs the provider's answer (polling it is *Out of scope*) or a person.
+
+### `POST /provider/transfer-updates`
+
+The provider's webhook: `{ provider_event_id, transfer_id, reference (our withdrawal TypeID), status: "executed" | "failed", reason?, occurred_at }`. This is ingestion's second kind of provider notification: `ingestion/notifications.ts` splits into `incoming-payments.ts` and `transfer-updates.ts` (as discussed for slice 1).
+
+One transaction (decision 29):
+- `executed` → transition `held | submitted → executed` with `move(held → external, step execute)`.
+- `failed` → transition `held | submitted → failed` with `move(held → available, step release)`.
+- Transition skipped and the withdrawal already in **that** status → duplicate, `200` (providers retry webhooks).
+- Withdrawal in the **other** final status (e.g. `failed` after `executed`) → conflict: `409` and an `error` log; a contradiction from the provider, not a retry (a real webhook: 2xx, record and alert, as slice 1's *Webhook semantics*).
+- Unknown reference → `422`.
+
+Updates are recorded in `transfer_updates` (one row per distinct `provider_event_id`, with a `notification_count` like incoming payments) for audit and duplicate counting; idempotency itself comes from the conditional transition, never from that table.
+
+### Fake provider (`provider-sim`)
+
+A small HTTP service (decision 31), run by compose (`provider-sim`, same image), standing in for the BaaS:
+- `POST /transfers`: idempotent on `Idempotency-Key` (in-memory map, enough for a demo: a restart forgets transfers, see *Known gaps*); answers `201` with a transfer ID, or the same ID again for a repeated key.
+- After `SIM_EXECUTION_DELAY_MS`, sends `executed` (or `failed` with probability `SIM_FAIL_RATE`) to the API's webhook, retrying until it gets a 2xx.
+- Failure injection, each a probability: `SIM_REFUSE_RATE` (permanent `422` at submission), `SIM_ERROR_RATE` (`503` without creating the transfer), `SIM_SLOW_RATE` (creates the transfer, then answers after the submitter's timeout: the unknown-outcome case), `SIM_DUPLICATE_WEBHOOK_RATE` (sends the update twice), `SIM_EARLY_WEBHOOK_RATE` (sends the update before answering the submission: the `held → executed` race).
+
+Defaults in compose are mild (a demo should mostly succeed); tests and the demo script turn individual failure modes up.
+
+## Reconciliation
+
+Extended, same three views:
+
+```text
+pending_in == sum of payments in (received, under_review, approved, rejected)
+available  == sum of credited payments − sum of withdrawals in (held, submitted, executed)
+held       == sum of withdrawals in (held, submitted)
+
+each bucket == net of balance_movements into/out of it
+```
+
+Per withdrawal, movements must match status: `held`, `submitted` exactly `hold`; `executed` `hold` and `execute`; `failed` `hold` and `release`; on its own account, for its own amount.
+
+Also reported:
+- withdrawals stuck in `held` or `submitted` beyond the threshold (funds reserved, outcome unknown);
+- **outbox:** events unpublished beyond the threshold, and the highest `attempts` (a relay that is down, or an event the stream keeps refusing);
+- payments stuck in `created` now say which side stalled: their `payment.created` event is still unpublished (the relay) or published but not processed (the worker). Every `created` payment has its outbox row, written in the same transaction.
+
+## Steps
+
+1. **Outbox:** table, `payment.created` written in the ingestion transaction, the relay process and compose service, the API's publish path removed, reconciliation's outbox check. Slice 1's tests and demo still pass, minus the `503` behaviour.
+2. **Ledger for withdrawals:** migration (`held`, `withdrawals`, history, reference values), `Bucket`, `hold`/`execute`/`release` posting functions, lifecycle tests.
+3. **Withdrawal API:** `POST` with `Idempotency-Key` (including concurrency and insufficient-funds tests), `GET`, `held` in the balance, contract updates.
+4. **Shared pull loop and provider-sim:** extract the worker's loop (no behaviour change, worker tests unchanged), then the fake provider.
+5. **Submitter:** stream and consumer definitions, the process, tests per provider response (including the unknown outcome).
+6. **Transfer updates:** the webhook, the ingestion split, the early-update race, duplicates and conflicts.
+7. **Reconciliation, demo and docs:** withdrawal checks, demo script steps, e2e (kill the submitter mid-flight; provider-sim in each failure mode), README guarantees table.
+
+## Done when
+
+- [ ] A crash between commit and publish no longer strands a payment: test kills the relay after claiming, before marking; the event is published once it restarts, and the payment completes
+- [ ] The relay publishes each event at least once; two relays never publish from the same batch concurrently (`SKIP LOCKED`)
+- [ ] The same withdrawal request sent 5 times with one key → one withdrawal, one `hold`
+- [ ] 10 concurrent requests with one key → one withdrawal
+- [ ] The same key with a different amount → `409`, nothing changed
+- [ ] Two concurrent withdrawals that together exceed `available` → exactly one succeeds, the other `422`; `available` never negative
+- [ ] Insufficient funds → `422`, nothing stored; the same key succeeds once funds arrive
+- [ ] Provider times out after creating the transfer → the retry with the same key finds it; one transfer, executed once
+- [ ] Provider refuses the transfer → `failed`, funds released to `available`
+- [ ] Provider's update arrives before the submitter records `submitted` → `executed` once; the submitter's late transition skips
+- [ ] Duplicate transfer updates → applied once; a contradictory update → `409`, nothing changed
+- [ ] Submitter killed mid-submission and restarted → every withdrawal ends `executed` or `failed`
+- [ ] Reconciliation (including `held` and the outbox) reports zero difference after all of the above
+- [ ] Demo script covers withdrawals; CI green
+- [ ] README: guarantees table extended; known gaps updated
+- [ ] Tag `v0.1-simple-ledger` on the merge commit
+
+## Known gaps (deliberate)
+
+Slice 1's gaps stand, except the commit-then-publish gap (closed by the outbox). New:
+- **Outbox growth:** published rows are kept; a pruning job (or partitioning by month) is the evolution.
+- **Relay latency:** idle polling adds up to the poll interval (≤ 1 s) per event; `LISTEN/NOTIFY` is the evolution.
+- **No compliance review of withdrawals** (decision 30); in reality outgoing payments are screened (sanctions, fraud) before submission.
+- **No polling of the provider:** a withdrawal whose webhook never arrives stays `submitted`; reconciliation lists it. Real systems poll the provider's transfer status after a timeout.
+- **No cancellation**, and **no returns after execution** (SEPA R-transactions).
+- **Idempotency keys never expire.**
+- **The transactions list shows payments only;** withdrawals are read individually.
+- **provider-sim forgets transfers on restart:** its idempotency is in memory. Real provider idempotency is durable (and usually time-limited).
+- **No webhook authentication** on `/provider/transfer-updates` (as `POST /payments`).
+
+## Decisions
+
+Numbering continues from slice 1.
+
+22. **Transactional outbox:** events are stored in `outbox` in the same transaction as the state change they announce; a relay publishes them (at least once, no ordering guarantee); the outbox row's ID is the `event_id`. Supersedes slice 1 decision 18 (publish failure handling) and the re-publish-on-duplicate behaviour.
+23. **Relay leases:** claimed with `FOR UPDATE SKIP LOCKED` in a short transaction, published outside it, marked after the stream's acknowledgement; several relays may run.
+24. **Withdrawal idempotency:** required `Idempotency-Key`, `UNIQUE (account_id, idempotency_key)` on the withdrawal itself; repeats compared field by field (no hash, as decision 16); a repeat returns the withdrawal's current state. **Only a successful request consumes a key:** failures (including insufficient funds and our own `5xx`) store nothing, so a retry with the same key is evaluated afresh. Rationale: providers that cache responses per key, failures included, turn a transient fault on their side (a cached `500`) into a permanent one for the sender, whose only way out is a new key, which defeats the key. Stripe-style "the key records the first outcome" was the alternative.
+25. **Holds are synchronous:** `POST /withdrawals` reserves the funds (`move(available → held)`) in its own transaction, so the client learns at once whether the withdrawal is accepted (`201`) or refused for insufficient funds (`422`), and the answer is atomic with the reservation: the balance CHECK is the insufficient-funds check (no check-then-act). This is the banking contract: a transfer is accepted or refused when it is requested. (An exchange such as Kraken has no such need: withdrawals to an external account are infrequent and slow anyway, with checks, cool-off periods and email confirmation, so an asynchronous answer costs the client nothing. If this system gained such checks, they would be states between `held` and `submitted`, after the hold; see decision 30.) **Revises slice 1 decision 7** ("the API never changes balances"): balances change only through `ledger/` posting functions and `move()`, and the API may call a posting function inside its request transaction when the response depends on the outcome. Incoming payments are unchanged: the provider only needs to hear that its notification was recorded, not the booking's outcome, so booking stays in the worker. Insufficient funds stores nothing and leaves the key free (decision 24).
+26. **Unknown outcomes are retried with the same key**, never resolved by guessing: a withdrawal whose submission outcome is unknown stays `held` until the provider answers.
+27. **Provider results may arrive first:** `held → executed | failed` are legal, so the webhook never depends on the submitter's progress.
+28. **Outbox rows are kept after publishing** (`published_at` set, not deleted): the outbox doubles as a record of exactly what was published and when, which reconciliation and debugging use (e.g. which side stalled for a payment stuck in `created`), and a published event can be re-sent from its row. The partial index on unpublished rows keeps the relay's query fast as the table grows; pruning or monthly partitioning is the evolution (*Known gaps*). Deleting on publish was the alternative.
+29. **Provider transfer updates are applied in the webhook's own transaction:** record the update, transition the withdrawal and post its movement together, then answer. Unlike an incoming payment there is no asynchronous decision left to make, so a worker hop would add latency and an event type for nothing. It is fast enough: a handful of single-row statements, milliseconds against a provider's webhook timeout of seconds, so well inside the window before the provider gives up and resends. If it fails (e.g. the database is unavailable), the `5xx` makes the provider resend, and the conditional transition makes the resend safe. The one thing that could slow it is contention on a hot account's balance row (see slice 1's *Scaling notes*), which the load-testing slice should measure. Extends decision 25's revision of slice 1 decision 7: the API calls a posting function in its request transaction here too. In production an event hop may well be preferred anyway, for separation of concerns: ingestion only records, posting applies, and the webhook endpoint stays independent of ledger load and contention. That is the pattern incoming payments already demonstrate, so repeating it here would show nothing new (scope principle).
+30. **No compliance review of withdrawals** in this slice. In reality there would be one: outgoing payments are screened (sanctions, fraud, unusual activity) before they are sent, and it would sit between `held` and `submitted` (`held → under_review → approved → submitted`, the funds already reserved), with rejection releasing the hold. It would repeat slice 1's pseudo review without demonstrating anything new (scope principle).
+31. **The fake provider is test infrastructure in the Node codebase:** `node/src/provider-sim/`, run by compose as `provider-sim` from the same image, with failure modes switched on by environment variables. It belongs to neither implementation, so the Go stack reuses it unchanged, as it reuses `scripts/demo.sh` and the reconcile service.

@@ -487,7 +487,7 @@ No change in slice 1. The load-testing slice should measure it: throughput again
 4. **Rejections:** modelled as returned to sender in the ledger; the network return itself is out of scope.
 5. **IDs:** UUIDv7 stored as `uuid`, enforced by `CHECK (uuid_extract_version(…) = 7)`; app-generated, with `DEFAULT uuidv7()` on entity primary keys as a fallback only; TypeID-prefixed outside the database. Typeless references carry a `reference_type`. Primary keys: UUIDv7 for entities that may be referenced or exposed; `bigserial` for internal append-only logs. `balance_movements` counts as an entity because it becomes the double-entry transactions table.
 6. **Incoming idempotency:** `UNIQUE (network, network_transaction_id)`; no client `Idempotency-Key` until withdrawals.
-7. **API is ingestion only:** it never changes balances; all balance movements happen in the worker via the ledger module.
+7. **API is ingestion only:** it never changes balances; all balance movements happen in the worker via the ledger module. *(Revised in slice 2, decision 25: withdrawals hold funds synchronously in the API request, still only through the ledger's posting functions.)*
 8. **No check-then-act:** duplicate and race protection comes from DB constraints and row counts, never from a prior `SELECT`.
 9. **Queries:** raw parameterised SQL via `pg`, confined to the data-access layer, with explicit typed row mapping.
 10. **Ledger is self-protecting:** `balance_movements` with `UNIQUE (reference_type, reference_id, reference_step)`; `move()` is a no-op on a duplicate reference. Payment state drives the workflow but is not the only thing preventing double movements, avoiding coupling the ledger to payment state.
