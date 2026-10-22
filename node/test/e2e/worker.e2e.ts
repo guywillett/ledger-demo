@@ -10,7 +10,7 @@ import {
   balancesOf,
   createTestAccount,
   createTestApp,
-  notification,
+  notificationBody,
   postPayment,
   statusOf,
   type TestAccount,
@@ -70,7 +70,7 @@ const accountsUsed: Uuid<'acct'>[] = [];
 
 async function post(account: TestAccount): Promise<Uuid<'pay'>> {
   if (!accountsUsed.includes(account.id)) accountsUsed.push(account.id);
-  const response = await postPayment(app, notification({ creditor_iban: account.iban }));
+  const response = await postPayment(app, notificationBody({ creditor_iban: account.iban }));
   expect(response.statusCode).toBe(201);
   return fromTypeId('pay', String(response.json.id));
 }

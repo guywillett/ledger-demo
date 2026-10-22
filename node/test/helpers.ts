@@ -38,13 +38,14 @@ export const CAROL = {
 // Valid (checksum-correct) IBANs that are not ours.
 export const FOREIGN_IBAN = 'DE75512108001245126199';
 
-// Tests share the development database, so every test uses its own network transaction IDs
-// and never deletes anything: test files run in parallel without interfering.
+// Every test uses its own network transaction IDs (and its own accounts) and never deletes
+// anything, so test files can run in parallel without interfering.
 export function newNetworkTransactionId(): string {
   return `test-${randomUUID()}`;
 }
 
-export function notification(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+// A POST /payments body (the wire format), with a fresh network transaction ID.
+export function notificationBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     network_transaction_id: newNetworkTransactionId(),
     creditor_iban: ALICE.iban,

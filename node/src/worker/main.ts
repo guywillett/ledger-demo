@@ -12,7 +12,14 @@ import {
 import { decideRandomly } from '../compliance/decision.ts';
 import { createPool } from '../shared/db.ts';
 import { createLogger } from '../shared/logger.ts';
-import { assertStreamExists, closeNats, connectNats, CONSUMERS, STREAMS } from '../shared/nats.ts';
+import {
+  assertStreamExists,
+  closeNats,
+  connectNats,
+  CONSUMERS,
+  NATS_DRAIN_TIMEOUT_MS,
+  STREAMS,
+} from '../shared/nats.ts';
 import { loadWorkerConfig } from './config.ts';
 import { handleDelivery, retryDelay, type DeliveredMessage, type HandlerDeps } from './handler.ts';
 
@@ -32,13 +39,14 @@ const WORKING_INTERVAL_MS = 3000;
 // On shutdown, how long in-flight messages get to finish. Anything still unfinished isn't
 // acked, so JetStream redelivers it: a clean shutdown and a crash take the same path.
 const SHUTDOWN_GRACE_MS = 5000;
-const NATS_DRAIN_TIMEOUT_MS = 5000;
 // An idle fetch long-polls this long on the server before ending empty; the loop then fetches
 // again. A message arriving meanwhile is delivered at once. The client also sets an idle
 // heartbeat of half this, so a dead connection is noticed during the poll.
 const FETCH_EXPIRES_MS = 5000;
 // After a failed fetch: wait 1 s, doubling up to 30 s, before the next one.
 const FETCH_RETRY = { retryBaseDelayMs: 1000, retryMaxDelayMs: 30_000 };
+// After a transient failure handling a message: nak with 1 s, doubling per attempt up to 60 s.
+const DELIVERY_RETRY = { retryBaseDelayMs: 1000, retryMaxDelayMs: 60_000 };
 // A missing consumer or stream is a configuration problem (nats-setup not run, or the
 // consumer deleted): after this many attempts in a row, exit with a failing code.
 const MAX_MISSING_ATTEMPTS = 5;
@@ -76,8 +84,7 @@ async function start(): Promise<Running> {
     decide: () => decideRandomly(config.approveRate),
     reviewDelayMs: config.reviewDelayMs,
     workingIntervalMs: WORKING_INTERVAL_MS,
-    retryBaseDelayMs: 1000,
-    retryMaxDelayMs: 60_000,
+    ...DELIVERY_RETRY,
   };
 
   const inFlight = new Set<Promise<void>>();

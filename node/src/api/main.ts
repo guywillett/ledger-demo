@@ -6,6 +6,7 @@ import {
   closeNats,
   connectNats,
   jetStreamPublisher,
+  NATS_DRAIN_TIMEOUT_MS,
   PUBLISH_TIMEOUT_MS,
   STREAMS,
 } from '../shared/nats.ts';
@@ -13,8 +14,6 @@ import { buildApp } from './app.ts';
 import { loadApiConfig } from './config.ts';
 
 // Entry point: node src/api/main.ts. Top-level await works because this is an ES module.
-
-const NATS_DRAIN_TIMEOUT_MS = 5000;
 
 const config = loadApiConfig();
 const logger = createLogger({ service: 'api', level: config.logLevel });
@@ -75,8 +74,9 @@ try {
 
   await app.listen({ host: '0.0.0.0', port: config.port });
 } catch (err) {
-  // One structured line instead of a raw stack trace; exit at once (container will restart), since a half-started
-  // process (e.g. a NATS connection still reconnecting) would otherwise keep running.
+  // One structured line instead of a raw stack trace; exit at once (the container will
+  // restart), since a half-started process (e.g. a NATS connection still reconnecting) would
+  // otherwise keep running.
   logger.fatal({ err }, 'startup failed');
   process.exit(1);
 }

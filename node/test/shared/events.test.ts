@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { paymentCreatedV1Schema } from '../../src/shared/events.ts';
+import { toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { expectEventMatchesContract } from '../contract.ts';
 
 // The Zod schema (what Node consumers use) and the hand-written JSON Schema in contracts/events/
-// (what Go will use) must agree. Each case must be accepted by both or rejected by both.
+// (what Go will use) must agree. Each case must be accepted by both or rejected by both, apart
+// from the deliberate exceptions at the end.
 
 const valid = {
   event_id: 'evt_01m5cmffcafzwacj4r9sfjgy3z',
@@ -49,5 +51,21 @@ describe('payment.created v1 schemas agree', () => {
     const event = JSON.parse(JSON.stringify({ ...valid, ...overrides })) as unknown;
     expect(paymentCreatedV1Schema.safeParse(event).success).toBe(false);
     expect(acceptedByContract(event)).toBe(false);
+  });
+});
+
+// Where Zod is deliberately stricter than the JSON contract, because JSON Schema can't express
+// the rule (see src/shared/schemas.ts): the contract accepts these, Zod rejects them.
+describe('payment.created v1: Zod stricter than the contract', () => {
+  it.each([
+    [
+      'a TypeID holding a non-v7 UUID',
+      { payment_id: toTypeId('pay', '2c5ea4c0-4067-41fb-9c1e-5c3f2d7e8a90' as Uuid<'pay'>) },
+    ],
+    ['an amount above the int8 maximum', { amount_minor: '9223372036854775808' }],
+  ])('only Zod rejects %s', (_label, overrides) => {
+    const event = { ...valid, ...overrides };
+    expect(acceptedByContract(event)).toBe(true);
+    expect(paymentCreatedV1Schema.safeParse(event).success).toBe(false);
   });
 });

@@ -24,6 +24,7 @@ Portfolio project: a small payment event-processing system (incoming payments, p
 
 - **SQL:** raw parameterised SQL via `pg` (`$1`, `$2`), no ORM, no query builder. All SQL lives in the data-access layer, never in route handlers. Explicit typed row mapping.
 - **No check-then-act:** never `SELECT` to decide whether something has happened and then act. Use conditional `UPDATE … WHERE status = $expected`, `INSERT … ON CONFLICT DO NOTHING`, `rowCount` and `RETURNING`.
+- **Result vocabularies:** conditional transitions return `'applied' | 'skipped'` (skipped: not in the expected state); idempotent inserts return `'applied' | 'duplicate'` (duplicate: already recorded). Name new results the same way.
 - **Balances** change only through `ledger/move()`. The API never changes balances.
 - **Transactions:** callers own transaction boundaries via `withTransaction`; data-access functions never `BEGIN`/`COMMIT`. A function whose statements must be atomic together takes a `Tx` (branded: only `withTransaction` creates one); a single-statement function takes a `Queryable` (pool or `Tx`). Never call `withTransaction` inside another (that opens a second, independent transaction), and never wait on the network (NATS, HTTP) inside one.
 - **IDs:** UUIDv7 in `uuid` columns; TypeIDs (`typeid-js`, prefixes `acct`, `pay`, `evt`, `mov`) outside the database. Convert only at boundaries. Never store IDs as text.

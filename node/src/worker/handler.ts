@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import type pg from 'pg';
-import { decide, startReview, type Decision } from '../compliance/transitions.ts';
+import { decide, startReview } from '../compliance/transitions.ts';
+import type { Decision } from '../compliance/decision.ts';
 import { MovementConflictError, OverdraftError } from '../ledger/move.ts';
 import { book, LedgerInconsistencyError, postDecision } from '../ledger/posting.ts';
 import { withTransaction } from '../shared/db.ts';

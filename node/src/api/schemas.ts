@@ -1,18 +1,11 @@
 import { z } from 'zod';
 import { parseIban, type Iban } from '../shared/iban.ts';
-import {
-  fromTypeId,
-  toTypeId,
-  type IdPrefix,
-  type TypeIdString,
-  type Uuid,
-} from '../shared/ids.ts';
+import { toTypeId, type TypeIdString } from '../shared/ids.ts';
+import { amountMinorSchema, typeIdSchema } from '../shared/schemas.ts';
 import type { Notification } from '../ingestion/notifications.ts';
 import type { Payment } from '../payments/payments.ts';
 import type { Balance } from '../ledger/balances.ts';
 import type { PaymentStatus, StatusChange } from '../payments/status.ts';
-
-const INT8_MAX = 9223372036854775807n;
 
 // POST /payments body. z.object (not strictObject) drops unknown fields instead of rejecting
 // them: providers add fields to webhooks over time ("tolerant reader"). Dropped fields are
@@ -35,13 +28,7 @@ export const notificationBodySchema = z.object({
       return result.iban;
     }),
   provider_account_id: z.string().min(1).max(255).optional(),
-  // Digits only, no leading zero (so "0125" is not a second spelling of 125), at most int8.
-  amount_minor: z
-    .string()
-    .max(19)
-    .regex(/^[1-9][0-9]*$/, 'must be a positive whole number of minor units, as a string')
-    .transform((value) => BigInt(value))
-    .refine((value) => value <= INT8_MAX, 'is larger than the maximum amount'),
+  amount_minor: amountMinorSchema,
   currency: z.literal('EUR'),
   network: z.literal('SEPA'),
 });
@@ -91,26 +78,14 @@ export function toPaymentResponse(payment: Payment): PaymentResponse {
   };
 }
 
-// A TypeID in a path or query parameter, parsed into our UUID (checking the prefix and that it
-// holds a UUIDv7). The message doesn't repeat the input.
-const typeIdParam = <P extends IdPrefix>(prefix: P): z.ZodType<Uuid<P>, string> =>
-  z.string().transform((value, ctx): Uuid<P> => {
-    try {
-      return fromTypeId(prefix, value);
-    } catch {
-      ctx.issues.push({ code: 'custom', message: `must be a ${prefix}_ ID`, input: value });
-      return z.NEVER;
-    }
-  });
-
-export const accountParamsSchema = z.object({ account_id: typeIdParam('acct') });
+export const accountParamsSchema = z.object({ account_id: typeIdSchema('acct') });
 
 // Unknown query parameters are ignored (z.object strips them), like unknown body fields.
 // z.coerce: query parameters arrive as strings.
 export const transactionsQuerySchema = z.object({
   include: z.literal('history').optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
-  before: typeIdParam('pay').optional(),
+  before: typeIdSchema('pay').optional(),
 });
 
 export type BalanceResponse = {

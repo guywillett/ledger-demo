@@ -13,6 +13,8 @@ export const CONSUMERS = { worker: 'worker' } as const;
 
 // How long a publish waits for the stream's acknowledgement before it counts as failed.
 export const PUBLISH_TIMEOUT_MS = 2000;
+// On shutdown, how long to let the connection drain before closing it (see closeNats).
+export const NATS_DRAIN_TIMEOUT_MS = 5000;
 
 export async function connectNats(options: {
   url: string;

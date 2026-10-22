@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { decideRandomly } from '../../src/compliance/decision.ts';
-import { decide, startReview, type Decision } from '../../src/compliance/transitions.ts';
+import { decide, startReview } from '../../src/compliance/transitions.ts';
+import { decideRandomly, type Decision } from '../../src/compliance/decision.ts';
 import { paymentCreatedEvent } from '../../src/ingestion/events.ts';
 import type { Payment } from '../../src/payments/payments.ts';
 import { move } from '../../src/ledger/move.ts';

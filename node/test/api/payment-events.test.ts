@@ -10,7 +10,7 @@ import {
   createTestApp,
   eventsFor,
   failingPublisher,
-  notification,
+  notificationBody,
   postPayment,
 } from '../helpers.ts';
 
@@ -23,7 +23,7 @@ afterAll(testApp.close);
 
 describe('payment.created', () => {
   it('is published once for a new payment, stored with a per-payment Nats-Msg-Id', async () => {
-    const body = notification();
+    const body = notificationBody();
     const response = await postPayment(app, body);
     expect(response.statusCode).toBe(201);
 
@@ -62,7 +62,7 @@ describe('payment.created', () => {
   });
 
   it('is announced again for a duplicate while still created, and the stream drops the repeat', async () => {
-    const body = notification();
+    const body = notificationBody();
     const first = await postPayment(app, body);
     const second = await postPayment(app, body);
     expect([first.statusCode, second.statusCode]).toEqual([201, 200]);
@@ -78,7 +78,7 @@ describe('payment.created', () => {
   });
 
   it('is not published for a duplicate once the payment has moved on', async () => {
-    const body = notification();
+    const body = notificationBody();
     const first = await postPayment(app, body);
     // Simulate the worker having booked it.
     await pool.query(
@@ -93,14 +93,14 @@ describe('payment.created', () => {
   });
 
   it('is not published for conflicts, unknown accounts or invalid bodies', async () => {
-    const body = notification();
+    const body = notificationBody();
     const created = await postPayment(app, body);
     const before = testApp.published.length;
 
     const responses = [
       await postPayment(app, { ...body, amount_minor: '1' }),
-      await postPayment(app, notification({ creditor_iban: FOREIGN_IBAN })),
-      await postPayment(app, notification({ amount_minor: '0' })),
+      await postPayment(app, notificationBody({ creditor_iban: FOREIGN_IBAN })),
+      await postPayment(app, notificationBody({ amount_minor: '0' })),
     ];
     expect(responses.map((r) => r.statusCode)).toEqual([409, 422, 400]);
     expect(testApp.published.length).toBe(before);
@@ -112,7 +112,7 @@ describe('payment.created publish failure', () => {
   it('answers 503 with the payment recorded, and a retry announces it', async () => {
     const { logger, lines } = capturingLogger();
     const failing = await createTestApp({ logger, publisher: failingPublisher });
-    const body = notification();
+    const body = notificationBody();
     try {
       const response = await postPayment(failing.app, body);
       expect(response.statusCode).toBe(503);
