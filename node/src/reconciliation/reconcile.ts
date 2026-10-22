@@ -1,4 +1,5 @@
 import type { Queryable } from '../shared/db.ts';
+import { SUBJECTS } from '../shared/events.ts';
 import type { Uuid } from '../shared/ids.ts';
 import { parseStatus, type PaymentStatus } from '../payments/status.ts';
 
@@ -6,7 +7,8 @@ import { parseStatus, type PaymentStatus } from '../payments/status.ts';
 //   balances  (account_balances)  the current figures, a cache only move() changes
 //   movements (balance_movements) the append-only journal; replaying it must give the balances
 //   payments  (incoming_payments) the business state: what each status says should be booked
-// Plus what all three can agree on and still be wrong: payments that stopped part-way.
+// Plus what all three can agree on and still be wrong: payments that stopped part-way, and events
+// stuck in the outbox.
 //
 // Read-only. Run it in one REPEATABLE READ transaction (scripts/reconcile.ts does) so every
 // query sees the same snapshot while the worker carries on: each worker step commits its status
@@ -25,7 +27,8 @@ export type ReconcileOptions = {
   // Only these accounts (payments, movements, balances); all accounts if omitted. The delivery
   // statistics are always for the whole database (deliveries aren't linked to accounts).
   readonly accountIds?: readonly Uuid<'acct'>[];
-  // A payment in a non-final status for longer than this is reported as stuck.
+  // A payment in a non-final status, or an event unpublished, for longer than this is reported
+  // as stuck.
   readonly stuckAfterMs: number;
 };
 
@@ -56,12 +59,30 @@ export type PaymentMismatch = {
   readonly wrongAmount: boolean;
 };
 
+// For a payment stuck in `created`, where its payment.created event is, which says which side
+// stalled: 'unpublished', the relay (the event is still in the outbox); 'published', the worker
+// (the event reached the stream but the payment wasn't booked); 'missing', a bug (the payment
+// was stored without its event, which the shared transaction should make impossible).
+export type CreatedEventState = 'unpublished' | 'published' | 'missing';
+
 export type StuckPayment = {
   readonly paymentId: Uuid<'pay'>;
   readonly accountId: Uuid<'acct'>;
   readonly status: PaymentStatus;
   readonly since: Date;
   readonly ageSeconds: number;
+  // Only for status `created`; null otherwise.
+  readonly event: CreatedEventState | null;
+};
+
+export type OutboxStats = {
+  // Events unpublished for longer than the stuck threshold: the relay is down or failing.
+  readonly stuckUnpublished: number;
+  // The oldest unpublished event's age; null when everything is published.
+  readonly oldestUnpublishedAgeSeconds: number | null;
+  // The most publish attempts among unpublished events (0 when there are none): a high
+  // number means an event keeps failing to publish.
+  readonly maxUnpublishedAttempts: number;
 };
 
 export type DeliveryStats = {
@@ -79,9 +100,10 @@ export type ReconcileReport = {
   readonly differences: readonly AccountDifference[];
   readonly mismatches: readonly PaymentMismatch[];
   readonly stuck: readonly StuckPayment[];
+  readonly outbox: OutboxStats;
   readonly deliveries: DeliveryStats;
-  // The books agree: no account differences and no payment mismatches. Stuck payments don't
-  // make the books wrong; they are reported separately.
+  // The books agree: no account differences and no payment mismatches. Stuck payments and
+  // outbox problems don't make the books wrong; they are reported separately.
   readonly consistent: boolean;
 };
 
@@ -190,10 +212,18 @@ WHERE m.reference_type = 'payment' AND p.id IS NULL
 GROUP BY m.reference_id, m.account_id
 `;
 
-// Payments in a non-final status whose latest status change is older than the threshold.
+// Payments in a non-final status whose latest status change is older than the threshold. For
+// those still `created`, the state of their payment.created event in the outbox (at most one:
+// msg_id is unique per payment and status).
 const STUCK_SQL = `
 SELECT p.id, p.account_id, p.status, h.at,
-       floor(extract(epoch FROM now() - h.at))::int AS age_seconds
+       floor(extract(epoch FROM now() - h.at))::int AS age_seconds,
+       CASE WHEN p.status = 'created' THEN
+         COALESCE((SELECT CASE WHEN o.published_at IS NULL THEN 'unpublished' ELSE 'published' END
+                   FROM outbox o
+                   WHERE o.entity_type = 'payment' AND o.entity_id = p.id
+                     AND o.subject = $4), 'missing')
+       END AS event
 FROM incoming_payments p
 JOIN LATERAL (
   SELECT at FROM payment_status_history WHERE payment_id = p.id ORDER BY id DESC LIMIT 1
@@ -202,6 +232,20 @@ WHERE p.status = ANY($2::text[])
   AND h.at <= now() - $3 * interval '1 millisecond'
   AND ($1::uuid[] IS NULL OR p.account_id = ANY($1))
 ORDER BY h.at
+`;
+
+// Unpublished events, for the accounts checked: those whose entity belongs to one of them.
+// min() and max() of no rows are NULL.
+const OUTBOX_SQL = `
+SELECT count(*) FILTER (WHERE o.created_at <= now() - $2 * interval '1 millisecond')::int AS stuck,
+       floor(extract(epoch FROM now() - min(o.created_at)))::int AS oldest_age_seconds,
+       COALESCE(max(o.attempts), 0) AS max_attempts
+FROM outbox o
+WHERE o.published_at IS NULL
+  AND ($1::uuid[] IS NULL OR EXISTS (
+    SELECT 1 FROM incoming_payments p
+    WHERE o.entity_type = 'payment' AND p.id = o.entity_id AND p.account_id = ANY($1)
+  ))
 `;
 
 const DELIVERIES_BY_OUTCOME_SQL = `
@@ -304,14 +348,23 @@ export async function reconcile(
     status: string;
     at: Date;
     age_seconds: number;
-  }>(STUCK_SQL, [accounts, NON_FINAL, options.stuckAfterMs]);
+    event: CreatedEventState | null;
+  }>(STUCK_SQL, [accounts, NON_FINAL, options.stuckAfterMs, SUBJECTS.paymentCreated]);
   const stuck: StuckPayment[] = stuckRows.rows.map((row) => ({
     paymentId: row.id as Uuid<'pay'>,
     accountId: row.account_id as Uuid<'acct'>,
     status: parseStatus(row.status),
     since: row.at,
     ageSeconds: row.age_seconds,
+    event: row.event,
   }));
+
+  const outbox = await db.query<{
+    stuck: number;
+    oldest_age_seconds: number | null;
+    max_attempts: number;
+  }>(OUTBOX_SQL, [accounts, options.stuckAfterMs]);
+  const outboxRow = outbox.rows[0];
 
   const byOutcome = await db.query<{ outcome: string; n: number }>(DELIVERIES_BY_OUTCOME_SQL);
   const stale = await db.query<{ n: number }>(STALE_IN_PROGRESS_SQL, [options.stuckAfterMs]);
@@ -323,6 +376,11 @@ export async function reconcile(
     differences,
     mismatches,
     stuck,
+    outbox: {
+      stuckUnpublished: outboxRow?.stuck ?? 0,
+      oldestUnpublishedAgeSeconds: outboxRow?.oldest_age_seconds ?? null,
+      maxUnpublishedAttempts: outboxRow?.max_attempts ?? 0,
+    },
     deliveries: {
       byOutcome: Object.fromEntries(byOutcome.rows.map((r) => [r.outcome, r.n])),
       staleInProgress: stale.rows[0]?.n ?? 0,

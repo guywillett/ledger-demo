@@ -45,14 +45,6 @@ export const problems = {
     status: 422,
     detail: 'The creditor IBAN does not match any account managed by this application.',
   }),
-  notAnnounced: () => ({
-    type: 'urn:ledger-demo:problem:payment-not-announced',
-    title: 'Payment recorded but not yet passed on',
-    status: 503,
-    detail:
-      'The payment was recorded but could not be passed on for processing. Retry the ' +
-      'notification: it will be recognised as a duplicate and passed on again.',
-  }),
   invalidRequest: (errors: readonly ValidationError[]) => ({
     type: 'urn:ledger-demo:problem:invalid-request',
     title: 'Invalid request',

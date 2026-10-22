@@ -1,11 +1,12 @@
-import type { Queryable } from '../shared/db.ts';
+import type { Queryable, Tx } from '../shared/db.ts';
 import type { Iban } from '../shared/iban.ts';
 import { newUuid, type Uuid } from '../shared/ids.ts';
 import { paymentFromRow, type Payment, type PaymentRow } from '../payments/payments.ts';
+import { enqueuePaymentCreated } from './events.ts';
 
-// Ingestion: records provider notifications as payments. This is the edge where provider
-// identifiers (IBANs, provider account IDs) are mapped to our account; nothing downstream
-// sees them. It never touches balances.
+// Ingestion: records provider notifications as payments, and a new payment's payment.created
+// event in the outbox. This is the edge where provider identifiers (IBANs, provider account IDs)
+// are mapped to our account; nothing downstream sees them. It never touches balances.
 
 export type Notification = {
   readonly creditorIban: Iban;
@@ -27,7 +28,8 @@ export type StoredDetails = {
 };
 
 export type RecordResult =
-  | { readonly kind: 'created'; readonly payment: Payment }
+  // eventId: the payment.created event stored in the outbox with it.
+  | { readonly kind: 'created'; readonly payment: Payment; readonly eventId: Uuid<'evt'> }
   | { readonly kind: 'duplicate'; readonly payment: Payment }
   | {
       readonly kind: 'conflict';
@@ -79,7 +81,8 @@ SELECT * FROM upsert
 // so the outcome is exact (same details -> duplicate, different -> conflict, exactly one caller
 // creates), and the read below always finds the conflicting row. When the IBAN matches no
 // account, nothing is inserted and ON CONFLICT never runs, so only this read decides. It runs
-// after the statement with a fresh snapshot, so a competing insert committed in the meantime
+// after the statement with a fresh snapshot (also inside the caller's transaction: under READ
+// COMMITTED each statement takes its own), so a competing insert committed in the meantime
 // is seen (conflict). One that has not committed yet when the read runs gives unknown_account:
 // at that moment no payment with this network ID is stored, so that answer is accurate.
 const STORED_DETAILS_SQL = `
@@ -88,11 +91,14 @@ FROM incoming_payments
 WHERE network = $1 AND network_transaction_id = $2
 `;
 
+// Two statements in the caller's transaction: the upsert, then, only when it created the payment,
+// the payment.created event in the outbox. Duplicates, conflicts and unknown accounts store no
+// event. A Tx, because the payment and its event must commit together.
 export async function recordNotification(
-  db: Queryable,
+  tx: Tx,
   notification: Notification,
 ): Promise<RecordResult> {
-  const result = await db.query<PaymentRow & { inserted: boolean }>(RECORD_NOTIFICATION_SQL, [
+  const result = await tx.query<PaymentRow & { inserted: boolean }>(RECORD_NOTIFICATION_SQL, [
     newUuid('pay'),
     notification.creditorIban,
     notification.providerAccountId,
@@ -104,10 +110,12 @@ export async function recordNotification(
   const row = result.rows[0];
   if (row !== undefined) {
     const payment = paymentFromRow(row);
-    return row.inserted ? { kind: 'created', payment } : { kind: 'duplicate', payment };
+    if (!row.inserted) return { kind: 'duplicate', payment };
+    const eventId = await enqueuePaymentCreated(tx, payment);
+    return { kind: 'created', payment, eventId };
   }
 
-  const stored = await readStoredDetails(db, notification);
+  const stored = await readStoredDetails(tx, notification);
   if (stored === undefined) {
     return { kind: 'unknown_account' };
   }

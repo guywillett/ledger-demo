@@ -10,6 +10,7 @@ import {
   type JsMsg,
 } from '@nats-io/jetstream';
 import { decideRandomly } from '../compliance/decision.ts';
+import { pause, retryDelay } from '../shared/backoff.ts';
 import { createPool } from '../shared/db.ts';
 import { createLogger } from '../shared/logger.ts';
 import {
@@ -21,7 +22,7 @@ import {
   STREAMS,
 } from '../shared/nats.ts';
 import { loadWorkerConfig } from './config.ts';
-import { handleDelivery, retryDelay, type DeliveredMessage, type HandlerDeps } from './handler.ts';
+import { handleDelivery, type DeliveredMessage, type HandlerDeps } from './handler.ts';
 
 // Entry point: node src/worker/main.ts. Pulls payment.created messages from the durable
 // `worker` consumer (created by nats-setup from nats/consumers/) and handles up to
@@ -203,15 +204,6 @@ async function consumerMissing(r: Running): Promise<boolean> {
       (err.code === JetStreamApiCodes.ConsumerNotFound ||
         err.code === JetStreamApiCodes.StreamNotFound)
     );
-  }
-}
-
-// Waits, but returns early on shutdown.
-async function pause(ms: number, signal: AbortSignal): Promise<void> {
-  try {
-    await sleep(ms, undefined, { signal });
-  } catch {
-    // Aborted: shutting down.
   }
 }
 

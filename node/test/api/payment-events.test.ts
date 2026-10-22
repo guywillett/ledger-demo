@@ -1,38 +1,71 @@
 import { readFileSync } from 'node:fs';
 import { jetstreamManager } from '@nats-io/jetstream';
-import { afterAll, describe, expect, it } from 'vitest';
-import { paymentCreatedV1Schema } from '../../src/shared/events.ts';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { relayBatch } from '../../src/relay/relay.ts';
+import { fromTypeId, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { STREAMS } from '../../src/shared/nats.ts';
+import { expectEventMatchesContract } from '../contract.ts';
 import {
   ALICE,
   FOREIGN_IBAN,
-  capturingLogger,
+  connectTestNats,
   createTestApp,
-  eventsFor,
-  failingPublisher,
+  drainOutbox,
   notificationBody,
+  outboxRowsFor,
   postPayment,
+  recordingPublisher,
+  testRelayDeps,
+  testStreamPublisher,
 } from '../helpers.ts';
 
-// payment.created publishing, against the compose NATS (stream created by nats-setup).
+// payment.created: stored in the outbox by POST /payments, in the payment's own transaction,
+// and published by the relay. Runs in the serial "relay" project (vitest.config.ts): nothing
+// else writes to the outbox or the test stream meanwhile, so counts before and after a request
+// are exact.
 
 const testApp = await createTestApp();
-const { app, pool, nc } = testApp;
+const { app, pool } = testApp;
+const nc = await connectTestNats();
+const streamPublisher = testStreamPublisher(nc);
 
-afterAll(testApp.close);
+beforeEach(() => drainOutbox(pool, streamPublisher));
 
-describe('payment.created', () => {
-  it('is published once for a new payment, stored with a per-payment Nats-Msg-Id', async () => {
+afterAll(async () => {
+  await nc.drain();
+  await testApp.close();
+});
+
+function paymentIdOf(response: { json: Record<string, unknown> }): Uuid<'pay'> {
+  return fromTypeId('pay', String(response.json.id));
+}
+
+async function outboxCount(): Promise<number> {
+  const result = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM outbox');
+  return result.rows[0]?.n ?? 0;
+}
+
+describe('payment.created in the outbox', () => {
+  it('is stored once for a new payment, in the transaction that created it', async () => {
     const body = notificationBody();
     const response = await postPayment(app, body);
     expect(response.statusCode).toBe(201);
+    const paymentId = paymentIdOf(response);
 
-    const events = eventsFor(testApp, response.json.id);
-    expect(events).toHaveLength(1);
-    const [published] = events;
-    expect(published?.subject).toBe('payment.created');
-    expect(published?.event).toEqual({
-      event_id: expect.stringMatching(/^evt_/),
+    const rows = await outboxRowsFor(pool, paymentId);
+    expect(rows).toHaveLength(1);
+    const [row] = rows;
+    expect(row).toMatchObject({
+      entity_type: 'payment',
+      entity_id: paymentId,
+      subject: 'payment.created',
+      msg_id: `${String(response.json.id)}.created`,
+      attempts: 0,
+      published_at: null,
+    });
+    expect(row?.payload).toEqual({
+      // The outbox row's ID is the event_id.
+      event_id: row && toTypeId('evt', row.id),
       event_type: 'payment.created',
       schema_version: 1,
       payment_id: response.json.id,
@@ -43,59 +76,36 @@ describe('payment.created', () => {
       currency: 'EUR',
       occurred_at: response.json.created_at,
     });
+    expectEventMatchesContract(row?.payload);
     // No provider identifiers downstream.
-    expect(JSON.stringify(published?.event)).not.toContain(ALICE.iban);
-    expect(published?.msgId).toBe(`${String(response.json.id)}.created`);
-    expect(published?.result.duplicate).toBe(false);
+    expect(JSON.stringify(row?.payload)).not.toContain(ALICE.iban);
 
-    // Read it back from the stream: what consumers will actually get.
-    const jsm = await jetstreamManager(nc);
-    const stored = await jsm.streams.getMessage(STREAMS.payments, {
-      seq: published?.result.seq ?? 0,
-    });
-    expect(stored?.subject).toBe('payment.created');
-    expect(stored?.header.get('Nats-Msg-Id')).toBe(`${String(response.json.id)}.created`);
-    const decoded = stored?.json<unknown>();
-    expect(decoded).toEqual(published?.event);
-    // The consumer-side schema accepts it too.
-    expect(paymentCreatedV1Schema.safeParse(decoded).success).toBe(true);
-  });
-
-  it('is announced again for a duplicate while still created, and the stream drops the repeat', async () => {
-    const body = notificationBody();
-    const first = await postPayment(app, body);
-    const second = await postPayment(app, body);
-    expect([first.statusCode, second.statusCode]).toEqual([201, 200]);
-
-    // Two publishes, same message ID: the second lands within the duplicate window, so the
-    // stream acknowledges it as a duplicate of the first and stores nothing new.
-    const events = eventsFor(testApp, first.json.id);
-    expect(events).toHaveLength(2);
-    expect(events[1]?.msgId).toBe(events[0]?.msgId);
-    expect(events[1]?.event.event_id).not.toBe(events[0]?.event.event_id);
-    expect(events.map((e) => e.result.duplicate)).toEqual([false, true]);
-    expect(events[1]?.result.seq).toBe(events[0]?.result.seq);
-  });
-
-  it('is not published for a duplicate once the payment has moved on', async () => {
-    const body = notificationBody();
-    const first = await postPayment(app, body);
-    // Simulate the worker having booked it.
-    await pool.query(
-      `UPDATE incoming_payments SET status = 'received' WHERE network = 'SEPA' AND network_transaction_id = $1`,
-      [body.network_transaction_id],
+    // xmin is the ID of the transaction that wrote a row version: the same for both rows, so
+    // they were committed by one transaction.
+    const xmin = await pool.query<{ same: boolean }>(
+      `SELECT p.xmin::text = o.xmin::text AS same
+       FROM incoming_payments p JOIN outbox o ON o.entity_id = p.id
+       WHERE p.id = $1`,
+      [paymentId],
     );
-
-    const second = await postPayment(app, body);
-    expect(second.statusCode).toBe(200);
-    expect(second.json.status).toBe('received');
-    expect(eventsFor(testApp, first.json.id)).toHaveLength(1);
+    expect(xmin.rows).toEqual([{ same: true }]);
   });
 
-  it('is not published for conflicts, unknown accounts or invalid bodies', async () => {
+  it('is not stored again for duplicates', async () => {
+    const body = notificationBody();
+    const first = await postPayment(app, body);
+    const before = await outboxCount();
+
+    const repeats = [await postPayment(app, body), await postPayment(app, body)];
+    expect([first.statusCode, ...repeats.map((r) => r.statusCode)]).toEqual([201, 200, 200]);
+    expect(await outboxCount()).toBe(before);
+    expect(await outboxRowsFor(pool, paymentIdOf(first))).toHaveLength(1);
+  });
+
+  it('is not stored for conflicts, unknown accounts or invalid bodies', async () => {
     const body = notificationBody();
     const created = await postPayment(app, body);
-    const before = testApp.published.length;
+    const before = await outboxCount();
 
     const responses = [
       await postPayment(app, { ...body, amount_minor: '1' }),
@@ -103,52 +113,39 @@ describe('payment.created', () => {
       await postPayment(app, notificationBody({ amount_minor: '0' })),
     ];
     expect(responses.map((r) => r.statusCode)).toEqual([409, 422, 400]);
-    expect(testApp.published.length).toBe(before);
-    expect(eventsFor(testApp, created.json.id)).toHaveLength(1);
+    expect(await outboxCount()).toBe(before);
+    expect(await outboxRowsFor(pool, paymentIdOf(created))).toHaveLength(1);
   });
 });
 
-describe('payment.created publish failure', () => {
-  it('answers 503 with the payment recorded, and a retry announces it', async () => {
-    const { logger, lines } = capturingLogger();
-    const failing = await createTestApp({ logger, publisher: failingPublisher });
-    const body = notificationBody();
-    try {
-      const response = await postPayment(failing.app, body);
-      expect(response.statusCode).toBe(503);
-      expect(response.headers['retry-after']).toBe('5');
-      expect(response.json.type).toBe('urn:ledger-demo:problem:payment-not-announced');
-      // A retry against a still-failing publisher fails the same way.
-      expect((await postPayment(failing.app, body)).statusCode).toBe(503);
-    } finally {
-      await failing.close();
-    }
+describe('payment.created through the relay', () => {
+  it('reaches the PAYMENTS stream once', async () => {
+    const jsm = await jetstreamManager(nc);
+    const messagesBefore = (await jsm.streams.info(STREAMS.payments)).state.messages;
 
-    const stored = await pool.query<{ status: string; notification_count: number }>(
-      `SELECT status, notification_count FROM incoming_payments
-       WHERE network = 'SEPA' AND network_transaction_id = $1`,
-      [body.network_transaction_id],
-    );
-    expect(stored.rows).toEqual([{ status: 'created', notification_count: 2 }]);
+    const response = await postPayment(app, notificationBody());
+    expect(response.statusCode).toBe(201);
+    const [row] = await outboxRowsFor(pool, paymentIdOf(response));
 
-    // The failure is logged with the request's context and the event_id it was for.
-    const failures = lines().filter((line) => line.level === 'error');
-    expect(failures).toHaveLength(2);
-    expect(failures[0]).toMatchObject({
-      msg: 'payment recorded but payment.created could not be published',
-      network_transaction_id: body.network_transaction_id,
-      creditor_iban: 'FR76…0193',
-      event_id: expect.stringMatching(/^evt_/),
-      payment_id: expect.stringMatching(/^pay_/),
+    const msgId = `${String(response.json.id)}.created`;
+    const { publisher, published } = recordingPublisher(streamPublisher);
+    await relayBatch(testRelayDeps(pool, publisher));
+    // A second batch doesn't publish it again: it is marked published.
+    await relayBatch(testRelayDeps(pool, publisher));
+    const ours = published.filter((p) => p.msgId === msgId);
+    expect(ours).toHaveLength(1);
+    expect(ours[0]?.result.duplicate).toBe(false);
+    // Every publish the stream didn't drop as a duplicate stored one message (this one, and any
+    // earlier test's backed-off event that became claimable meanwhile), and nothing else did.
+    const stored = published.filter((p) => !p.result.duplicate).length;
+    expect((await jsm.streams.info(STREAMS.payments)).state.messages).toBe(messagesBefore + stored);
+
+    const message = await jsm.streams.getMessage(STREAMS.payments, {
+      seq: ours[0]?.result.seq ?? 0,
     });
-
-    // The provider retries once NATS is back: a duplicate, announced now.
-    const retry = await postPayment(app, body);
-    expect(retry.statusCode).toBe(200);
-    const announced = eventsFor(testApp, retry.json.id);
-    expect(announced).toHaveLength(1);
-    // Nothing was stored by the failed attempts, so this one is not a stream duplicate.
-    expect(announced[0]?.result.duplicate).toBe(false);
+    expect(message?.subject).toBe('payment.created');
+    expect(message?.header.get('Nats-Msg-Id')).toBe(msgId);
+    expect(message?.json<unknown>()).toEqual(row?.payload);
   });
 });
 

@@ -1,6 +1,11 @@
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
-import { reconcile, type Buckets, type ReconcileReport } from '../src/reconciliation/reconcile.ts';
+import {
+  reconcile,
+  type Buckets,
+  type CreatedEventState,
+  type ReconcileReport,
+} from '../src/reconciliation/reconcile.ts';
 import { parseEnv } from '../src/shared/config.ts';
 import { createPool, withTransaction } from '../src/shared/db.ts';
 import { fromTypeId, toTypeId, type Uuid } from '../src/shared/ids.ts';
@@ -9,12 +14,13 @@ import { createLogger } from '../src/shared/logger.ts';
 // Reconciles the ledger: node scripts/reconcile.ts [options] (npm run reconcile).
 //
 //   --account acct_…     only this account (repeatable); default all accounts
-//   --stuck-after <min>  report payments in a non-final status for longer (default 10)
-//   --fail-on-stuck      exit 2 if any payment is stuck
+//   --stuck-after <min>  report payments in a non-final status, and events unpublished, for
+//                        longer (default 10)
+//   --fail-on-stuck      exit 2 if any payment or event is stuck
 //   --json               print the report as JSON instead of a table
 //
 // Exit codes: 0 consistent; 1 the books disagree (any difference or mismatch); 2 consistent
-// but stuck payments and --fail-on-stuck; 3 couldn't run (bad arguments, database down).
+// but stuck payments or events and --fail-on-stuck; 3 couldn't run (bad arguments, database down).
 // Reads DATABASE_URL (and LOG_LEVEL) like the services; no NATS needed.
 
 const EXIT = { consistent: 0, inconsistent: 1, stuck: 2, error: 3 } as const;
@@ -55,7 +61,8 @@ async function main(): Promise<number> {
     );
     console.log(values.json ? toJson(report) : toText(report, stuckAfterMinutes));
     if (!report.consistent) return EXIT.inconsistent;
-    if (values['fail-on-stuck'] && report.stuck.length > 0) return EXIT.stuck;
+    const stuck = report.stuck.length > 0 || report.outbox.stuckUnpublished > 0;
+    if (values['fail-on-stuck'] && stuck) return EXIT.stuck;
     return EXIT.consistent;
   } finally {
     await pool.end();
@@ -148,15 +155,26 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
   if (report.stuck.length > 0) {
     lines.push(
       table([
-        ['payment', 'status', 'for'],
+        ['payment', 'status', 'for', 'payment.created'],
         ...report.stuck.map((s) => [
           toTypeId('pay', s.paymentId),
           s.status,
           `${Math.round(s.ageSeconds / 60)} min`,
+          s.event === null ? '' : EVENT_STATE[s.event],
         ]),
       ]),
     );
   }
+
+  const { outbox } = report;
+  lines.push(
+    '',
+    `Outbox: unpublished for more than ${stuckAfterMinutes} min: ${outbox.stuckUnpublished}` +
+      (outbox.oldestUnpublishedAgeSeconds === null
+        ? '; everything published'
+        : `; oldest unpublished: ${outbox.oldestUnpublishedAgeSeconds} s; ` +
+          `most attempts: ${outbox.maxUnpublishedAttempts}`),
+  );
 
   const outcomes = Object.entries(report.deliveries.byOutcome)
     .map(([outcome, n]) => `${outcome} ${n}`)
@@ -168,6 +186,13 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
   );
   return lines.join('\n');
 }
+
+// Which side stalled, for a payment stuck in `created`.
+const EVENT_STATE: Record<CreatedEventState, string> = {
+  unpublished: 'unpublished (relay)',
+  published: 'published (worker)',
+  missing: 'MISSING (bug: stored without its event)',
+};
 
 function table(rows: string[][]): string {
   const widths =

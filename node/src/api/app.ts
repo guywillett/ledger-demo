@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import Fastify, { LogController, type FastifyReply, type FastifyRequest } from 'fastify';
-import type { PaymentEvents } from '../ingestion/events.ts';
-import type { Queryable } from '../shared/db.ts';
+import type pg from 'pg';
 import type { Logger } from '../shared/logger.ts';
 import { registerAccountRoutes } from './accounts.ts';
 import { registerPaymentRoutes } from './payments.ts';
@@ -51,7 +50,7 @@ class AccessLog extends LogController {
 }
 
 // Builds the app without listening, so tests can drive it with app.inject().
-export function buildApp(deps: { db: Queryable; events: PaymentEvents; logger: Logger }): App {
+export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
   const app = Fastify({
     loggerInstance: deps.logger,
     logController: new AccessLog({ requestIdLogLabel: 'request_id' }),
@@ -82,7 +81,7 @@ export function buildApp(deps: { db: Queryable; events: PaymentEvents; logger: L
   // validation (400). We accept JSON only, so every other content type gets 415.
   app.removeContentTypeParser('text/plain');
 
-  registerPaymentRoutes(app, { db: deps.db, events: deps.events });
-  registerAccountRoutes(app, { db: deps.db });
+  registerPaymentRoutes(app, { pool: deps.pool });
+  registerAccountRoutes(app, { db: deps.pool });
   return app;
 }

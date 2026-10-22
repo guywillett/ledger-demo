@@ -4,6 +4,7 @@ import { decide, startReview } from '../compliance/transitions.ts';
 import type { Decision } from '../compliance/decision.ts';
 import { MovementConflictError, OverdraftError } from '../ledger/move.ts';
 import { book, LedgerInconsistencyError, postDecision } from '../ledger/posting.ts';
+import { retryDelay } from '../shared/backoff.ts';
 import { withTransaction } from '../shared/db.ts';
 import { paymentCreatedV1Schema, type PaymentCreatedV1 } from '../shared/events.ts';
 import { fromTypeId, toTypeId, type Uuid } from '../shared/ids.ts';
@@ -223,12 +224,4 @@ function isInvariantViolation(err: unknown): boolean {
     return true;
   }
   return typeof err === 'object' && err !== null && 'code' in err && err.code === '23514';
-}
-
-export function retryDelay(
-  deps: Pick<HandlerDeps, 'retryBaseDelayMs' | 'retryMaxDelayMs'>,
-  deliveryAttempt: number,
-): number {
-  const exponent = Math.min(Math.max(deliveryAttempt - 1, 0), 30);
-  return Math.min(deps.retryBaseDelayMs * 2 ** exponent, deps.retryMaxDelayMs);
 }

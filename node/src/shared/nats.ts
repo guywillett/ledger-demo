@@ -82,9 +82,9 @@ export type PublishResult = {
   readonly duplicate: boolean;
 };
 
-// The transport layer: how an event gets onto NATS. Code that announces events depends on
-// this type, not on JetStream, so the publisher is chosen where the app is wired together:
-// jetStreamPublisher in src/api/main.ts, a recording or failing one in the tests
+// The transport layer: how an event gets onto NATS. The relay (the only publisher) depends on
+// this type, not on JetStream, so the publisher is chosen where it is wired together:
+// jetStreamPublisher in src/relay/main.ts, a recording or failing one in the tests
 // (test/helpers.ts).
 export type EventPublisher = {
   // Publishes a JSON event and waits for the stream to acknowledge it. `msgId` becomes the

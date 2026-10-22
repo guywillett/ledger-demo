@@ -5,6 +5,7 @@ import type { Decision } from '../../src/compliance/decision.ts';
 import { recordNotification } from '../../src/ingestion/notifications.ts';
 import { type Payment } from '../../src/payments/payments.ts';
 import { book, postDecision } from '../../src/ledger/posting.ts';
+import { markPublished } from '../../src/outbox/outbox.ts';
 import { reconcile, type ReconcileReport } from '../../src/reconciliation/reconcile.ts';
 import { withTransaction, type Tx } from '../../src/shared/db.ts';
 import { newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
@@ -13,6 +14,7 @@ import {
   createTestPayment,
   createTestPool,
   newNetworkTransactionId,
+  outboxRowsFor,
   type TestAccount,
 } from '../helpers.ts';
 
@@ -242,6 +244,73 @@ describe('reconcile', () => {
     expect((await check(pool, account)).stuck).toEqual([]);
   });
 
+  // Nothing relays in these tests, so every payment's event is still unpublished unless a test
+  // changes that.
+  it('says which side stalled for a payment stuck in created', async () => {
+    const account = await createTestAccount(pool);
+    const unpublished = await createTestPayment(pool, account, 100n);
+    const published = await createTestPayment(pool, account, 200n);
+    const missing = await createTestPayment(pool, account, 300n);
+    const booked = await createTestPayment(pool, account, 400n);
+    await withTransaction(pool, (tx) => book(tx, booked.id));
+
+    const report = await inRolledBackTransaction(async (tx) => {
+      const [event] = await outboxRowsFor(pool, published.id);
+      if (event === undefined) throw new Error('no outbox row');
+      expect(await markPublished(tx, event.id)).toBe('applied');
+      await tx.query('DELETE FROM outbox WHERE entity_id = $1', [missing.id]);
+      return reconcile(tx, { accountIds: [account.id], stuckAfterMs: 0 });
+    });
+
+    const events = new Map(report.stuck.map((s) => [s.paymentId, s.event]));
+    expect(events).toEqual(
+      new Map([
+        [unpublished.id, 'unpublished'],
+        [published.id, 'published'],
+        [missing.id, 'missing'],
+        // Only for created: a booked payment's event has evidently been delivered.
+        [booked.id, null],
+      ]),
+    );
+    // A missing event is a bug to report, but the books still agree.
+    expect(report.consistent).toBe(true);
+  });
+
+  it('reports unpublished events, counting only those older than the threshold as stuck', async () => {
+    const account = await createTestAccount(pool);
+    const first = await createTestPayment(pool, account);
+    const second = await createTestPayment(pool, account);
+
+    const stuck = await reconcile(pool, { accountIds: [account.id], stuckAfterMs: 0 });
+    expect(stuck.outbox).toMatchObject({ stuckUnpublished: 2, maxUnpublishedAttempts: 0 });
+    expect(stuck.outbox.oldestUnpublishedAgeSeconds).toBeGreaterThanOrEqual(0);
+
+    // Unpublished, but not for long: reported, not stuck.
+    const recent = await check(pool, account);
+    expect(recent.outbox.stuckUnpublished).toBe(0);
+    expect(recent.outbox.oldestUnpublishedAgeSeconds).not.toBeNull();
+
+    const afterAttempts = await inRolledBackTransaction(async (tx) => {
+      await tx.query('UPDATE outbox SET attempts = 7 WHERE entity_id = $1', [second.id]);
+      return reconcile(tx, { accountIds: [account.id], stuckAfterMs: 0 });
+    });
+    expect(afterAttempts.outbox.maxUnpublishedAttempts).toBe(7);
+
+    const allPublished = await inRolledBackTransaction(async (tx) => {
+      await tx.query('UPDATE outbox SET published_at = now() WHERE entity_id = ANY($1)', [
+        [first.id, second.id],
+      ]);
+      return reconcile(tx, { accountIds: [account.id], stuckAfterMs: 0 });
+    });
+    expect(allPublished.outbox).toEqual({
+      stuckUnpublished: 0,
+      oldestUnpublishedAgeSeconds: null,
+      maxUnpublishedAttempts: 0,
+    });
+    // Outbox problems don't make the books inconsistent either.
+    expect(stuck.consistent).toBe(true);
+  });
+
   it('counts duplicate notifications', async () => {
     const account = await createTestAccount(pool);
     const notification = {
@@ -252,7 +321,9 @@ describe('reconcile', () => {
       network: 'SEPA' as const,
       networkTransactionId: newNetworkTransactionId(),
     };
-    for (let i = 0; i < 3; i++) await recordNotification(pool, notification);
+    for (let i = 0; i < 3; i++) {
+      await withTransaction(pool, (tx) => recordNotification(tx, notification));
+    }
     expect((await check(pool, account)).deliveries.duplicateNotifications).toBe(2n);
   });
 });
@@ -295,6 +366,25 @@ describe('scripts/reconcile.ts', () => {
     const { account } = await busyAccount();
     exitCode(run(['--account', account.typeId, '--stuck-after', '0'])).toBe(0);
     exitCode(run(['--account', account.typeId, '--stuck-after', '0', '--fail-on-stuck'])).toBe(2);
+  });
+
+  it('exits 2 with --fail-on-stuck for an unpublished event alone, saying which side stalled', async () => {
+    // Every payment final, but their events never published (nothing relays in these tests).
+    const account = await createTestAccount(pool);
+    await processPayment(await createTestPayment(pool, account), { outcome: 'approved' });
+    const done = run(['--account', account.typeId, '--stuck-after', '0', '--fail-on-stuck']);
+    exitCode(done).toBe(2);
+    expect(done.stdout).toContain('Stuck (non-final for more than 0 min): 0');
+    expect(done.stdout).toContain('Outbox: unpublished for more than 0 min: 1');
+
+    const waiting = await createTestPayment(pool, account);
+    const result = run(['--account', account.typeId, '--stuck-after', '0']);
+    exitCode(result).toBe(0);
+    expect(result.stdout).toMatch(
+      new RegExp(
+        `${toTypeId('pay', waiting.id)}\\s+created\\s+\\d+ min\\s+unpublished \\(relay\\)`,
+      ),
+    );
   });
 
   it.each([[['--account', 'pay_bad']], [['--stuck-after', 'soon']], [['--unknown']]])(

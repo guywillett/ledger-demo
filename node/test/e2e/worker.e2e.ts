@@ -8,32 +8,49 @@ import { reconcile } from '../../src/reconciliation/reconcile.ts';
 import { CONSUMERS, STREAMS } from '../../src/shared/nats.ts';
 import {
   balancesOf,
+  connectTestNats,
   createTestAccount,
   createTestApp,
+  drainOutbox,
   notificationBody,
   postPayment,
   statusOf,
+  testStreamPublisher,
   type TestAccount,
 } from '../helpers.ts';
 
-// The real worker as a child process (node src/worker/main.ts), against the test database and
-// the test NATS: payments are posted through the API app, which publishes payment.created,
-// and the worker consumes them through the durable `worker` consumer.
+// The real relay and worker as child processes (node src/relay/main.ts, node src/worker/main.ts),
+// against the test database and the test NATS, as in production: payments are posted through
+// the API app, which stores payment.created in the outbox; the relay publishes it, and the
+// worker consumes it through the durable `worker` consumer. One relay runs for the whole file;
+// workers are started (and killed) per test.
 
 const testApp = await createTestApp();
-const { app, pool, nc } = testApp;
+const { app, pool } = testApp;
+const nc = await connectTestNats();
 
-type Worker = {
+type Child = {
   readonly process: ChildProcess;
   readonly lines: () => Record<string, unknown>[];
   readonly exited: Promise<number | null>;
 };
-const workers: Worker[] = [];
+const workers: Child[] = [];
+let relay: Child | undefined;
 
-function startWorker(env: Record<string, string>): Promise<Worker> {
-  const child = spawn(process.execPath, ['src/worker/main.ts'], {
+function startWorker(env: Record<string, string>): Promise<Child> {
+  return startChild('src/worker/main.ts', 'worker started', { APPROVE_RATE: '1', ...env }).then(
+    (worker) => {
+      workers.push(worker);
+      return worker;
+    },
+  );
+}
+
+// Starts `script` and resolves once it has logged `ready`.
+function startChild(script: string, ready: string, env: Record<string, string>): Promise<Child> {
+  const child = spawn(process.execPath, [script], {
     // process.env already holds the test DATABASE_URL and NATS_URL (vitest config).
-    env: { ...process.env, LOG_LEVEL: 'info', APPROVE_RATE: '1', ...env },
+    env: { ...process.env, LOG_LEVEL: 'info', ...env },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
   let output = '';
@@ -46,11 +63,15 @@ function startWorker(env: Record<string, string>): Promise<Worker> {
       .filter((line) => line.startsWith('{'))
       .map((line) => JSON.parse(line) as Record<string, unknown>);
   const exited = new Promise<number | null>((resolve) => child.once('exit', resolve));
-  const worker = { process: child, lines, exited };
-  workers.push(worker);
-  return waitFor(() => lines().some((l) => l.msg === 'worker started'), 'worker start').then(
-    () => worker,
-  );
+  const started = { process: child, lines, exited };
+  return waitFor(() => lines().some((l) => l.msg === ready), `${script} start`).then(() => started);
+}
+
+async function kill(child: Child): Promise<void> {
+  if (child.process.exitCode === null && child.process.signalCode === null) {
+    child.process.kill('SIGKILL');
+    await child.exited;
+  }
 }
 
 async function waitFor(
@@ -83,18 +104,17 @@ async function movementSteps(paymentId: Uuid<'pay'>): Promise<string[]> {
   return result.rows.map((r) => r.reference_step);
 }
 
-// Deliveries of this payment's events (the event carries the payment ID; the delivery log
-// has the event ID, so match through the published events).
+// Deliveries of this payment's events: the delivery log has the event ID, and the outbox row
+// with that ID says which payment the event is about.
 async function deliveriesFor(
   paymentId: Uuid<'pay'>,
 ): Promise<{ outcome: string; delivery_attempt: number }[]> {
-  const eventIds = testApp.published
-    .filter((p) => p.event.payment_id !== undefined)
-    .filter((p) => fromTypeId('pay', String(p.event.payment_id)) === paymentId)
-    .map((p) => fromTypeId('evt', String(p.event.event_id)));
   const result = await pool.query<{ outcome: string; delivery_attempt: number }>(
-    'SELECT outcome, delivery_attempt FROM event_deliveries WHERE event_id = ANY($1) ORDER BY id',
-    [eventIds],
+    `SELECT d.outcome, d.delivery_attempt
+     FROM event_deliveries d JOIN outbox o ON o.id = d.event_id
+     WHERE o.entity_type = 'payment' AND o.entity_id = $1
+     ORDER BY d.id`,
+    [paymentId],
   );
   return result.rows;
 }
@@ -110,8 +130,10 @@ async function consumerDeliveries(): Promise<number> {
 }
 
 beforeAll(async () => {
-  // Start from an empty test stream: events published by unit tests would otherwise be the
-  // worker's first backlog. Only the test NATS is touched.
+  // Start from an empty outbox backlog and an empty test stream: the integration tests leave
+  // unpublished events (every payment they create has one) and published ones, which would
+  // otherwise be the worker's first backlog. The backlog is published here, then purged with
+  // the rest. Only the test NATS is touched.
   const serverName = nc.info?.server_name;
   if (serverName !== TEST_NATS_SERVER_NAME) {
     throw new Error(
@@ -119,23 +141,25 @@ beforeAll(async () => {
         `the e2e tests only run against ${TEST_NATS_SERVER_NAME} (nats-test).`,
     );
   }
+  await drainOutbox(pool, testStreamPublisher(nc));
   const jsm = await jetstreamManager(nc);
   await jsm.streams.purge(STREAMS.payments);
+
+  relay = await startChild('src/relay/main.ts', 'relay started', {});
 });
 
 afterEach(async () => {
-  for (const worker of workers.splice(0)) {
-    if (worker.process.exitCode === null && worker.process.signalCode === null) {
-      worker.process.kill('SIGKILL');
-      await worker.exited;
-    }
-  }
+  for (const worker of workers.splice(0)) await kill(worker);
 });
 
-afterAll(testApp.close);
+afterAll(async () => {
+  if (relay !== undefined) await kill(relay);
+  await nc.drain();
+  await testApp.close();
+});
 
 describe('worker process', () => {
-  it('processes a posted payment end to end, and shuts down cleanly on SIGTERM', async () => {
+  it('processes a posted payment end to end, and the worker shuts down cleanly on SIGTERM', async () => {
     const worker = await startWorker({ REVIEW_DELAY_MS: '300' });
     const account = await createTestAccount(pool);
     const paymentId = await post(account);
@@ -193,7 +217,7 @@ describe('worker process', () => {
       expect(await movementSteps(id)).toEqual(['book', 'credit']);
       expect(await deliveriesFor(id)).toEqual([{ outcome: 'applied', delivery_attempt: 1 }]);
     }
-    const processed = (w: Worker | undefined): number =>
+    const processed = (w: Child | undefined): number =>
       w?.lines().filter((l) => l.msg === 'payment processed').length ?? 0;
     expect(processed(a) + processed(b)).toBe(6);
     expect(processed(a)).toBeGreaterThan(0);
@@ -229,6 +253,16 @@ describe('worker process', () => {
     }
   });
 
+  it('the relay published each event once and shuts down cleanly on SIGTERM', async () => {
+    const published = relay?.lines().filter((l) => l.msg === 'event published') ?? [];
+    expect(published.length).toBeGreaterThan(0);
+    expect(published.some((l) => l.stream_duplicate === true)).toBe(false);
+
+    relay?.process.kill('SIGTERM');
+    expect(await relay?.exited).toBe(0);
+    expect(relay?.lines().some((l) => l.msg === 'shutting down')).toBe(true);
+  });
+
   // After everything above (a kill -9 mid-review, two workers sharing the consumer, reviews
   // longer than ack_wait), the books must still agree: the "Done when" reconciliation check.
   it('leaves the books consistent for every account it used', async () => {
@@ -236,8 +270,9 @@ describe('worker process', () => {
     expect(report.accountsChecked).toBe(accountsUsed.length);
     expect(report.differences).toEqual([]);
     expect(report.mismatches).toEqual([]);
-    // Every payment finished: none left in a non-final status.
+    // Every payment finished: none left in a non-final status, and every event published.
     expect(report.stuck).toEqual([]);
+    expect(report.outbox.stuckUnpublished).toBe(0);
     expect(report.consistent).toBe(true);
   });
 });

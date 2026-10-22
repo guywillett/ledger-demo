@@ -11,8 +11,7 @@ import {
   newNetworkTransactionId,
   notificationBody,
   postPayment,
-  refusingDb,
-  unusedEvents,
+  refusingPool,
 } from '../helpers.ts';
 
 const { app, pool, close } = await createTestApp();
@@ -323,6 +322,7 @@ describe('POST /payments: logging', () => {
     ]);
     expect(domain[0]).toMatchObject({ creditor_iban: 'FR76…0193', amount_minor: '1250' });
     expect(domain[0]?.payment_id).toMatch(/^pay_/);
+    expect(domain[0]?.event_id).toMatch(/^evt_/);
     expect(domain[1]).toMatchObject({ duplicate: true, notification_count: 2 });
     expect(domain[2]).toMatchObject({
       differing_fields: ['amount_minor'],
@@ -375,8 +375,7 @@ describe('POST /payments: internal inconsistency', () => {
   it('answers 500 and logs an error, without blaming the caller', async () => {
     const { logger, lines } = capturingLogger();
     const stubbed = buildApp({
-      db: refusingDb({ creditor_iban: ALICE.iban, amount_minor: 1250n, currency: 'EUR' }),
-      events: unusedEvents,
+      pool: refusingPool({ creditor_iban: ALICE.iban, amount_minor: 1250n, currency: 'EUR' }),
       logger,
     });
     try {

@@ -1,39 +1,20 @@
+import { enqueue } from '../outbox/outbox.ts';
+import type { Tx } from '../shared/db.ts';
 import { SUBJECTS, type PaymentCreatedV1Wire } from '../shared/events.ts';
-import { newUuid, toTypeId, type TypeIdString } from '../shared/ids.ts';
-import type { EventPublisher, PublishResult } from '../shared/nats.ts';
+import { newUuid, toTypeId, type TypeIdString, type Uuid } from '../shared/ids.ts';
 import type { Payment } from '../payments/payments.ts';
 
-// The events ingestion produces. Only payment.created in slice 1.
+// The events ingestion produces: only payment.created. They are written to the outbox in the
+// transaction that records the payment, and the relay publishes them (src/relay/), so the
+// payment and its event commit together or not at all.
 
-export type PublishedEvent = PublishResult & { readonly eventId: TypeIdString<'evt'> };
-
-// A failed publish, carrying the event_id it was for: a publish that timed out may still have
-// been stored, so logs need the ID to match the two up.
-export class PublishFailedError extends Error {
-  readonly eventId: TypeIdString<'evt'>;
-
-  constructor(eventId: TypeIdString<'evt'>, cause: unknown) {
-    super(`publishing event ${eventId} failed`, { cause });
-    this.name = 'PublishFailedError';
-    this.eventId = eventId;
-  }
-}
-
-// The Nats-Msg-Id for an event: one per payment and event type, not the random event_id. A
-// repeat of the same announcement within the stream's duplicate window (a publish that timed
-// out but was stored, then retried; provider retries while the worker is slow) is then
-// acknowledged as a duplicate and not stored again. Beyond the window, consumers' idempotency
-// on payment state handles repeats.
+// The Nats-Msg-Id for an event: one per payment and event type, not the event_id. If the relay
+// publishes the same outbox row twice (it crashed after publishing but before marking it), the
+// stream acknowledges the repeat as a duplicate and doesn't store it again, within its duplicate
+// window. Beyond the window, consumers' idempotency on payment state handles repeats.
 export function paymentMessageId(payment: Payment, event: 'created'): string {
   return `${toTypeId('pay', payment.id)}.${event}`;
 }
-
-// The domain layer: which events ingestion announces, and what they contain. Built by
-// paymentEvents() below on top of an EventPublisher (the transport), so the route only ever
-// says "announce this payment" and never sees NATS.
-export type PaymentEvents = {
-  paymentCreated(payment: Payment): Promise<PublishedEvent>;
-};
 
 export function paymentCreatedEvent(
   payment: Payment,
@@ -54,30 +35,17 @@ export function paymentCreatedEvent(
   };
 }
 
-// A factory, not a class: the returned methods close over `publisher` (they keep a reference
-// to the one passed in here), which is dependency injection without a constructor. Calling
-// paymentEvents() publishes nothing; each later paymentCreated(payment) call builds the event
-// and publishes it through that publisher.
-//
-// Each call builds a new event with a new event_id, also when it re-announces a payment whose
-// earlier publish failed: without an outbox, event IDs aren't stored. If the stream already
-// holds this payment's payment.created (same message ID, within the duplicate window), the
-// result has duplicate: true and the stored event keeps its original event_id.
-export function paymentEvents(publisher: EventPublisher): PaymentEvents {
-  return {
-    async paymentCreated(payment) {
-      const eventId = toTypeId('evt', newUuid('evt'));
-      const event = paymentCreatedEvent(payment, eventId);
-      try {
-        const result = await publisher.publish(
-          SUBJECTS.paymentCreated,
-          event,
-          paymentMessageId(payment, 'created'),
-        );
-        return { ...result, eventId };
-      } catch (err) {
-        throw new PublishFailedError(eventId, err);
-      }
-    },
-  };
+// Stores payment.created in the outbox, in the transaction that created the payment. Returns the
+// event's ID (the outbox row's ID), for logging.
+export async function enqueuePaymentCreated(tx: Tx, payment: Payment): Promise<Uuid<'evt'>> {
+  const id = newUuid('evt');
+  await enqueue(tx, {
+    id,
+    entityType: 'payment',
+    entityId: payment.id,
+    subject: SUBJECTS.paymentCreated,
+    msgId: paymentMessageId(payment, 'created'),
+    payload: paymentCreatedEvent(payment, toTypeId('evt', id)),
+  });
+  return id;
 }

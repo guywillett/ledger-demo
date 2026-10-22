@@ -106,13 +106,14 @@ services:
 
   api:
     build: ./node
-    # Named, and built the same way by the worker service: one image for both.
+    # Named, and built the same way by the worker and relay services: one image for all three.
     image: ledger-demo-node
-    # The API exits with a failing code if it can't start or loses NATS for good; restart it.
+    # The API exits with a failing code if it can't start; restart it.
     restart: unless-stopped
+    # Postgres only: the API stores events in the outbox and never talks to NATS (the relay
+    # publishes them).
     environment:
       DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
-      NATS_URL: nats://nats:4222
       PORT: "3000"
       LOG_LEVEL: info
     # No healthcheck yet (no health endpoint; see Known gaps in the slice spec): nothing waits
@@ -121,6 +122,26 @@ services:
     # npm run dev:api on the host, which wants the same port.
     ports:
       - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # Publishes the outbox to JetStream (src/relay/). Several instances can run at once
+  # (docker compose up -d --scale relay=2): each claims its own batches of events.
+  relay:
+    build: ./node
+    image: ledger-demo-node
+    command: ["node", "src/relay/main.ts"]
+    # Exits with a failing code if it can't start or loses NATS for good; restart it.
+    restart: unless-stopped
+    # Graceful shutdown finishes the batch in progress first. If NATS is unreachable, each
+    # publish in it can take PUBLISH_TIMEOUT_MS (2 s): 10 × 2 s, then up to 5 s to drain NATS.
+    # After this, Docker sends SIGKILL (the batch's leases expire and it is published again).
+    stop_grace_period: 30s
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: info
     depends_on:
       migrate:
         condition: service_completed_successfully

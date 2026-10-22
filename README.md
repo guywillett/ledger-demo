@@ -4,11 +4,18 @@
 
 A small payment event-processing system (incoming payments, pseudo compliance review, ledger balances) built to demonstrate correctness under duplicates, retries, crashes and concurrency: **however often a notification or event is repeated, redelivered or processed concurrently, and wherever a process crashes, every balance changes exactly once.** Implemented in Node.js/TypeScript; a Go implementation against the same database schema and contracts comes later.
 
-The specs and decisions are in [`docs/`](docs/): [slice 1](docs/slices/slice-1-incoming-payments.md) is what's built so far.
+The specs and decisions are in [`docs/`](docs/): [slice 1](docs/slices/slice-1-incoming-payments.md) is built, and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) (transactional outbox, withdrawals) is in progress: the outbox is done.
 
 ```text
-provider ──POST /payments──► API ──┬──► Postgres: payment `created` (no balance change)
-(webhook)                          └──► JetStream: payment.created
+provider ──POST /payments──► API ──► Postgres, one transaction:
+(webhook)                              payment `created` (no balance change)
+                                       + payment.created in the outbox
+                                               │
+                                               ▼
+                                 relay (any number of instances): claim, publish, mark
+                                               │
+                                               ▼
+                                 JetStream: payment.created
                                                │
                                                ▼
                                  worker (any number of instances)
@@ -24,6 +31,7 @@ provider ──POST /payments──► API ──┬──► Postgres: payment 
 | Guarantee | How | Proved by |
 |---|---|---|
 | A repeated notification changes nothing | `UNIQUE (network, network_transaction_id)` and one upsert statement; same details → `200`, different → `409` | `test/api/payments.test.ts` (5 repeats, 10 concurrent, conflicts) |
+| An event is never lost between commit and publish | the event is written to `outbox` in the same transaction as the payment; a relay publishes it at least once (claims leased with `FOR UPDATE SKIP LOCKED`, marked after the stream's acknowledgement); the stream drops a repeat by its `msg_id` | `test/api/payment-events.test.ts` (one outbox row, same transaction); `test/outbox/outbox.test.ts` (rollback, leases, disjoint concurrent claims); `test/relay/relay.test.ts` (failure and retry; a relay "crashing" after publishing, before marking: published again, dropped by the stream) |
 | A repeated or concurrent event moves money once | every step is a conditional transition (`UPDATE … WHERE status = $expected`), never check-then-act | `test/worker/handler.test.ts` (same event twice, two consumers at once) |
 | The ledger protects itself | `move()` records each movement under `UNIQUE (reference_type, reference_id, reference_step)`; a reused reference with other details is refused | `test/ledger/move.test.ts` |
 | Crash safety | each step commits on its own; a redelivery skips what's done, and a recorded decision is never re-made | `test/worker/handler.test.ts` (crash after booking, after deciding); `test/e2e/worker.e2e.ts` (real `kill -9` mid-review) |
@@ -36,7 +44,7 @@ provider ──POST /payments──► API ──┬──► Postgres: payment 
 ## Quick start
 
 ```sh
-docker compose up -d --build     # Postgres, NATS, migrations, stream setup, API and worker
+docker compose up -d --build     # Postgres, NATS, migrations, stream setup, API, relay and worker
 scripts/demo.sh                  # duplicates, conflicts, a killed worker, two workers; then reconciles
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance    # alice
 ```
@@ -47,9 +55,9 @@ CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) does the same from a
 
 ## Known gaps
 
-Deliberate, and described with their evolution path under *Known gaps* in the [slice 1 spec](docs/slices/slice-1-incoming-payments.md):
+Deliberate, and described with their evolution path under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md) and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) specs:
 
-- **Commit-then-publish:** if the API crashes after storing a payment but before publishing its event, only a provider retry announces it; a transactional outbox closes this later. Reconciliation lists such payments as stuck in `created`.
+- **Outbox growth and relay latency:** published outbox rows are kept (pruning or partitioning is the evolution), and the relay polls, so an event can wait up to 1 s before it is published (`LISTEN/NOTIFY` is the evolution).
 - **No dead-letter handling:** a message that exhausts `max_deliver`, or that the worker terminates, is only logged; reconciliation shows the payment as stuck.
 - **Security:** no authentication on the API (including webhook signatures) or on NATS, and one database user for everything (append-only is enforced by triggers rather than per-service roles).
 - **Simplifications:** approve/reject is random; demo HTTP status codes rather than a real webhook contract; one IBAN per account and a single provider; no health endpoint; the SEPA country list in `node/src/shared/iban.ts` is not yet verified against the EPC's official list.
@@ -65,7 +73,8 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `migrate` | dbmate: applies `db/migrations/` and exits | — |
 | `migrate-test` | the same migrations against the test database `ledger_test` | — |
 | `nats-setup` | nats-box: applies the stream and consumer definitions in `nats/` and exits | — |
-| `api` | the Node API (`node/`, image `ledger-demo-node`) | `3000` |
+| `api` | the Node API (`node/`, image `ledger-demo-node`); Postgres only, no NATS | `3000` |
+| `relay` | the Node relay (same image): publishes the outbox to JetStream | — |
 | `worker` | the Node worker (same image): books, reviews and posts payments | — |
 | `nats-test` | a separate NATS for the tests, so test events never reach the development stream | `4223`, `8223` |
 | `nats-setup-test` | the same definitions applied to `nats-test` | — |
@@ -91,7 +100,7 @@ docker compose stop             # stop containers, keep them and their data
 docker compose down             # remove containers and network; data volumes are kept
 ```
 
-`migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits; `nats-setup` does the same for the JetStream streams once NATS is healthy. It's normal for both to show as exited. The `api` starts only after both have succeeded.
+`migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits; `nats-setup` does the same for the JetStream streams once NATS is healthy. It's normal for both to show as exited. The `api` starts only after `migrate` has succeeded, the `relay` and `worker` after both.
 
 There's no health endpoint yet (see *Known gaps* in the slice spec); `docker compose logs api` shows "Server listening" once it's up.
 
@@ -104,6 +113,17 @@ NATS="docker run --rm --network ledger-demo_default natsio/nats-box:0.20.0 nats 
 $NATS stream info PAYMENTS                       # configuration and message counts
 $NATS stream get PAYMENTS --last-for payment.created   # the latest payment.created event
 $NATS consumer info PAYMENTS worker              # the worker's consumer: pending, unacked, redelivered
+```
+
+### Relay
+
+`docker compose up -d` starts one relay. It claims unpublished events from the `outbox` table in batches (`RELAY_BATCH_SIZE`, default 10, leased for `RELAY_LEASE_MS`, default 30 s), publishes each with its `msg_id` as the `Nats-Msg-Id`, and marks it published; a failed publish is retried with backoff. When it has caught up it polls every 200 ms to 1 s.
+
+```sh
+docker compose logs -f relay               # one "event published" line per event
+docker compose up -d --scale relay=2       # two instances: each claims its own batches
+docker compose exec postgres psql -U ledger -d ledger -c \
+  'SELECT subject, msg_id, attempts, last_error, published_at FROM outbox ORDER BY id DESC LIMIT 5'
 ```
 
 ### Worker
@@ -205,11 +225,13 @@ npm run test:db:reset           # drop and re-migrate ledger_test
 
 Tests default to the compose services on `localhost`: `ledger_test` and the test NATS (`nats-test`, port 4223). To point them elsewhere, set `TEST_DATABASE_URL` / `TEST_NATS_URL` (and `TEST_LOG_LEVEL` to see logs); the tests deliberately ignore `DATABASE_URL` / `NATS_URL`, so a development value in your shell can't redirect them. Two guards on top: the database name must end in `_test`, and the e2e tests only purge a NATS server named `ledger-demo-test`. Every API test response is also checked against `contracts/openapi.yaml`, and every published event against its schema in `contracts/events/`. Tests need Postgres and the test NATS, i.e. `docker compose up -d`.
 
+One exception to "tests don't depend on each other": the tests that claim from the outbox (`test/relay/`, `test/outbox/`, `test/api/payment-events.test.ts`). Claiming takes the oldest unpublished events in the whole table, and every test that creates a payment leaves one behind, so these files form a second Vitest project, `relay`, that runs after all the others and one file at a time; each of their tests first drains the backlog (see `vitest.config.ts`).
+
 ```sh
-npm run test:e2e                # process-level tests: start the real worker, kill -9 it, restart it (~15 s)
+npm run test:e2e                # process-level tests: the real relay and worker; kill -9 the worker, restart it (~40 s)
 ```
 
-The e2e tests purge the test stream first; don't run them at the same time as `npm test`.
+The e2e tests drain the test outbox and purge the test stream first; don't run them at the same time as `npm test`.
 
 #### Running the API locally
 
@@ -223,7 +245,7 @@ npm run start:api               # without watching
 docker compose start api        # afterwards, back to the container
 ```
 
-The same curl works against either. Record a payment notification for alice (repeat it to see the duplicate handling: `200` and a rising `notification_count`; change the amount to see a `409`). Each `201` publishes a `payment.created` event (see *Streams* above to read it back):
+The same curl works against either. Record a payment notification for alice (repeat it to see the duplicate handling: `200` and a rising `notification_count`; change the amount to see a `409`). Each `201` stores a `payment.created` event in the outbox, and the relay publishes it (see *Streams* above to read it back):
 
 ```sh
 curl -i -X POST localhost:3000/payments -H 'content-type: application/json' -d '{
