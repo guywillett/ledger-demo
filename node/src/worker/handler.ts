@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type pg from 'pg';
 import { decide, startReview } from '../compliance/transitions.ts';
 import type { Decision } from '../compliance/decision.ts';
-import { LedgerInconsistencyError, MovementConflictError, OverdraftError } from '../ledger/move.ts';
+import { isInvariantViolation } from '../ledger/invariants.ts';
 import { book, postDecision } from '../ledger/posting.ts';
 import { withTransaction } from '../shared/db.ts';
 import { paymentCreatedV1Schema } from '../shared/events.ts';
@@ -112,20 +112,4 @@ async function review(deps: HandlerDeps, msg: DeliveredMessage): Promise<void> {
     await sleep(wait);
     remaining -= wait;
   }
-}
-
-// Errors that mean our data or code is wrong, as opposed to a dependency failing: the two
-// guards disagree (LedgerInconsistencyError), a movement reference is reused for something
-// else (MovementConflictError), a movement would overdraw a bucket (OverdraftError, which
-// wraps the database's check_violation as its cause), or any other CHECK constraint rejected
-// a change (Postgres error code 23514 on the error itself).
-function isInvariantViolation(err: unknown): boolean {
-  if (
-    err instanceof LedgerInconsistencyError ||
-    err instanceof MovementConflictError ||
-    err instanceof OverdraftError
-  ) {
-    return true;
-  }
-  return typeof err === 'object' && err !== null && 'code' in err && err.code === '23514';
 }

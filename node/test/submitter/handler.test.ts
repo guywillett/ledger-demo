@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import type { DeliveredMessage } from '../../src/consumer/messages.ts';
 import { reconcile } from '../../src/reconciliation/reconcile.ts';
+import { move } from '../../src/ledger/move.ts';
 import { execute } from '../../src/ledger/withdrawals.ts';
 import { withTransaction } from '../../src/shared/db.ts';
 import { newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
@@ -281,12 +282,48 @@ describe('handleSubmission', () => {
     const msg = message(body);
     expect(await handleSubmission(deps(provider, { logger }), msg)).toBe('failed');
     expect(msg.calls).toEqual(['working', 'term']);
+    // Both transfer IDs are logged with the error (pino's err serializer copies its fields).
     expect(lines().find((l) => l.level === 'fatal')).toMatchObject({
       alert: true,
-      stored_transfer_id: 'tr_A',
-      reported_transfer_id: 'tr_B',
+      msg: 'invariant violated; terminating the message',
+      err: expect.objectContaining({ storedTransferId: 'tr_A', reportedTransferId: 'tr_B' }),
     });
     expect((await getWithdrawal(pool, withdrawal.id))?.providerTransferId).toBe('tr_A');
+  });
+
+  it('terminates a ledger invariant violation with an alert, as the worker does', async () => {
+    // A release movement already exists for a withdrawal still held: the two guards disagree,
+    // so release() throws LedgerInconsistencyError. Retrying can't fix it.
+    const { withdrawal, body } = await heldWithdrawal();
+    await withTransaction(pool, (tx) =>
+      move(tx, {
+        accountId: withdrawal.accountId,
+        from: 'held',
+        to: 'available',
+        amountMinor: withdrawal.amountMinor,
+        referenceType: 'withdrawal',
+        referenceId: withdrawal.id,
+        referenceStep: 'release',
+      }),
+    );
+    const before = await balancesOf(pool, withdrawal.accountId);
+    const { logger, lines } = capturingLogger();
+    const msg = message(body);
+
+    const outcome = await handleSubmission(
+      deps(fakeProvider({ kind: 'refused', reason: 'creditor account closed' }), { logger }),
+      msg,
+    );
+    expect(outcome).toBe('failed');
+    expect(msg.calls).toEqual(['working', 'term']);
+    expect(lines().find((l) => l.level === 'fatal')).toMatchObject({
+      alert: true,
+      msg: 'invariant violated; terminating the message',
+      err: expect.objectContaining({ type: 'LedgerInconsistencyError' }),
+    });
+    // The transition rolled back with the failed movement.
+    expect((await getWithdrawal(pool, withdrawal.id))?.status).toBe('held');
+    expect(await balancesOf(pool, withdrawal.accountId)).toEqual(before);
   });
 
   // A crash between the call and the transaction looks the same: accepted, nothing recorded.

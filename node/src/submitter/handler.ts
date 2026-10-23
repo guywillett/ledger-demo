@@ -2,6 +2,7 @@ import type pg from 'pg';
 import type { DeliveryOutcome } from '../consumer/deliveries.ts';
 import { withDeliveryLog, type DeliveryContext, type Settled } from '../consumer/delivery-log.ts';
 import type { DeliveredMessage } from '../consumer/messages.ts';
+import { isInvariantViolation } from '../ledger/invariants.ts';
 import { markSubmitted, release } from '../ledger/withdrawals.ts';
 import { retryDelay } from '../shared/backoff.ts';
 import { withTransaction } from '../shared/db.ts';
@@ -37,8 +38,7 @@ export function handleSubmission(
   msg: DeliveredMessage,
 ): Promise<DeliveryOutcome> {
   // 1-2. Recording the delivery and parsing the event are the shared delivery lifecycle's
-  // (consumer/delivery-log.ts), as is settling the message and recording the outcome. Our bugs
-  // are recognised here (bug() below), so any other error is transient.
+  // (consumer/delivery-log.ts), as is settling the message and recording the outcome.
   return withDeliveryLog(
     {
       consumer: 'submitter',
@@ -47,7 +47,11 @@ export function handleSubmission(
       pool: deps.pool,
       logger: deps.logger,
       retry: deps,
-      isBug: () => false,
+      // Our bugs among thrown errors: a ledger invariant violation from markSubmitted or
+      // release, as in the worker, or the provider's update having stored another transfer ID
+      // (decision 35). Terminated with an alert, the withdrawal left held; the error's fields
+      // (e.g. both transfer IDs) are logged with it.
+      isBug: (err) => isInvariantViolation(err) || err instanceof TransferIdMismatchError,
       // E.g. the database went away after an accepted call. The redelivery calls again with
       // the same key, gets the same transfer, and records it.
       transientFailureMessage: 'submission failed; will retry',
@@ -86,23 +90,9 @@ export function handleSubmission(
       // 5. Record the outcome.
       switch (result.kind) {
         case 'accepted': {
-          let recorded: 'applied' | 'skipped';
-          try {
-            recorded = await withTransaction(deps.pool, (tx) =>
-              markSubmitted(tx, withdrawalId, result.transferId),
-            );
-          } catch (err) {
-            if (!(err instanceof TransferIdMismatchError)) throw err;
-            // The provider's update stored another transfer ID than this submission got.
-            return bug(
-              ctx,
-              {
-                stored_transfer_id: err.storedTransferId,
-                reported_transfer_id: err.reportedTransferId,
-              },
-              'provider transfer ID contradicts the stored one',
-            );
-          }
+          const recorded = await withTransaction(deps.pool, (tx) =>
+            markSubmitted(tx, withdrawalId, result.transferId),
+          );
           ctx.log.info(
             { transfer_id: result.transferId, submitted: recorded },
             recorded === 'applied' ? 'withdrawal submitted' : 'withdrawal already moved on',
