@@ -79,6 +79,7 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `worker` | the Node worker (same image): books, reviews and posts payments | — |
 | `nats-test` | a separate NATS for the tests, so test events never reach the development stream | `4223`, `8223` |
 | `nats-setup-test` | the same definitions applied to `nats-test` | — |
+| `provider-sim` | a fake BaaS provider (same image): accepts SEPA transfers, reports their results by webhook; failures by trigger (see *Fake provider*) | `4000` |
 | `reconcile` | reconciliation on demand (`docker compose run --rm reconcile`); not started by `up` (profile `tools`) | — |
 
 Connection details from the host:
@@ -115,6 +116,26 @@ $NATS stream info PAYMENTS                       # configuration and message cou
 $NATS stream get PAYMENTS --last-for payment.created   # the latest payment.created event
 $NATS stream get WITHDRAWALS --last-for withdrawal.held # the latest withdrawal.held event (IDs and amount only)
 $NATS consumer info PAYMENTS worker              # the worker's consumer: pending, unacked, redelivered
+```
+
+### Fake provider
+
+`provider-sim` stands in for the BaaS the withdrawals go out through (test infrastructure; see *Fake provider* in the [slice 2 spec](docs/slices/slice-2-outbox-and-withdrawals.md)). `POST /transfers` is idempotent on `Idempotency-Key`; each transfer's result (`executed` or `failed`) follows after `SIM_EXECUTION_DELAY_MS`. Until the API's webhook exists, results are only logged. Failure modes are chosen by the start of `remittance_info`: `SIM REFUSE`, `SIM ERROR`, `SIM SLOW`, `SIM FAIL`, `SIM DUPLICATE`, `SIM EARLY`.
+
+```sh
+curl -s -X POST localhost:4000/transfers -H 'content-type: application/json' \
+  -H 'Idempotency-Key: wd_01m5jjt69mec4t28vcqmrkmf79' -d '{
+  "amount_minor": "2500", "currency": "EUR",
+  "creditor_iban": "DE75512108001245126199", "creditor_name": "Jane Doe",
+  "remittance_info": "Rent October", "reference": "wd_01m5jjt69mec4t28vcqmrkmf79"
+}'                                          # 201 {"transfer_id":"tr_…"}; again: 200, same ID
+curl -s -X POST localhost:4000/transfers -H 'content-type: application/json' \
+  -H 'Idempotency-Key: refuse-1' -d '{
+  "amount_minor": "2500", "currency": "EUR",
+  "creditor_iban": "DE75512108001245126199", "creditor_name": "Jane Doe",
+  "remittance_info": "SIM REFUSE", "reference": "wd_test"
+}'                                          # 422 {"reason":"creditor account closed"}
+docker compose logs provider-sim            # the transfers, and their results 2 s later
 ```
 
 ### Relay

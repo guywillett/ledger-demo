@@ -176,6 +176,27 @@ services:
       nats-setup:
         condition: service_completed_successfully
 
+  # A fake BaaS provider (src/provider-sim/): accepts SEPA transfers idempotently and reports
+  # their results to a webhook. Test infrastructure, part of neither implementation (slice 2
+  # decision 31). Failures are chosen by triggers in remittance_info (SIM REFUSE, SIM ERROR, …)
+  # or by the SIM_*_RATE variables (0, off, by default). State is in memory: a restart forgets
+  # every transfer.
+  provider-sim:
+    build: ./node
+    image: ledger-demo-node
+    command: ["node", "src/provider-sim/main.ts"]
+    restart: unless-stopped
+    environment:
+      PORT: "4000"
+      LOG_LEVEL: info
+      SIM_EXECUTION_DELAY_MS: "2000"
+      # Unset until the API's transfer-update webhook exists (step 6, which sets it to
+      # http://api:3000/provider/transfer-updates): results are logged, not sent.
+      # SIM_WEBHOOK_URL: http://api:3000/provider/transfer-updates
+    # Host port 4000, for curl.
+    ports:
+      - "4000:4000"
+
   # Reconciliation on demand: docker compose run --rm reconcile [options]. It only reads the
   # shared database, so it checks whichever implementation wrote the data; scripts/demo.sh
   # uses it rather than a script inside the worker image, which the Go worker won't have.

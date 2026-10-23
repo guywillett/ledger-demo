@@ -194,12 +194,27 @@ Updates are recorded in `transfer_updates` (one row per distinct `provider_event
 
 ### Fake provider (`provider-sim`)
 
-A small HTTP service (decision 31), run by compose (`provider-sim`, same image), standing in for the BaaS:
-- `POST /transfers`: idempotent on `Idempotency-Key` (in-memory map, enough for a demo: a restart forgets transfers, see *Known gaps*); answers `201` with a transfer ID, or the same ID again for a repeated key.
-- After `SIM_EXECUTION_DELAY_MS`, sends `executed` (or `failed` with probability `SIM_FAIL_RATE`) to the API's webhook, retrying until it gets a 2xx.
-- Failure injection, each a probability: `SIM_REFUSE_RATE` (permanent `422` at submission), `SIM_ERROR_RATE` (`503` without creating the transfer), `SIM_SLOW_RATE` (creates the transfer, then answers after the submitter's timeout: the unknown-outcome case), `SIM_DUPLICATE_WEBHOOK_RATE` (sends the update twice), `SIM_EARLY_WEBHOOK_RATE` (sends the update before answering the submission: the `held → executed` race).
+A small HTTP service (decision 31; `node/src/provider-sim/`), run by compose (`provider-sim`, same image, port 4000), standing in for the BaaS. State is an in-memory map keyed by `Idempotency-Key`: a restart forgets every transfer (*Known gaps*).
 
-Defaults in compose are mild (a demo should mostly succeed); tests and the demo script turn individual failure modes up.
+**`POST /transfers`**, header `Idempotency-Key` (the submitter sends the withdrawal's TypeID). Body: `{ amount_minor, currency: "EUR", creditor_iban, creditor_name, remittance_info?, reference }` (`reference`: our withdrawal TypeID, at most 35 characters as a SEPA end-to-end ID, echoed back in updates). Validated like a real SEPA provider (IBAN through `parseIban`, the SEPA text rules): invalid → `400` listing each problem by path and message (never the input values), so the submitter's logs show why.
+- A new key: the transfer is created, `201 { transfer_id: "tr_…", status: "accepted" }`, and its result is scheduled.
+- The same key and the same body: `200` with the same transfer; nothing new is created or scheduled.
+- The same key with another body: `409`, as real providers answer. Our submitter must never cause one: it always resends the same request.
+
+**Results by webhook:** `SIM_EXECUTION_DELAY_MS` (default 2000) after creation, `POST` to `SIM_WEBHOOK_URL`: `{ provider_event_id, transfer_id, reference, status: "executed" | "failed", reason?, occurred_at }` (`provider_event_id` unique per update; a duplicate delivery repeats it). Retried until a `2xx` (each request with a timeout), 1 s doubling to 30 s, giving up after `SIM_WEBHOOK_MAX_ATTEMPTS` (default 20) with an `error` log: real providers give up eventually too, which is what reconciliation's stuck-`submitted` check is for. **With `SIM_WEBHOOK_URL` unset, results are logged, not sent** (compose leaves it unset until the webhook endpoint exists, step 6).
+
+**Failure modes** (decision 34): deterministic triggers at the start of `remittance_info`, valid SEPA basic text so they pass our API's validation:
+
+| `remittance_info` starts with | Behaviour |
+|---|---|
+| `SIM REFUSE` | `422 { reason }` at submission; no transfer created. Permanent: the refusal is remembered per key, so the same request is refused again (a random rate isn't re-rolled) and another body with the key is a `409` |
+| `SIM ERROR` | `503` without creating the transfer, the first time only for that key; the retry succeeds |
+| `SIM SLOW` | creates the transfer, then answers after `SIM_SLOW_DELAY_MS` (default 10 s, beyond the submitter's timeout): the unknown-outcome case. A retry meanwhile gets `200` at once |
+| `SIM FAIL` | accepted (`201`); the result is `failed` with a reason |
+| `SIM DUPLICATE` | the result is delivered twice, with the same `provider_event_id` |
+| `SIM EARLY` | one delivery attempt is made before the submission is answered `201`: the race of decision 27. If that attempt fails, the retries carry on in the background, so a failing webhook doesn't hold the response |
+
+Plus optional random rates for chaos runs, `SIM_REFUSE_RATE`, `SIM_ERROR_RATE`, `SIM_SLOW_RATE`, `SIM_FAIL_RATE`, `SIM_DUPLICATE_RATE`, `SIM_EARLY_RATE` (default 0, off). A trigger wins over the rates. Compose sets no rates: the demo should mostly succeed, and tests and the demo script choose failures by trigger.
 
 ## Reconciliation
 
@@ -280,3 +295,4 @@ Numbering continues from slice 1.
 31. **The fake provider is test infrastructure in the Node codebase:** `node/src/provider-sim/`, run by compose as `provider-sim` from the same image, with failure modes switched on by environment variables. It belongs to neither implementation, so the Go stack reuses it unchanged, as it reuses `scripts/demo.sh` and the reconcile service.
 32. **Outgoing text fields use the SEPA basic character set** (the EPC's basic Latin set: `a-z A-Z 0-9 / - ? : ( ) . , ' +` and space; extended sets exist only by national agreement, so they are not assumed). Requests outside it are rejected (`400` from step 3), never transliterated, so what the client sees is exactly what is sent. Enforced by CHECKs on `withdrawals.creditor_name` and `remittance_info`, and by `sepaTextSchema` (`shared/schemas.ts`) at the API, which mirrors them. Leading and trailing whitespace is trimmed first (it is almost always a slip; inner whitespace is kept), and an optional field that is empty or blank means none (`null`, the one stored spelling of none): normalisations whose result the response shows, so the client still sees exactly what is stored and sent.
 33. **Client request bodies are strict; provider webhooks are tolerant readers.** `POST /accounts/:id/withdrawals` rejects unknown fields (`z.strictObject`): it is our own client asking to move money, so a misspelt optional field (`remitance_info`) must fail rather than be silently dropped. `POST /payments` ignores unknown fields, because providers add fields to webhooks over time and a new field must not break ingestion.
+34. **provider-sim failures are chosen deterministically by triggers in the remittance text** (as provider sandboxes use magic amounts or names), with optional random rates for chaos runs. Probabilities alone would make tests and the demo flaky; a trigger makes each failure mode a test case that always happens.
