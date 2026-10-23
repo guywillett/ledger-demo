@@ -4,19 +4,14 @@ import { decide, startReview } from '../compliance/transitions.ts';
 import type { Decision } from '../compliance/decision.ts';
 import { LedgerInconsistencyError, MovementConflictError, OverdraftError } from '../ledger/move.ts';
 import { book, postDecision } from '../ledger/posting.ts';
-import { retryDelay } from '../shared/backoff.ts';
 import { withTransaction } from '../shared/db.ts';
 import { paymentCreatedV1Schema } from '../shared/events.ts';
 import { toTypeId } from '../shared/ids.ts';
 import type { Logger } from '../shared/logger.ts';
 import { paymentExists } from '../payments/payments.ts';
-import { parseEvent, peekEventId, type DeliveredMessage } from '../consumer/messages.ts';
-import {
-  finishDelivery,
-  startDelivery,
-  type DeliveryId,
-  type DeliveryOutcome,
-} from '../consumer/deliveries.ts';
+import type { DeliveryOutcome } from '../consumer/deliveries.ts';
+import { withDeliveryLog } from '../consumer/delivery-log.ts';
+import type { DeliveredMessage } from '../consumer/messages.ts';
 
 // Handles one delivery of a payment.created event: the worker's steps 1-10 in the slice spec.
 // Posting and compliance take turns, each step its own transaction:
@@ -43,123 +38,68 @@ export type HandlerDeps = {
   readonly retryMaxDelayMs: number;
 };
 
-export async function handleDelivery(
-  deps: HandlerDeps,
-  msg: DeliveredMessage,
-): Promise<DeliveryOutcome> {
-  // Step 1: log the delivery before anything else, with the event_id if it can be read at all.
-  const peekedEventId = peekEventId(msg.body);
-  let log = deps.logger.child({
-    nats_msg_id: msg.natsMsgId,
-    delivery_attempt: msg.deliveryAttempt,
-    ...(peekedEventId === null ? {} : { event_id: toTypeId('evt', peekedEventId) }),
-  });
-
-  let deliveryId: DeliveryId;
-  try {
-    deliveryId = await startDelivery(deps.pool, {
+export function handleDelivery(deps: HandlerDeps, msg: DeliveredMessage): Promise<DeliveryOutcome> {
+  // Step 1 (recording the delivery) and step 2 (validating the event) are the shared delivery
+  // lifecycle's (consumer/delivery-log.ts), as is settling the message and recording the outcome.
+  return withDeliveryLog(
+    {
       consumer: 'worker',
-      eventId: peekedEventId,
-      natsMsgId: msg.natsMsgId,
-      deliveryAttempt: msg.deliveryAttempt,
-    });
-  } catch (err) {
-    // Can't even record it (e.g. the database is down): try again later.
-    log.error({ err }, 'could not record delivery; will retry');
-    msg.nak(retryDelay(deps, msg.deliveryAttempt));
-    return 'failed';
-  }
+      eventType: 'payment.created',
+      schema: paymentCreatedV1Schema,
+      pool: deps.pool,
+      logger: deps.logger,
+      retry: deps,
+      isBug: isInvariantViolation,
+    },
+    msg,
+    async (event, ctx) => {
+      const paymentId = event.payment_id;
+      ctx.bind({ payment_id: toTypeId('pay', paymentId) });
 
-  // Signal vs record (consumer/messages.ts): record, then ack; term or nak, then record.
-  const finish = async (outcome: DeliveryOutcome): Promise<DeliveryOutcome> => {
-    await finishDelivery(deps.pool, deliveryId, outcome);
-    return outcome;
-  };
-  const record = async (outcome: DeliveryOutcome): Promise<DeliveryOutcome> => {
-    try {
-      await finishDelivery(deps.pool, deliveryId, outcome);
-    } catch (err) {
-      log.error({ err, outcome }, 'could not record the delivery outcome');
-    }
-    return outcome;
-  };
-  const stop = (outcome: DeliveryOutcome, reason: string): Promise<DeliveryOutcome> => {
-    msg.term(reason);
-    return record(outcome);
-  };
-  const retryLater = (): Promise<DeliveryOutcome> => {
-    msg.nak(retryDelay(deps, msg.deliveryAttempt));
-    return record('failed');
-  };
+      // Steps 3-8. Each result is 'applied' (this delivery made the transition) or 'skipped'.
+      const booked = await withTransaction(deps.pool, (tx) => book(tx, paymentId));
+      const reviewStarted = await withTransaction(deps.pool, (tx) => startReview(tx, paymentId));
+      // Only the delivery that started the review waits it out. A duplicate (everything will
+      // skip), an unknown payment, or a redelivery after a crash between Tx 2 and Tx 3 goes
+      // straight on: the review has already happened from the system's point of view, and Tx 3
+      // still records at most one decision.
+      if (reviewStarted === 'applied') await review(deps, ctx.message);
+      const decision = deps.decide();
+      const decided = await withTransaction(deps.pool, (tx) => decide(tx, paymentId, decision));
+      // Which way to post comes from the recorded state, not from `decision`: on a redelivery
+      // after an earlier decision, the one just made was discarded by Tx 3.
+      const posted = await withTransaction(deps.pool, (tx) => postDecision(tx, paymentId));
 
-  try {
-    // Step 2: validate. An invalid message is terminated: redelivering it can't fix it.
-    const event = parseEvent(paymentCreatedV1Schema, msg.body);
-    if (event === undefined) {
-      log.error('invalid payment.created event; terminating it');
-      return await stop('invalid', 'invalid payment.created event');
-    }
-    const paymentId = event.payment_id;
-    log = log.child({ payment_id: toTypeId('pay', paymentId) });
+      const changed =
+        booked === 'applied' ||
+        reviewStarted === 'applied' ||
+        decided === 'applied' ||
+        posted !== 'skipped';
 
-    // Steps 3-8. Each result is 'applied' (this delivery made the transition) or 'skipped'.
-    const booked = await withTransaction(deps.pool, (tx) => book(tx, paymentId));
-    const reviewStarted = await withTransaction(deps.pool, (tx) => startReview(tx, paymentId));
-    // Only the delivery that started the review waits it out. A duplicate (everything will
-    // skip), an unknown payment, or a redelivery after a crash between Tx 2 and Tx 3 goes
-    // straight on: the review has already happened from the system's point of view, and Tx 3
-    // still records at most one decision.
-    if (reviewStarted === 'applied') await review(deps, msg);
-    const decision = deps.decide();
-    const decided = await withTransaction(deps.pool, (tx) => decide(tx, paymentId, decision));
-    // Which way to post comes from the recorded state, not from `decision`: on a redelivery
-    // after an earlier decision, the one just made was discarded by Tx 3.
-    const posted = await withTransaction(deps.pool, (tx) => postDecision(tx, paymentId));
+      if (changed) {
+        ctx.log.info(
+          {
+            booked,
+            review_started: reviewStarted,
+            decided: decided === 'applied' ? decision.outcome : 'skipped',
+            posted,
+          },
+          'payment processed',
+        );
+        return ctx.done('applied');
+      }
 
-    const changed =
-      booked === 'applied' ||
-      reviewStarted === 'applied' ||
-      decided === 'applied' ||
-      posted !== 'skipped';
-
-    if (changed) {
-      log.info(
-        {
-          booked,
-          review_started: reviewStarted,
-          decided: decided === 'applied' ? decision.outcome : 'skipped',
-          posted,
-        },
-        'payment processed',
-      );
-      const outcome = await finish('applied');
-      msg.ack();
-      return outcome;
-    }
-
-    // Nothing changed: either everything had already happened (a duplicate), or there is no
-    // such payment (the event refers to nothing, e.g. after a database reset). This read only
-    // classifies the outcome; every transition has already been attempted.
-    if (!(await paymentExists(deps.pool, paymentId))) {
-      log.error('payment.created event for an unknown payment; terminating it');
-      return await stop('invalid', 'unknown payment');
-    }
-    log.info('duplicate delivery: payment already processed');
-    const outcome = await finish('duplicate');
-    msg.ack();
-    return outcome;
-  } catch (err) {
-    if (isInvariantViolation(err)) {
-      // A bug, not a transient failure: retrying can't fix it, so don't loop on it. The
-      // payment stays where it stopped (reconciliation shows it); someone has to look.
-      log.fatal({ err, alert: true }, 'invariant violated; terminating the message');
-      return await stop('failed', 'invariant violation');
-    }
-    // Transient (e.g. the database went away mid-way). Committed steps stay committed; the
-    // redelivery carries on from there.
-    log.error({ err }, 'processing failed; will retry');
-    return await retryLater();
-  }
+      // Nothing changed: either everything had already happened (a duplicate), or there is no
+      // such payment (the event refers to nothing, e.g. after a database reset). This read only
+      // classifies the outcome; every transition has already been attempted.
+      if (!(await paymentExists(deps.pool, paymentId))) {
+        ctx.log.error('payment.created event for an unknown payment; terminating it');
+        return ctx.stop('invalid', 'unknown payment');
+      }
+      ctx.log.info('duplicate delivery: payment already processed');
+      return ctx.done('duplicate');
+    },
+  );
 }
 
 // The pseudo review: wait reviewDelayMs, telling JetStream we're still working before each
