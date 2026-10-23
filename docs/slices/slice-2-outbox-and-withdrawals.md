@@ -166,18 +166,28 @@ The withdrawal and, with `?include=history`, its status history. `GET /accounts/
 
 ### Submitter
 
-A consumer of `withdrawal.held` (stream `WITHDRAWALS`, subjects `withdrawal.>`, durable consumer `submitter`; definitions in `nats/` as for `PAYMENTS`). It runs in its own process (`node/src/submitter/`), sharing the pull loop extracted from the worker (fetch exactly the free slots, bounded concurrency, graceful shutdown), so its scaling and failure behaviour match the worker's.
+A consumer of `withdrawal.held` (stream `WITHDRAWALS`, durable consumer `submitter`, `nats/consumers/WITHDRAWALS/submitter.json`: filter `withdrawal.held`, explicit ack, `ack_wait` 30 s, `max_deliver` 100, delays set per `nak`). It runs in its own process (`node/src/submitter/`, compose service `submitter`), on the pull loop shared with the worker (`src/consumer/consume.ts`: fetch exactly the free slots, bounded concurrency, graceful shutdown), so its scaling and failure behaviour match the worker's.
+
+The provider call is bounded by `PROVIDER_TIMEOUT_MS` (default 5 s), which must be at most two thirds of the consumer's `ack_wait`, read from NATS at startup (so the JSON definition can't drift from the check): a call that outlived its message's lease would see the message redelivered to another instance while it is still waiting, and the withdrawal sent again with the same key at the same time. The submitter refuses to start otherwise. Just before the call it signals `working()`, so the call starts with the full lease however long the database steps before it took. The provider client (`submitter/provider.ts`) is the HTTP boundary: it builds the request only from the stored withdrawal (`Idempotency-Key` and `reference` its TypeID), so every attempt sends the identical request, and validates the answers with Zod.
 
 For each message:
-1. Log the delivery (`event_deliveries`, as the worker).
-2. Send the transfer to the provider: `POST /transfers` with `Idempotency-Key: <withdrawal TypeID>`, the amount, destination and reference, and a timeout (e.g. 5 s). **Never inside a transaction.**
-3. By response:
-   - `2xx` → `held → submitted`, storing `provider_transfer_id`. Skipped if the webhook already moved it on.
-   - Timeout, connection error or `5xx` → **the outcome is unknown**: the provider may or may not have created the transfer. `nak` with a growing delay and send again: the provider's idempotency on our key turns the retry into "tell me what happened to this one". Never send a new key for the same withdrawal.
-   - `4xx` permanent refusal (e.g. the provider rejects the destination) → `held → failed` with `release` (funds back to `available`), reason recorded. Skipped if already final.
-4. Ack.
+1. Log the delivery (`event_deliveries`, `consumer = 'submitter'`: one log for every consumer, decision 36). Outcomes follow the shared signal-vs-record rule (`src/consumer/messages.ts`): a done outcome is recorded, then acked; a stop or a retry is signalled first (`term`, `nak`), then recorded, so a failed write to the log can't turn a stop into a redelivery.
+2. Parse `withdrawal.held`; invalid → `invalid`, term.
+3. Read the withdrawal. Unknown → `invalid`, term. Not `held` (submitted or settled already, e.g. the provider's update overtook us) → `duplicate`, ack, no call. This read only saves a needless call; it is not a guard: if the withdrawal settles right after it, the call goes out anyway, the provider answers our repeated key with the same transfer, and `markSubmitted` skips.
+4. Call the provider, **never inside a transaction**.
+5. By outcome:
 
-If the provider can never be reached, the withdrawal stays `held` (funds reserved, nothing sent) until `max_deliver` is exhausted; reconciliation lists it as stuck. Releasing it automatically would be wrong: the provider may have executed it. That decision needs the provider's answer (polling it is *Out of scope*) or a person.
+| Provider answer | Outcome kind | What the submitter does |
+|---|---|---|
+| `201`, or `200` for a repeat of our key | `accepted` | `held → submitted` with `provider_transfer_id` (`applied`); skipped if the withdrawal moved on meanwhile (`duplicate`). Ack |
+| `422` | `refused` | `held → failed` with the reason, funds released (`held → available`). Ack. The only answer that releases funds automatically |
+| timeout, network error, `5xx`, an unreadable answer | `unknown` | **The outcome is unknown**: the provider may or may not have created the transfer. `nak` with a growing delay (1 s doubling to 60 s); the redelivery asks again with **the same key**, never a new one (decision 26). The withdrawal stays `held`, funds reserved, which is right either way |
+| `400` | `invalid` | Our bug (decision 35): `fatal` log with `alert: true`, term. The withdrawal stays `held` for a person; no money moves |
+| `409` | `key_conflict` | Our bug: as `400` |
+| `markSubmitted` throws `TransferIdMismatchError` (the provider's update stored another transfer ID) | | An invariant violation: as `400` |
+| any other error (e.g. the database unavailable after an accepted call) | | `nak`; the redelivery calls again with the same key, gets the same transfer, and records it |
+
+If `max_deliver` is exhausted, the withdrawal stays `held` (dead-letter handling is a *Known gap*); reconciliation lists it as stuck. Releasing it automatically would be wrong: the provider may have executed it (decision 26). That decision needs the provider's answer (polling it is *Out of scope*) or a person.
 
 ### `POST /provider/transfer-updates`
 
@@ -269,6 +279,7 @@ Also reported:
 Slice 1's gaps stand, except the commit-then-publish gap (closed by the outbox). New:
 - **Outbox growth:** published rows are kept; a pruning job (or partitioning by month) is the evolution.
 - **No backfill from slice 1:** the outbox migration creates no rows for existing payments. A slice 1 payment left in `created` (its publish failed) has no outbox row, and a duplicate notification no longer re-announces it, so it would stay there; reconciliation reports it as `missing`. A real upgrade from slice 1 would need a one-off backfill of `payment.created` rows for such payments, built by the application's event builder. Not done here: there is no slice 1 deployment, and the development database has none.
+- **One provider's error contract:** the submitter maps provider-sim's answers to outcomes (`422` refused, `400` and `409` our bug, everything else unknown). Real providers differ: some answer `409` while a request with the same key is still in progress (which a retry right after a timeout can hit), and that is an unknown outcome to retry, not a bug. A real integration maps each provider's answers to these outcomes, typically by the error code in the response body rather than the status alone.
 - **Single scheme:** field validation (lengths, the SEPA basic character set) is SEPA-specific and partly enforced by database CHECKs. With several schemes (Faster Payments, SWIFT, …), the scheme becomes a routing decision and validation moves to per-scheme rules in code, with the database keeping only scheme-independent constraints.
 - **Relay latency:** idle polling adds up to the poll interval (≤ 1 s) per event; `LISTEN/NOTIFY` is the evolution.
 - **No compliance review of withdrawals** (decision 30); in reality outgoing payments are screened (sanctions, fraud) before submission.
@@ -296,3 +307,5 @@ Numbering continues from slice 1.
 32. **Outgoing text fields use the SEPA basic character set** (the EPC's basic Latin set: `a-z A-Z 0-9 / - ? : ( ) . , ' +` and space; extended sets exist only by national agreement, so they are not assumed). Requests outside it are rejected (`400` from step 3), never transliterated, so what the client sees is exactly what is sent. Enforced by CHECKs on `withdrawals.creditor_name` and `remittance_info`, and by `sepaTextSchema` (`shared/schemas.ts`) at the API, which mirrors them. Leading and trailing whitespace is trimmed first (it is almost always a slip; inner whitespace is kept), and an optional field that is empty or blank means none (`null`, the one stored spelling of none): normalisations whose result the response shows, so the client still sees exactly what is stored and sent.
 33. **Client request bodies are strict; provider webhooks are tolerant readers.** `POST /accounts/:id/withdrawals` rejects unknown fields (`z.strictObject`): it is our own client asking to move money, so a misspelt optional field (`remitance_info`) must fail rather than be silently dropped. `POST /payments` ignores unknown fields, because providers add fields to webhooks over time and a new field must not break ingestion.
 34. **provider-sim failures are chosen deterministically by triggers in the remittance text** (as provider sandboxes use magic amounts or names), with optional random rates for chaos runs. Probabilities alone would make tests and the demo flaky; a trigger makes each failure mode a test case that always happens.
+35. **A provider answer that signals our bug (a `400`, a `409`, a transfer-ID mismatch) moves no money:** the message is terminated with an alert and the withdrawal stays `held` for a person. Only a definitive refusal (`422`) releases funds automatically. Releasing on a bug would guess at an outcome the provider may not share. The meaning of each answer is provider-sim's contract (a `409` is only ever our key reused with another body); a real provider's answers are mapped to these outcomes by its integration (*Known gaps*).
+36. **One delivery log for every consumer**, `event_deliveries` with a `consumer` column (`worker`, `submitter`), rather than a table per consumer: the same columns and the same crash trace, and reconciliation reports duplicates and stale `in_progress` rows per consumer.

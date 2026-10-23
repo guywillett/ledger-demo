@@ -319,6 +319,42 @@ describe('reconcile', () => {
     expect(stuck.consistent).toBe(true);
   });
 
+  it('breaks delivery statistics down by consumer', async () => {
+    // Delivery statistics cover the whole database, and other test files write deliveries
+    // concurrently. REPEATABLE READ: one snapshot for the transaction (taken at its first
+    // statement), so their commits stay invisible while this transaction's own inserts show.
+    const delta = await inRolledBackTransaction(async (tx) => {
+      await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+      const before = await reconcile(tx, { stuckAfterMs: 60_000 });
+      await tx.query(
+        `INSERT INTO event_deliveries (consumer, event_id, delivery_attempt, outcome, received_at)
+         VALUES ('submitter', $1, 1, 'applied', now()),
+                ('submitter', $2, 1, 'in_progress', now() - interval '2 minutes'),
+                ('worker', $3, 1, 'duplicate', now())`,
+        [newUuid('evt'), newUuid('evt'), newUuid('evt')],
+      );
+      const after = await reconcile(tx, { stuckAfterMs: 60_000 });
+      const count = (r: ReconcileReport, consumer: string, outcome: string): number =>
+        r.deliveries.byConsumer[consumer]?.[outcome] ?? 0;
+      return {
+        submitterApplied:
+          count(after, 'submitter', 'applied') - count(before, 'submitter', 'applied'),
+        submitterInProgress:
+          count(after, 'submitter', 'in_progress') - count(before, 'submitter', 'in_progress'),
+        workerDuplicate: count(after, 'worker', 'duplicate') - count(before, 'worker', 'duplicate'),
+        staleSubmitter:
+          (after.deliveries.staleInProgress.submitter ?? 0) -
+          (before.deliveries.staleInProgress.submitter ?? 0),
+      };
+    });
+    expect(delta).toEqual({
+      submitterApplied: 1,
+      submitterInProgress: 1,
+      workerDuplicate: 1,
+      staleSubmitter: 1,
+    });
+  });
+
   it('counts duplicate notifications', async () => {
     const account = await createTestAccount(pool);
     const notification = {

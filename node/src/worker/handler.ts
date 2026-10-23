@@ -6,17 +6,17 @@ import { LedgerInconsistencyError, MovementConflictError, OverdraftError } from 
 import { book, postDecision } from '../ledger/posting.ts';
 import { retryDelay } from '../shared/backoff.ts';
 import { withTransaction } from '../shared/db.ts';
-import { paymentCreatedV1Schema, type PaymentCreatedV1 } from '../shared/events.ts';
-import { fromTypeId, toTypeId, type Uuid } from '../shared/ids.ts';
+import { paymentCreatedV1Schema } from '../shared/events.ts';
+import { toTypeId } from '../shared/ids.ts';
 import type { Logger } from '../shared/logger.ts';
 import { paymentExists } from '../payments/payments.ts';
-import type { DeliveredMessage } from '../consumer/messages.ts';
+import { parseEvent, peekEventId, type DeliveredMessage } from '../consumer/messages.ts';
 import {
   finishDelivery,
   startDelivery,
   type DeliveryId,
   type DeliveryOutcome,
-} from './deliveries.ts';
+} from '../consumer/deliveries.ts';
 
 // Handles one delivery of a payment.created event: the worker's steps 1-10 in the slice spec.
 // Posting and compliance take turns, each step its own transaction:
@@ -58,6 +58,7 @@ export async function handleDelivery(
   let deliveryId: DeliveryId;
   try {
     deliveryId = await startDelivery(deps.pool, {
+      consumer: 'worker',
       eventId: peekedEventId,
       natsMsgId: msg.natsMsgId,
       deliveryAttempt: msg.deliveryAttempt,
@@ -69,19 +70,34 @@ export async function handleDelivery(
     return 'failed';
   }
 
+  // Signal vs record (consumer/messages.ts): record, then ack; term or nak, then record.
   const finish = async (outcome: DeliveryOutcome): Promise<DeliveryOutcome> => {
     await finishDelivery(deps.pool, deliveryId, outcome);
     return outcome;
   };
+  const record = async (outcome: DeliveryOutcome): Promise<DeliveryOutcome> => {
+    try {
+      await finishDelivery(deps.pool, deliveryId, outcome);
+    } catch (err) {
+      log.error({ err, outcome }, 'could not record the delivery outcome');
+    }
+    return outcome;
+  };
+  const stop = (outcome: DeliveryOutcome, reason: string): Promise<DeliveryOutcome> => {
+    msg.term(reason);
+    return record(outcome);
+  };
+  const retryLater = (): Promise<DeliveryOutcome> => {
+    msg.nak(retryDelay(deps, msg.deliveryAttempt));
+    return record('failed');
+  };
 
   try {
     // Step 2: validate. An invalid message is terminated: redelivering it can't fix it.
-    const event = parseEvent(msg.body);
+    const event = parseEvent(paymentCreatedV1Schema, msg.body);
     if (event === undefined) {
       log.error('invalid payment.created event; terminating it');
-      const outcome = await finish('invalid');
-      msg.term('invalid payment.created event');
-      return outcome;
+      return await stop('invalid', 'invalid payment.created event');
     }
     const paymentId = event.payment_id;
     log = log.child({ payment_id: toTypeId('pay', paymentId) });
@@ -126,32 +142,23 @@ export async function handleDelivery(
     // classifies the outcome; every transition has already been attempted.
     if (!(await paymentExists(deps.pool, paymentId))) {
       log.error('payment.created event for an unknown payment; terminating it');
-      const outcome = await finish('invalid');
-      msg.term('unknown payment');
-      return outcome;
+      return await stop('invalid', 'unknown payment');
     }
     log.info('duplicate delivery: payment already processed');
     const outcome = await finish('duplicate');
     msg.ack();
     return outcome;
   } catch (err) {
-    try {
-      await finishDelivery(deps.pool, deliveryId, 'failed');
-    } catch (finishErr) {
-      log.error({ err: finishErr }, 'could not record the failed outcome');
-    }
     if (isInvariantViolation(err)) {
       // A bug, not a transient failure: retrying can't fix it, so don't loop on it. The
       // payment stays where it stopped (reconciliation shows it); someone has to look.
       log.fatal({ err, alert: true }, 'invariant violated; terminating the message');
-      msg.term('invariant violation');
-      return 'failed';
+      return await stop('failed', 'invariant violation');
     }
     // Transient (e.g. the database went away mid-way). Committed steps stay committed; the
     // redelivery carries on from there.
     log.error({ err }, 'processing failed; will retry');
-    msg.nak(retryDelay(deps, msg.deliveryAttempt));
-    return 'failed';
+    return await retryLater();
   }
 }
 
@@ -165,32 +172,6 @@ async function review(deps: HandlerDeps, msg: DeliveredMessage): Promise<void> {
     await sleep(wait);
     remaining -= wait;
   }
-}
-
-function parseEvent(body: string): PaymentCreatedV1 | undefined {
-  let json: unknown;
-  try {
-    json = JSON.parse(body);
-  } catch {
-    return undefined;
-  }
-  const result = paymentCreatedV1Schema.safeParse(json);
-  return result.success ? result.data : undefined;
-}
-
-// The event_id of a message that may be invalid, for the delivery log: null if there is none
-// to read. Full validation comes after the delivery is recorded.
-function peekEventId(body: string): Uuid<'evt'> | null {
-  try {
-    const json: unknown = JSON.parse(body);
-    if (typeof json === 'object' && json !== null && 'event_id' in json) {
-      const value = json.event_id;
-      if (typeof value === 'string') return fromTypeId('evt', value);
-    }
-  } catch {
-    // Not JSON, or not an evt TypeID holding a UUIDv7.
-  }
-  return null;
 }
 
 // Errors that mean our data or code is wrong, as opposed to a dependency failing: the two

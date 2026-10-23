@@ -176,6 +176,30 @@ services:
       nats-setup:
         condition: service_completed_successfully
 
+  # Sends each held withdrawal to the provider (src/submitter/). Several instances can run at once
+  # (docker compose up -d --scale submitter=2): they share the durable consumer.
+  submitter:
+    build: ./node
+    image: ledger-demo-node
+    command: ["node", "src/submitter/main.ts"]
+    # Exits with a failing code if it can't start or loses NATS for good; restart it.
+    restart: unless-stopped
+    # As the worker: 5 s grace for in-flight submissions, up to 5 s to drain NATS. An unfinished
+    # submission is redelivered and sent again with the same key.
+    stop_grace_period: 15s
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      NATS_URL: nats://nats:4222
+      PROVIDER_URL: http://provider-sim:4000
+      LOG_LEVEL: info
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats-setup:
+        condition: service_completed_successfully
+      provider-sim:
+        condition: service_started
+
   # A fake BaaS provider (src/provider-sim/): accepts SEPA transfers idempotently and reports
   # their results to a webhook. Test infrastructure, part of neither implementation (slice 2
   # decision 31). Failures are chosen by triggers in remittance_info (SIM REFUSE, SIM ERROR, …)

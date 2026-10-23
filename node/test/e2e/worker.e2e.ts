@@ -1,5 +1,3 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { jetstreamManager } from '@nats-io/jetstream';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { Uuid } from '../../src/shared/ids.ts';
@@ -11,13 +9,12 @@ import {
   connectTestNats,
   createTestAccount,
   createTestApp,
-  drainOutbox,
   notificationBody,
   postPayment,
   statusOf,
-  testStreamPublisher,
   type TestAccount,
 } from '../helpers.ts';
+import { cleanStart, kill, startChild, waitFor, type Child } from './children.ts';
 
 // The real relay and worker as child processes (node src/relay/main.ts, node src/worker/main.ts),
 // against the test database and the test NATS, as in production: payments are posted through
@@ -29,11 +26,6 @@ const testApp = await createTestApp();
 const { app, pool } = testApp;
 const nc = await connectTestNats();
 
-type Child = {
-  readonly process: ChildProcess;
-  readonly lines: () => Record<string, unknown>[];
-  readonly exited: Promise<number | null>;
-};
 const workers: Child[] = [];
 let relay: Child | undefined;
 
@@ -44,46 +36,6 @@ function startWorker(env: Record<string, string>): Promise<Child> {
       return worker;
     },
   );
-}
-
-// Starts `script` and resolves once it has logged `ready`.
-function startChild(script: string, ready: string, env: Record<string, string>): Promise<Child> {
-  const child = spawn(process.execPath, [script], {
-    // process.env already holds the test DATABASE_URL and NATS_URL (vitest config).
-    env: { ...process.env, LOG_LEVEL: 'info', ...env },
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
-  let output = '';
-  child.stdout.on('data', (chunk: Buffer) => {
-    output += chunk.toString();
-  });
-  const lines = (): Record<string, unknown>[] =>
-    output
-      .split('\n')
-      .filter((line) => line.startsWith('{'))
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-  const exited = new Promise<number | null>((resolve) => child.once('exit', resolve));
-  const started = { process: child, lines, exited };
-  return waitFor(() => lines().some((l) => l.msg === ready), `${script} start`).then(() => started);
-}
-
-async function kill(child: Child): Promise<void> {
-  if (child.process.exitCode === null && child.process.signalCode === null) {
-    child.process.kill('SIGKILL');
-    await child.exited;
-  }
-}
-
-async function waitFor(
-  condition: () => boolean | Promise<boolean>,
-  what: string,
-  timeoutMs = 30_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await condition())) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await sleep(100);
-  }
 }
 
 // Every account the tests post to, for the final reconciliation.
@@ -119,10 +71,6 @@ async function deliveriesFor(
   return result.rows;
 }
 
-// The name nats-test runs with (docker-compose.yml). Checked before purging, so a test NATS
-// URL pointing at the development server by mistake can't empty its stream.
-const TEST_NATS_SERVER_NAME = 'ledger-demo-test';
-
 async function consumerDeliveries(): Promise<number> {
   const jsm = await jetstreamManager(nc);
   const info = await jsm.consumers.info(STREAMS.payments, CONSUMERS.worker);
@@ -130,21 +78,7 @@ async function consumerDeliveries(): Promise<number> {
 }
 
 beforeAll(async () => {
-  // Start from an empty outbox backlog and an empty test stream: the integration tests leave
-  // unpublished events (every payment they create has one) and published ones, which would
-  // otherwise be the worker's first backlog. The backlog is published here, then purged with
-  // the rest. Only the test NATS is touched.
-  const serverName = nc.info?.server_name;
-  if (serverName !== TEST_NATS_SERVER_NAME) {
-    throw new Error(
-      `Refusing to purge ${STREAMS.payments} on NATS server "${String(serverName)}": ` +
-        `the e2e tests only run against ${TEST_NATS_SERVER_NAME} (nats-test).`,
-    );
-  }
-  await drainOutbox(pool, testStreamPublisher(nc));
-  const jsm = await jetstreamManager(nc);
-  await jsm.streams.purge(STREAMS.payments);
-
+  await cleanStart(pool, nc);
   relay = await startChild('src/relay/main.ts', 'relay started', {});
 });
 

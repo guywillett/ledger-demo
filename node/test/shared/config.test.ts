@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { loadApiConfig } from '../../src/api/config.ts';
 import { loadRelayConfig } from '../../src/relay/config.ts';
 import { loadSharedConfig } from '../../src/shared/config.ts';
+import { assertTimeoutFitsAckWait, loadSubmitterConfig } from '../../src/submitter/config.ts';
 import { loadWorkerConfig } from '../../src/worker/config.ts';
 
 const DATABASE_URL = 'postgres://u:p@localhost:5432/db';
@@ -60,5 +61,23 @@ describe('loadRelayConfig', () => {
       loadRelayConfig({ DATABASE_URL, NATS_URL, RELAY_BATCH_SIZE: '20', RELAY_LEASE_MS: '45000' })
         .leaseMs,
     ).toBe(45_000);
+  });
+});
+
+describe('submitter config', () => {
+  const env = { DATABASE_URL, NATS_URL, PROVIDER_URL: 'http://provider-sim:4000' };
+
+  it('requires PROVIDER_URL and defaults the timeout to 5 s', () => {
+    expect(() => loadSubmitterConfig({ DATABASE_URL, NATS_URL })).toThrow(/PROVIDER_URL/);
+    expect(loadSubmitterConfig(env)).toMatchObject({ providerTimeoutMs: 5000, concurrency: 10 });
+  });
+
+  // Against the consumer's real ack_wait, read from NATS at startup.
+  it('accepts a timeout up to two thirds of the ack_wait, and refuses more, saying why', () => {
+    expect(() => assertTimeoutFitsAckWait(20_000, 30_000)).not.toThrow();
+    expect(() => assertTimeoutFitsAckWait(20_001, 30_000)).toThrow(
+      /at most 20000 ms, two thirds of the submitter consumer's ack_wait \(30000 ms\)/,
+    );
+    expect(() => assertTimeoutFitsAckWait(5000, 6000)).toThrow(/at most 4000 ms/);
   });
 });

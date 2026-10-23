@@ -8,7 +8,7 @@ import { book } from '../../src/ledger/posting.ts';
 import { createPool, withTransaction } from '../../src/shared/db.ts';
 import { newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { createLogger } from '../../src/shared/logger.ts';
-import { startDelivery } from '../../src/worker/deliveries.ts';
+import { startDelivery } from '../../src/consumer/deliveries.ts';
 import type { DeliveredMessage } from '../../src/consumer/messages.ts';
 import { handleDelivery, type HandlerDeps } from '../../src/worker/handler.ts';
 import {
@@ -17,6 +17,7 @@ import {
   createTestAccount,
   createTestPayment,
   createTestPool,
+  failingDeliveryFinish,
   statusOf,
 } from '../helpers.ts';
 
@@ -193,7 +194,12 @@ describe('handleDelivery', () => {
   it('completes after a crash between booking and the decision, crediting pending_in once', async () => {
     const payment = await newPayment();
     const { body, eventId } = eventFor(payment);
-    await startDelivery(pool, { eventId, natsMsgId: 'crashed', deliveryAttempt: 1 });
+    await startDelivery(pool, {
+      consumer: 'worker',
+      eventId,
+      natsMsgId: 'crashed',
+      deliveryAttempt: 1,
+    });
     await withTransaction(pool, (tx) => book(tx, payment.id)); // Tx 1, then the crash
 
     expect(await handleDelivery(deps(), message(body, 'crashed', 2))).toBe('applied');
@@ -212,7 +218,12 @@ describe('handleDelivery', () => {
   it('posts the recorded decision after a crash between deciding and posting, never re-deciding', async () => {
     const payment = await newPayment();
     const { body, eventId } = eventFor(payment);
-    await startDelivery(pool, { eventId, natsMsgId: 'crashed', deliveryAttempt: 1 });
+    await startDelivery(pool, {
+      consumer: 'worker',
+      eventId,
+      natsMsgId: 'crashed',
+      deliveryAttempt: 1,
+    });
     await withTransaction(pool, (tx) => book(tx, payment.id)); // Tx 1
     await withTransaction(pool, (tx) => startReview(tx, payment.id)); // Tx 2
     await withTransaction(pool, (tx) => decide(tx, payment.id, APPROVE)); // Tx 3, then the crash
@@ -375,6 +386,16 @@ describe('handleDelivery: overdraft', () => {
         err: expect.objectContaining({ type: 'OverdraftError' }),
       }),
     ]);
+  });
+});
+
+describe('signal vs record', () => {
+  // A stop is signalled first (consumer/messages.ts): a failed write to the delivery log must
+  // not turn "never deliver again" into a redelivery.
+  it('terminates an invalid message even when its outcome cannot be recorded', async () => {
+    const msg = message('not json');
+    expect(await handleDelivery(deps({ pool: failingDeliveryFinish(pool) }), msg)).toBe('invalid');
+    expect(msg.calls).toEqual(['term']);
   });
 });
 

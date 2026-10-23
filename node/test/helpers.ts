@@ -301,6 +301,21 @@ export function refusingPool(stored: {
   return pool as unknown as pg.Pool;
 }
 
+// The pool, except that completing a delivery-log row (finishDelivery's UPDATE) fails, as when
+// the database goes away after the work: for the signal-vs-record ordering in the handlers.
+export function failingDeliveryFinish(pool: pg.Pool): pg.Pool {
+  const failing = {
+    connect: pool.connect.bind(pool),
+    query: (sql: unknown, params?: unknown) => {
+      if (typeof sql === 'string' && sql.includes('UPDATE event_deliveries')) {
+        return Promise.reject(new Error('database unavailable'));
+      }
+      return (pool.query as (sql: unknown, params?: unknown) => Promise<unknown>)(sql, params);
+    },
+  };
+  return failing as unknown as pg.Pool;
+}
+
 // A publisher that always fails, as when NATS is down or the publish times out.
 export const failingPublisher: EventPublisher = {
   publish: async () => {

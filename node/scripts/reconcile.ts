@@ -226,14 +226,19 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
           `most attempts: ${outbox.maxUnpublishedAttempts}`),
   );
 
-  const outcomes = Object.entries(report.deliveries.byOutcome)
-    .map(([outcome, n]) => `${outcome} ${n}`)
-    .join(', ');
-  lines.push(
-    '',
-    `Deliveries (all accounts): ${outcomes || 'none'}; in_progress for more than ${stuckAfterMinutes} min: ${report.deliveries.staleInProgress}`,
-    `Duplicate notifications: ${report.deliveries.duplicateNotifications}`,
-  );
+  // One line per consumer: outcome counts, then the in_progress rows older than the threshold.
+  const consumers = Object.entries(report.deliveries.byConsumer);
+  lines.push('', `Deliveries (all accounts):${consumers.length === 0 ? ' none' : ''}`);
+  for (const [consumer, outcomes] of consumers) {
+    const counts = Object.entries(outcomes)
+      .map(([outcome, n]) => `${outcome} ${n}`)
+      .join(', ');
+    const stale = report.deliveries.staleInProgress[consumer] ?? 0;
+    lines.push(
+      `  ${consumer}: ${counts}; in_progress for more than ${stuckAfterMinutes} min: ${stale}`,
+    );
+  }
+  lines.push(`Duplicate notifications: ${report.deliveries.duplicateNotifications}`);
   return lines.join('\n');
 }
 

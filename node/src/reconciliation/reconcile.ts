@@ -120,11 +120,14 @@ export type OutboxStats = {
   readonly maxUnpublishedAttempts: number;
 };
 
+// Per consumer (the worker, the submitter: one delivery log for both, slice 2 decision 36).
 export type DeliveryStats = {
-  readonly byOutcome: Readonly<Record<string, number>>;
+  // Outcome counts, e.g. { worker: { applied: 12, duplicate: 1 }, submitter: { applied: 3 } }.
+  readonly byConsumer: Readonly<Record<string, Readonly<Record<string, number>>>>;
   // Deliveries still in_progress after the stuck threshold: the trace a crash leaves (the
-  // redelivery gets its own row), or a worker still working on it.
-  readonly staleInProgress: number;
+  // redelivery gets its own row), or a consumer still working on it. Consumers with none are
+  // absent.
+  readonly staleInProgress: Readonly<Record<string, number>>;
   // Repeat notifications from the provider with the same details (notification_count - 1).
   readonly duplicateNotifications: bigint;
 };
@@ -362,13 +365,18 @@ WHERE o.published_at IS NULL
 `;
 
 const DELIVERIES_BY_OUTCOME_SQL = `
-SELECT outcome, count(*)::int AS n FROM event_deliveries GROUP BY outcome
+SELECT consumer, outcome, count(*)::int AS n
+FROM event_deliveries
+GROUP BY consumer, outcome
+ORDER BY consumer, outcome
 `;
 
 const STALE_IN_PROGRESS_SQL = `
-SELECT count(*)::int AS n
+SELECT consumer, count(*)::int AS n
 FROM event_deliveries
 WHERE outcome = 'in_progress' AND received_at <= now() - $1 * interval '1 millisecond'
+GROUP BY consumer
+ORDER BY consumer
 `;
 
 const DUPLICATE_NOTIFICATIONS_SQL = `
@@ -541,8 +549,16 @@ export async function reconcile(
   }>(OUTBOX_SQL, [accounts, options.stuckAfterMs]);
   const outboxRow = outbox.rows[0];
 
-  const byOutcome = await db.query<{ outcome: string; n: number }>(DELIVERIES_BY_OUTCOME_SQL);
-  const stale = await db.query<{ n: number }>(STALE_IN_PROGRESS_SQL, [options.stuckAfterMs]);
+  const byOutcome = await db.query<{ consumer: string; outcome: string; n: number }>(
+    DELIVERIES_BY_OUTCOME_SQL,
+  );
+  const byConsumer: Record<string, Record<string, number>> = {};
+  for (const row of byOutcome.rows) {
+    (byConsumer[row.consumer] ??= {})[row.outcome] = row.n;
+  }
+  const stale = await db.query<{ consumer: string; n: number }>(STALE_IN_PROGRESS_SQL, [
+    options.stuckAfterMs,
+  ]);
   const duplicates = await db.query<{ n: string }>(DUPLICATE_NOTIFICATIONS_SQL, [accounts]);
 
   return {
@@ -560,8 +576,8 @@ export async function reconcile(
       maxUnpublishedAttempts: outboxRow?.max_attempts ?? 0,
     },
     deliveries: {
-      byOutcome: Object.fromEntries(byOutcome.rows.map((r) => [r.outcome, r.n])),
-      staleInProgress: stale.rows[0]?.n ?? 0,
+      byConsumer,
+      staleInProgress: Object.fromEntries(stale.rows.map((r) => [r.consumer, r.n])),
       duplicateNotifications: BigInt(duplicates.rows[0]?.n ?? '0'),
     },
     consistent:

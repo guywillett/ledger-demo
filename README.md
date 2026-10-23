@@ -35,6 +35,7 @@ provider ──POST /payments──► API ──► Postgres, one transaction:
 | A retried withdrawal request never pays twice | the client's `Idempotency-Key` is unique per account on the withdrawal itself, so only a request that commits takes it (a `422`, `404` or crash leaves it free); the funds are held in the request's own transaction, and the balance CHECK is the insufficient-funds check; a repeat returns the withdrawal's current state, a reused key with other details is a `409` | `test/api/withdrawals.test.ts` (5 repeats, 10 concurrent, conflicts, `422` then the same key succeeds, two concurrent withdrawals exceeding the balance) |
 | A repeated or concurrent event moves money once | every step is a conditional transition (`UPDATE … WHERE status = $expected`), never check-then-act | `test/worker/handler.test.ts` (same event twice, two consumers at once) |
 | The ledger protects itself | `move()` records each movement under `UNIQUE (reference_type, reference_id, reference_step)`; a reused reference with other details is refused; a reference's type and step are checked as a pair, in the database and in the `Movement` type. Withdrawals reserve funds with a `held` bucket, and the balance CHECK is the insufficient-funds check, so concurrent withdrawals can't overspend | `test/ledger/move.test.ts`, `test/ledger/withdrawals.test.ts` (two concurrent withdrawals exceeding the balance: exactly one commits) |
+| An unknown outcome is retried with the same key, never guessed | the submitter sends each withdrawal with its own TypeID as `Idempotency-Key`, built only from the stored withdrawal, so a retry is the identical request; a timeout or `5xx` leaves the withdrawal `held` and is retried later; only a definitive refusal releases funds, and an answer that signals our bug alerts and moves nothing | `test/submitter/provider.test.ts` (`SIM SLOW`: a timeout, then the same transfer on the retry); `test/submitter/handler.test.ts`; `test/e2e/submitter.e2e.ts` (the submitter killed mid-call: one transfer at the provider) |
 | Crash safety | each step commits on its own; a redelivery skips what's done, and a recorded decision is never re-made | `test/worker/handler.test.ts` (crash after booking, after deciding); `test/e2e/worker.e2e.ts` (real `kill -9` mid-review) |
 | Horizontal scaling | instances share one durable JetStream consumer; each fetches only as many messages as it has free slots | `test/e2e/worker.e2e.ts` (two workers; long reviews never redelivered) |
 | Audit trail | `balance_movements` and `payment_status_history` are append-only, enforced by triggers | `test/ledger/move.test.ts`, `test/ledger/lifecycle.test.ts` |
@@ -77,6 +78,7 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `api` | the Node API (`node/`, image `ledger-demo-node`); Postgres only, no NATS | `3000` |
 | `relay` | the Node relay (same image): publishes the outbox to JetStream (`PAYMENTS`, `WITHDRAWALS`) | — |
 | `worker` | the Node worker (same image): books, reviews and posts payments | — |
+| `submitter` | the Node submitter (same image): sends each held withdrawal to the provider | — |
 | `nats-test` | a separate NATS for the tests, so test events never reach the development stream | `4223`, `8223` |
 | `nats-setup-test` | the same definitions applied to `nats-test` | — |
 | `provider-sim` | a fake BaaS provider (same image): accepts SEPA transfers, reports their results by webhook; failures by trigger (see *Fake provider*) | `4000` |
@@ -147,6 +149,16 @@ docker compose logs -f relay               # one "event published" line per even
 docker compose up -d --scale relay=2       # two instances: each claims its own batches
 docker compose exec postgres psql -U ledger -d ledger -c \
   'SELECT subject, msg_id, attempts, last_error, published_at FROM outbox ORDER BY id DESC LIMIT 5'
+```
+
+### Submitter
+
+`docker compose up -d` starts one submitter. It pulls `withdrawal.held` from the durable `submitter` consumer on `WITHDRAWALS` and sends each withdrawal to the provider (`PROVIDER_URL`, provider-sim in compose) with its TypeID as `Idempotency-Key`, within `PROVIDER_TIMEOUT_MS` (default 5 s). Accepted → `submitted`; refused (`422`) → `failed` with the funds released; an unknown outcome (timeout, `5xx`) → retried later with the same key, the withdrawal still `held`. Results don't come back until the transfer-update webhook exists, so a withdrawal ends at `submitted` for now (and reconciliation counts it as stuck, which fails `scripts/demo.sh`'s final check while one is left in the development database).
+
+```sh
+docker compose logs -f submitter           # one line per submission and its outcome
+docker compose up -d --scale submitter=2   # two instances sharing the consumer
+$NATS consumer info WITHDRAWALS submitter  # pending, unacked, redelivered
 ```
 
 ### Worker
@@ -251,7 +263,7 @@ Tests default to the compose services on `localhost`: `ledger_test` and the test
 One exception to "tests don't depend on each other": the tests that claim from the outbox (`test/relay/`, `test/outbox/`, `test/api/payment-events.test.ts`). Claiming takes the oldest unpublished events in the whole table, and every test that creates a payment leaves one behind, so these files form a second Vitest project, `relay`, that runs after all the others and one file at a time; each of their tests first drains the backlog (see `vitest.config.ts`).
 
 ```sh
-npm run test:e2e                # process-level tests: the real relay and worker; kill -9 the worker, restart it (~40 s)
+npm run test:e2e                # process-level tests: the real relay, worker, submitter and provider-sim; kill -9 the worker and the submitter, restart them (~80 s)
 ```
 
 The e2e tests drain the test outbox and purge the test stream first; don't run them at the same time as `npm test`.
@@ -288,7 +300,7 @@ curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?li
 # next page: add &before=<next_before from the previous response>
 ```
 
-Request a withdrawal from alice (repeat it with the same key to get `200` and the same withdrawal; change the amount to see a `409`; ask for more than `available` to see a `422`), then read it back with the `Location` it returns. Nothing submits withdrawals yet, so it stays `held`, with its amount in the balance's `held`. Until the submitter exists, reconciliation counts such a withdrawal as stuck, so `scripts/demo.sh`'s final check fails while one is left in the development database:
+Request a withdrawal from alice (repeat it with the same key to get `200` and the same withdrawal; change the amount to see a `409`; ask for more than `available` to see a `422`), then read it back with the `Location` it returns. The submitter sends it to provider-sim within a second or two, so it moves to `submitted`, its amount still in the balance's `held`. Results don't come back yet (the transfer-update webhook is next), so it stays there, and reconciliation counts it as stuck: `scripts/demo.sh`'s final check fails while one is left in the development database:
 
 ```sh
 curl -i -X POST localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/withdrawals \
