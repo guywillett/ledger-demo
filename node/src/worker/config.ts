@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { loadSharedConfig, parseEnv, type SharedConfig } from '../shared/config.ts';
+import { loadSharedConfig, natsEnvSchema, parseEnv, type SharedConfig } from '../shared/config.ts';
 
 // z.coerce: environment variables are always strings.
-const workerEnvSchema = z.object({
+const workerEnvSchema = natsEnvSchema.extend({
   // How long the pseudo compliance review takes.
   REVIEW_DELAY_MS: z.coerce.number().int().min(0).max(60_000).default(2000),
   // Probability of approving a payment (the rest are rejected).
@@ -12,6 +12,7 @@ const workerEnvSchema = z.object({
 });
 
 export type WorkerConfig = SharedConfig & {
+  readonly natsUrl: string;
   readonly reviewDelayMs: number;
   readonly approveRate: number;
   readonly concurrency: number;
@@ -22,6 +23,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   const parsed = parseEnv(workerEnvSchema, env);
   return Object.freeze({
     ...shared,
+    natsUrl: parsed.NATS_URL,
     reviewDelayMs: parsed.REVIEW_DELAY_MS,
     approveRate: parsed.APPROVE_RATE,
     concurrency: parsed.WORKER_CONCURRENCY,

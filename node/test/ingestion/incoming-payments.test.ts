@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { type Notification, recordNotification } from '../../src/ingestion/notifications.ts';
+import { type Notification, recordNotification } from '../../src/ingestion/incoming-payments.ts';
+import { withTransaction } from '../../src/shared/db.ts';
 import { parseIban, type Iban } from '../../src/shared/iban.ts';
-import { refusingDb } from '../helpers.ts';
+import { refusingPool } from '../helpers.ts';
 
 // Unit tests for the classification after a refused notification. The inconsistent case can't
 // be produced against the real database without changing shared seed data, so these use a stub
-// Queryable that returns canned rows (refusingDb in helpers.ts).
+// pool that returns canned rows (refusingPool in helpers.ts).
 
 function iban(value: string): Iban {
   const result = parseIban(value);
@@ -29,15 +30,15 @@ function notification(overrides: Partial<Notification> = {}): Notification {
 
 describe('recordNotification after a refused notification', () => {
   it('reports a conflict naming the fields that differ', async () => {
-    const db = refusingDb({ creditor_iban: ALICE_IBAN, amount_minor: 999n, currency: 'EUR' });
-    const result = await recordNotification(db, notification());
+    const pool = refusingPool({ creditor_iban: ALICE_IBAN, amount_minor: 999n, currency: 'EUR' });
+    const result = await withTransaction(pool, (tx) => recordNotification(tx, notification()));
     expect(result.kind).toBe('conflict');
     expect(result.kind === 'conflict' && result.differingFields).toEqual(['amount_minor']);
   });
 
   it('reports an inconsistency, not a conflict, when no compared field differs', async () => {
-    const db = refusingDb({ creditor_iban: ALICE_IBAN, amount_minor: 1250n, currency: 'EUR' });
-    const result = await recordNotification(db, notification());
+    const pool = refusingPool({ creditor_iban: ALICE_IBAN, amount_minor: 1250n, currency: 'EUR' });
+    const result = await withTransaction(pool, (tx) => recordNotification(tx, notification()));
     expect(result.kind).toBe('inconsistent');
   });
 });

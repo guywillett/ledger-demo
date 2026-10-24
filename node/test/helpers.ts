@@ -2,24 +2,27 @@ import { randomUUID } from 'node:crypto';
 import { Writable } from 'node:stream';
 import type pg from 'pg';
 import { buildApp } from '../src/api/app.ts';
-import { paymentEvents, type PaymentEvents } from '../src/ingestion/events.ts';
 import type { App } from '../src/api/types.ts';
-import { loadSharedConfig } from '../src/shared/config.ts';
-import { recordNotification } from '../src/ingestion/notifications.ts';
+import { loadSharedConfig, natsEnvSchema, parseEnv } from '../src/shared/config.ts';
+import { decide, startReview } from '../src/compliance/transitions.ts';
+import { recordNotification } from '../src/ingestion/incoming-payments.ts';
+import { book, postDecision } from '../src/ledger/posting.ts';
 import { type Payment } from '../src/payments/payments.ts';
-import { createPool, type Queryable } from '../src/shared/db.ts';
+import { relayBatch, type RelayDeps } from '../src/relay/relay.ts';
+import { createPool, withTransaction } from '../src/shared/db.ts';
 import { parseIban, type Iban } from '../src/shared/iban.ts';
 import { newUuid, toTypeId, type TypeIdString, type Uuid } from '../src/shared/ids.ts';
 import {
   connectNats,
   jetStreamPublisher,
   PUBLISH_TIMEOUT_MS,
-  STREAMS,
   type EventPublisher,
   type NatsConnection,
   type PublishResult,
 } from '../src/shared/nats.ts';
 import { createLogger, type Logger } from '../src/shared/logger.ts';
+import { requestWithdrawal } from '../src/withdrawals/requests.ts';
+import type { Withdrawal } from '../src/withdrawals/withdrawals.ts';
 import { expectEventMatchesContract, expectMatchesContract } from './contract.ts';
 
 // Seeded demo accounts (db/migrations/20261018000002_seed_demo_accounts.sql).
@@ -44,7 +47,7 @@ export function newNetworkTransactionId(): string {
   return `test-${randomUUID()}`;
 }
 
-// A POST /payments body (the wire format), with a fresh network transaction ID.
+// An incoming-payment notification body (the wire format), with a fresh network transaction ID.
 export function notificationBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     network_transaction_id: newNetworkTransactionId(),
@@ -56,6 +59,43 @@ export function notificationBody(overrides: Record<string, unknown> = {}): Recor
   };
 }
 
+export type TestApp = {
+  app: App;
+  pool: pg.Pool;
+  close: () => Promise<void>;
+};
+
+// The app against the compose Postgres. No NATS: the API only writes events to the outbox.
+export async function createTestApp(options: { logger?: Logger } = {}): Promise<TestApp> {
+  const config = loadSharedConfig();
+  const log = options.logger ?? createLogger({ service: 'test', level: config.logLevel });
+  const pool = createPool({ databaseUrl: config.databaseUrl, logger: log });
+  const app = buildApp({ pool, logger: log });
+  return {
+    app,
+    pool,
+    close: async () => {
+      await app.close();
+      await pool.end();
+    },
+  };
+}
+
+// The test NATS (nats-test), for the relay tests and the e2e tests.
+export async function connectTestNats(): Promise<NatsConnection> {
+  const { NATS_URL } = parseEnv(natsEnvSchema);
+  return connectNats({
+    url: NATS_URL,
+    name: 'ledger-demo-test',
+    logger: createLogger({ service: 'test', level: loadSharedConfig().logLevel }),
+  });
+}
+
+// The relay's real publisher, on the test streams.
+export function testStreamPublisher(nc: NatsConnection): EventPublisher {
+  return jetStreamPublisher(nc, { timeoutMs: PUBLISH_TIMEOUT_MS });
+}
+
 export type RecordedEvent = {
   readonly subject: string;
   readonly event: Record<string, unknown>;
@@ -64,62 +104,80 @@ export type RecordedEvent = {
 };
 
 // Wraps a publisher, checks every event against its contract and records what was published,
-// so tests can assert exactly which events a request produced (including "none").
-function recording(publisher: EventPublisher, published: RecordedEvent[]): EventPublisher {
+// so tests can assert exactly which events the relay published.
+export function recordingPublisher(publisher: EventPublisher): {
+  publisher: EventPublisher;
+  published: RecordedEvent[];
+} {
+  const published: RecordedEvent[] = [];
   return {
-    async publish(subject, event, msgId) {
-      expectEventMatchesContract(event);
-      const result = await publisher.publish(subject, event, msgId);
-      published.push({ subject, event: event as Record<string, unknown>, msgId, result });
-      return result;
+    published,
+    publisher: {
+      async publish(subject, event, msgId) {
+        expectEventMatchesContract(event);
+        const result = await publisher.publish(subject, event, msgId);
+        published.push({ subject, event: event as Record<string, unknown>, msgId, result });
+        return result;
+      },
     },
   };
 }
 
-export type TestApp = {
-  app: App;
-  pool: pg.Pool;
-  nc: NatsConnection;
-  // Events published through this app, in order.
-  published: RecordedEvent[];
-  close: () => Promise<void>;
+// Relay dependencies for tests: a big batch, a 30 s lease and a fixed retry delay unless
+// overridden.
+export function testRelayDeps(
+  pool: pg.Pool,
+  publisher: EventPublisher,
+  overrides: Partial<RelayDeps> = {},
+): RelayDeps {
+  return {
+    pool,
+    publisher,
+    logger: createLogger({ service: 'test', level: loadSharedConfig().logLevel }),
+    batchSize: 100,
+    leaseMs: 30_000,
+    retryDelay: () => 1000,
+    ...overrides,
+  };
+}
+
+// Publishes the outbox's backlog until a batch claims nothing: the unpublished events other test
+// files left behind (every created payment has one). Only for the tests that run last and one
+// file at a time (the "relay" project in vitest.config.ts), so nothing else adds to the backlog
+// meanwhile. Events whose lease hasn't expired (e.g. backed off after a simulated failure) can't
+// be claimed and stay unpublished: tests assert only on their own events.
+export async function drainOutbox(pool: pg.Pool, publisher: EventPublisher): Promise<void> {
+  const deps = testRelayDeps(pool, publisher);
+  while ((await relayBatch(deps)).claimed > 0) {
+    // Keep going.
+  }
+}
+
+export type OutboxRow = {
+  id: Uuid<'evt'>;
+  entity_type: string;
+  entity_id: string;
+  subject: string;
+  msg_id: string;
+  payload: Record<string, unknown>;
+  attempts: number;
+  claimed_until: Date | null;
+  last_error: string | null;
+  published_at: Date | null;
 };
 
-// The app against the compose Postgres and NATS. `publisher` replaces the real JetStream
-// publisher (e.g. one that fails); it is still recorded and contract-checked.
-export async function createTestApp(
-  options: { logger?: Logger; publisher?: EventPublisher } = {},
-): Promise<TestApp> {
-  const config = loadSharedConfig();
-  const log = options.logger ?? createLogger({ service: 'test', level: config.logLevel });
-  // NATS first: if it isn't running, fail before anything else is created.
-  const nc = await connectNats({ url: config.natsUrl, name: 'ledger-demo-test', logger: log });
-  const pool = createPool({ databaseUrl: config.databaseUrl, logger: log });
-  const published: RecordedEvent[] = [];
-  const publisher =
-    options.publisher ??
-    jetStreamPublisher(nc, { stream: STREAMS.payments, timeoutMs: PUBLISH_TIMEOUT_MS });
-  const app = buildApp({
-    db: pool,
-    events: paymentEvents(recording(publisher, published)),
-    logger: log,
-  });
-  return {
-    app,
-    pool,
-    nc,
-    published,
-    close: async () => {
-      await app.close();
-      await nc.drain();
-      await pool.end();
-    },
-  };
-}
-
-// The events published for one payment (tests share an app, so filter by payment).
-export function eventsFor(testApp: TestApp, paymentId: unknown): RecordedEvent[] {
-  return testApp.published.filter((recorded) => recorded.event.payment_id === paymentId);
+// The outbox rows for one payment or withdrawal.
+export async function outboxRowsFor(
+  pool: pg.Pool,
+  entityId: Uuid<'pay'> | Uuid<'wd'>,
+): Promise<OutboxRow[]> {
+  const result = await pool.query<OutboxRow>(
+    `SELECT id, entity_type, entity_id, subject, msg_id, payload, attempts, claimed_until,
+            last_error, published_at
+     FROM outbox WHERE entity_id = $1 ORDER BY id`,
+    [entityId],
+  );
+  return result.rows;
 }
 
 export type JsonResponse = {
@@ -129,8 +187,10 @@ export type JsonResponse = {
   json: Record<string, unknown>;
 };
 
-// POSTs a notification and checks the response against contracts/openapi.yaml. A string
-// payload is sent as-is (e.g. malformed JSON); anything else is JSON-encoded.
+// POSTs a notification to the incoming-payment webhook and checks the response against
+// contracts/openapi.yaml. A string payload is sent as-is (e.g. malformed JSON); anything else is
+// JSON-encoded. A handled notification gets 204 with no body (json is then {}): read what it did
+// from the database (paymentByNetworkId) or the transactions endpoint.
 export async function postPayment(
   app: App,
   payload: unknown,
@@ -138,16 +198,79 @@ export async function postPayment(
 ): Promise<JsonResponse> {
   const response = await app.inject({
     method: 'POST',
-    url: '/payments',
+    url: '/provider/incoming-payments',
     headers: { 'content-type': 'application/json', ...headers },
     payload: typeof payload === 'string' ? payload : JSON.stringify(payload),
   });
-  expectMatchesContract('POST', '/payments', response);
+  expectMatchesContract('POST', '/provider/incoming-payments', response);
+  return {
+    statusCode: response.statusCode,
+    headers: response.headers,
+    body: response.body,
+    json: response.body === '' ? {} : (JSON.parse(response.body) as Record<string, unknown>),
+  };
+}
+
+export type StoredPayment = {
+  id: Uuid<'pay'>;
+  account_id: Uuid<'acct'> | null;
+  status: string;
+  creditor_iban: string;
+  provider_account_id: string | null;
+  amount_minor: bigint;
+  notification_count: number;
+  created_at: Date;
+};
+
+// The payment stored under a network transaction ID (SEPA), if any.
+export async function paymentByNetworkId(
+  pool: pg.Pool,
+  networkTransactionId: unknown,
+): Promise<StoredPayment | undefined> {
+  const result = await pool.query<StoredPayment>(
+    `SELECT id, account_id, status, creditor_iban, provider_account_id, amount_minor,
+            notification_count, created_at
+     FROM incoming_payments WHERE network = 'SEPA' AND network_transaction_id = $1`,
+    [networkTransactionId],
+  );
+  return result.rows[0];
+}
+
+// POSTs a withdrawal request for the account (an acct_ TypeID) with an Idempotency-Key (none if
+// undefined) and checks the response against the contract.
+export async function postWithdrawal(
+  app: App,
+  accountTypeId: string,
+  payload: unknown,
+  idempotencyKey: string | undefined,
+): Promise<JsonResponse> {
+  const response = await app.inject({
+    method: 'POST',
+    url: `/accounts/${accountTypeId}/withdrawals`,
+    headers: {
+      'content-type': 'application/json',
+      ...(idempotencyKey === undefined ? {} : { 'idempotency-key': idempotencyKey }),
+    },
+    payload: typeof payload === 'string' ? payload : JSON.stringify(payload),
+  });
+  expectMatchesContract('POST', '/accounts/{account_id}/withdrawals', response);
   return {
     statusCode: response.statusCode,
     headers: response.headers,
     body: response.body,
     json: JSON.parse(response.body) as Record<string, unknown>,
+  };
+}
+
+// A withdrawal request body (the wire format).
+export function withdrawalBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    amount_minor: '400',
+    currency: 'EUR',
+    creditor_iban: FOREIGN_IBAN,
+    creditor_name: 'Jane Doe',
+    remittance_info: 'Rent October',
+    ...overrides,
   };
 }
 
@@ -182,31 +305,48 @@ export function capturingLogger(): { logger: Logger; lines: () => Record<string,
   return { logger: createLogger({ service: 'test', level: 'info' }, destination), lines };
 }
 
-// A stub Queryable for recordNotification's refused path: the upsert returns no row (nothing
-// recorded), then the follow-up read returns `stored`. For cases the real database can't
-// produce without changing shared seed data.
-export function refusingDb(stored: {
+// A stub pool for recordNotification's refused path, used through withTransaction: BEGIN,
+// COMMIT and ROLLBACK succeed; then the upsert returns no row (nothing recorded), and the
+// follow-up read returns `stored`. For cases the real database can't produce without changing
+// shared seed data.
+export function refusingPool(stored: {
   creditor_iban: string;
   amount_minor: bigint;
   currency: string;
-}): Queryable {
-  const responses = [{ rows: [] }, { rows: [{ id: newUuid('pay'), ...stored }] }];
-  const db = {
-    query: async () => {
+}): pg.Pool {
+  // The refused upsert, the stored payment, then (for a conflict) the conflict record.
+  const responses = [
+    { rows: [] },
+    { rows: [{ id: newUuid('pay'), ...stored }] },
+    { rows: [], rowCount: 1 },
+  ];
+  const client = {
+    query: async (sql: string) => {
+      if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)) return { rows: [] };
       const next = responses.shift();
       if (next === undefined) throw new Error('unexpected extra query');
       return next;
     },
+    release: () => undefined,
   };
-  return db as unknown as Queryable;
+  const pool = { connect: async () => client, end: async () => undefined };
+  return pool as unknown as pg.Pool;
 }
 
-// For apps whose requests must never publish (e.g. the stubbed refused-notification path).
-export const unusedEvents: PaymentEvents = {
-  paymentCreated: async () => {
-    throw new Error('unexpected publish');
-  },
-};
+// The pool, except that completing a delivery-log row (finishDelivery's UPDATE) fails, as when
+// the database goes away after the work: for the signal-vs-record ordering in the handlers.
+export function failingDeliveryFinish(pool: pg.Pool): pg.Pool {
+  const failing = {
+    connect: pool.connect.bind(pool),
+    query: (sql: unknown, params?: unknown) => {
+      if (typeof sql === 'string' && sql.includes('UPDATE event_deliveries')) {
+        return Promise.reject(new Error('database unavailable'));
+      }
+      return (pool.query as (sql: unknown, params?: unknown) => Promise<unknown>)(sql, params);
+    },
+  };
+  return failing as unknown as pg.Pool;
+}
 
 // A publisher that always fails, as when NATS is down or the publish times out.
 export const failingPublisher: EventPublisher = {
@@ -265,29 +405,69 @@ export async function createTestPayment(
   account: TestAccount,
   amountMinor = 1250n,
 ): Promise<Payment> {
-  const result = await recordNotification(pool, {
+  const notification = {
     creditorIban: account.iban,
     providerAccountId: null,
     amountMinor,
     currency: 'EUR',
     network: 'SEPA',
     networkTransactionId: newNetworkTransactionId(),
-  });
+  } as const;
+  const result = await withTransaction(pool, (tx) => recordNotification(tx, notification));
   if (result.kind !== 'created') throw new Error(`test payment not created: ${result.kind}`);
   return result.payment;
+}
+
+// Puts `amountMinor` into the account's available balance the real way: a payment booked,
+// reviewed, approved and credited. So the account stays consistent for reconciliation.
+export async function fundTestAccount(
+  pool: pg.Pool,
+  account: TestAccount,
+  amountMinor: bigint,
+): Promise<Payment> {
+  const payment = await createTestPayment(pool, account, amountMinor);
+  await withTransaction(pool, (tx) => book(tx, payment.id));
+  await withTransaction(pool, (tx) => startReview(tx, payment.id));
+  await withTransaction(pool, (tx) => decide(tx, payment.id, { outcome: 'approved' }));
+  await withTransaction(pool, (tx) => postDecision(tx, payment.id));
+  return payment;
+}
+
+// A withdrawal in `held` with its funds reserved and its withdrawal.held event in the outbox, as
+// the API creates it (requestWithdrawal in its own transaction). Throws InsufficientFundsError
+// (and stores nothing) if the account is short.
+export async function createTestWithdrawal(
+  pool: pg.Pool,
+  account: TestAccount,
+  amountMinor: bigint,
+  idempotencyKey = randomUUID(),
+): Promise<Withdrawal> {
+  return withTransaction(pool, async (tx) => {
+    const result = await requestWithdrawal(tx, {
+      accountId: account.id,
+      idempotencyKey,
+      amountMinor,
+      currency: 'EUR',
+      creditorIban: newTestIban(),
+      creditorName: 'Jane Doe',
+      remittanceInfo: 'test withdrawal',
+    });
+    if (result.kind !== 'created') throw new Error(`idempotency key ${idempotencyKey} is taken`);
+    return result.withdrawal;
+  });
 }
 
 export async function balancesOf(
   pool: pg.Pool,
   accountId: Uuid<'acct'>,
-): Promise<{ pendingIn: bigint; available: bigint }> {
-  const result = await pool.query<{ pending_in: bigint; available: bigint }>(
-    'SELECT pending_in, available FROM account_balances WHERE account_id = $1',
+): Promise<{ pendingIn: bigint; available: bigint; held: bigint }> {
+  const result = await pool.query<{ pending_in: bigint; available: bigint; held: bigint }>(
+    'SELECT pending_in, available, held FROM account_balances WHERE account_id = $1',
     [accountId],
   );
   const row = result.rows[0];
   if (row === undefined) throw new Error(`no balance row for ${accountId}`);
-  return { pendingIn: row.pending_in, available: row.available };
+  return { pendingIn: row.pending_in, available: row.available, held: row.held };
 }
 
 export async function statusOf(pool: pg.Pool, paymentId: Uuid<'pay'>): Promise<string> {

@@ -5,20 +5,47 @@ import { newUuid, type Uuid } from '../shared/ids.ts';
 // account, recorded in balance_movements (append-only) and applied to account_balances in the
 // caller's transaction. `external` is outside our books: money arriving or leaving.
 
-export type Bucket = 'external' | 'pending_in' | 'available';
-export type ReferenceStep = 'book' | 'credit' | 'return';
+export type Bucket = 'external' | 'pending_in' | 'available' | 'held';
+export type PaymentStep = 'book' | 'credit' | 'return';
+export type WithdrawalStep = 'hold' | 'execute' | 'release';
 
+// The business object causing a movement, and the step within it. A discriminated union that
+// mirrors the database's paired CHECK on (reference_type, reference_step): referenceType decides
+// which ID and which steps are allowed, so a payment reference with a withdrawal step (or a
+// withdrawal's UUID) is a compile error.
+export type MovementReference =
+  | {
+      readonly referenceType: 'payment';
+      readonly referenceId: Uuid<'pay'>;
+      readonly referenceStep: PaymentStep;
+    }
+  | {
+      readonly referenceType: 'withdrawal';
+      readonly referenceId: Uuid<'wd'>;
+      readonly referenceStep: WithdrawalStep;
+    };
+
+// A given reference (type, id, step) is applied at most once, whatever the caller does.
 export type Movement = {
   readonly accountId: Uuid<'acct'>;
   readonly from: Bucket;
   readonly to: Bucket;
   readonly amountMinor: bigint;
-  // The business object causing the movement, and the step within it. A given
-  // (type, id, step) is applied at most once, whatever the caller does.
-  readonly referenceType: 'payment';
-  readonly referenceId: Uuid<'pay'>;
-  readonly referenceStep: ReferenceStep;
-};
+} & MovementReference;
+
+// A posting's movement already exists although the entity's state says the step is happening
+// for the first time (its transition just applied, or it was just inserted). Two guards
+// disagree. Thrown so the transaction rolls back (the status change is undone) and the caller
+// logs it; never silently accepted.
+export class LedgerInconsistencyError extends Error {
+  constructor(r: MovementReference) {
+    super(
+      `${r.referenceType} ${r.referenceId}: its ${r.referenceStep} movement already exists, ` +
+        `but the ${r.referenceType}'s state says that step hasn't happened yet`,
+    );
+    this.name = 'LedgerInconsistencyError';
+  }
+}
 
 // A movement with this reference already exists but differs (another account, amount or
 // buckets): the reference is being reused for something else, which is a bug, not a retry.
@@ -57,6 +84,7 @@ export class OverdraftError extends Error {
 const BALANCE_CHECKS: Readonly<Record<string, Bucket>> = {
   account_balances_pending_in_check: 'pending_in',
   account_balances_available_check: 'available',
+  account_balances_held_check: 'held',
 };
 
 // A check_violation (SQLSTATE 23514) on one of the balance CHECKs becomes an OverdraftError;
@@ -85,12 +113,13 @@ WHERE reference_type = $1 AND reference_id = $2 AND reference_step = $3
 
 // One fixed statement for every movement: the change to each bucket is computed in TypeScript
 // (minus for the source, plus for the destination, nothing for external), so the SQL never
-// changes shape and no column names are built from strings. CHECK (... >= 0) on both columns
+// changes shape and no column names are built from strings. CHECK (... >= 0) on each column
 // rejects a movement that would overdraw a bucket (reported as an OverdraftError).
 const APPLY_TO_BALANCES_SQL = `
 UPDATE account_balances
 SET pending_in = pending_in + $2,
     available  = available  + $3,
+    held       = held       + $4,
     updated_at = now()
 WHERE account_id = $1
 `;
@@ -122,7 +151,12 @@ export async function move(tx: Tx, m: Movement): Promise<'applied' | 'duplicate'
   }
 
   const balances = await tx
-    .query(APPLY_TO_BALANCES_SQL, [m.accountId, change('pending_in', m), change('available', m)])
+    .query(APPLY_TO_BALANCES_SQL, [
+      m.accountId,
+      change('pending_in', m),
+      change('available', m),
+      change('held', m),
+    ])
     .catch((err: unknown) => {
       throw asOverdraft(err, m);
     });
@@ -130,6 +164,13 @@ export async function move(tx: Tx, m: Movement): Promise<'applied' | 'duplicate'
     throw new Error(`no balance row for account ${m.accountId}`);
   }
   return 'applied';
+}
+
+// move() for a posting: the caller has just established, through the entity's own state (a
+// conditional transition that applied, or a fresh insert), that this step is happening for the
+// first time. So the movement must be new, and a duplicate means the two guards disagree.
+export async function moveOnce(tx: Tx, m: Movement): Promise<void> {
+  if ((await move(tx, m)) === 'duplicate') throw new LedgerInconsistencyError(m);
 }
 
 function change(bucket: Bucket, m: Movement): bigint {

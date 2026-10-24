@@ -61,8 +61,9 @@ const SEPA_IBAN_LENGTHS: ReadonlyMap<string, number> = new Map([
 ]);
 
 // Normalises (whitespace removed, upper case), then checks format, the country's length, the
-// check digit range and the ISO 13616 mod-97 checksum. Reasons are fixed texts that repeat nothing from the input:
-// they end up in 400 responses and logs, which never contain request values.
+// check digit range and the ISO 13616 mod-97 checksum. Reasons are fixed texts that repeat
+// nothing from the input: they end up in 400 responses and logs, which never contain request
+// values.
 export function parseIban(input: string): IbanResult {
   const value = input.replace(/\s+/g, '').toUpperCase();
   if (!/^[A-Z]{2}[0-9]{2}[A-Z0-9]+$/.test(value)) {

@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import Fastify, { LogController, type FastifyReply, type FastifyRequest } from 'fastify';
-import type { PaymentEvents } from '../ingestion/events.ts';
-import type { Queryable } from '../shared/db.ts';
+import type pg from 'pg';
 import type { Logger } from '../shared/logger.ts';
 import { registerAccountRoutes } from './accounts.ts';
-import { registerPaymentRoutes } from './payments.ts';
+import { problemErrorHandler } from './errors.ts';
 import { problems, sendProblem } from './problem.ts';
+import { registerWebhookRoutes } from './webhooks/index.ts';
+import { registerWithdrawalRoutes } from './withdrawals.ts';
 import type { App } from './types.ts';
 
 // An incoming x-request-id is reused only if it is short and plain: it ends up in every log
@@ -14,15 +15,6 @@ const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
 
 export function requestIdFrom(header: string | string[] | undefined): string {
   return typeof header === 'string' && REQUEST_ID_PATTERN.test(header) ? header : randomUUID();
-}
-
-// Fastify's own errors (malformed JSON, unsupported content type, body too large) carry a
-// 4xx statusCode. Anything else thrown is unexpected: 500. Fastify 5 types the error as
-// unknown (anything can be thrown), so check its shape rather than assume it.
-function clientErrorStatus(error: unknown): number | undefined {
-  if (typeof error !== 'object' || error === null || !('statusCode' in error)) return undefined;
-  const status = error.statusCode;
-  return typeof status === 'number' && status >= 400 && status < 500 ? status : undefined;
 }
 
 // Fastify's LogController writes its per-request log lines. By default that is two lines,
@@ -51,7 +43,7 @@ class AccessLog extends LogController {
 }
 
 // Builds the app without listening, so tests can drive it with app.inject().
-export function buildApp(deps: { db: Queryable; events: PaymentEvents; logger: Logger }): App {
+export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
   const app = Fastify({
     loggerInstance: deps.logger,
     logController: new AccessLog({ requestIdLogLabel: 'request_id' }),
@@ -62,16 +54,9 @@ export function buildApp(deps: { db: Queryable; events: PaymentEvents; logger: L
     reply.header('x-request-id', request.id);
   });
 
-  app.setErrorHandler((error, request, reply) => {
-    const status = clientErrorStatus(error);
-    if (status === undefined) {
-      request.log.error({ err: error }, 'unexpected error');
-      return sendProblem(reply, problems.http(500));
-    }
-    const message = error instanceof Error ? error.message : undefined;
-    request.log.warn({ status_code: status, reason: message }, 'request rejected');
-    return sendProblem(reply, problems.http(status, message));
-  });
+  // The client API answers a client error with its exact code (problem details); the provider
+  // webhooks set their own handler in their plugin (api/webhooks/index.ts).
+  app.setErrorHandler(problemErrorHandler((status) => status));
 
   // A fixed detail: echoing the requested URL would return caller input.
   app.setNotFoundHandler((_request, reply) => {
@@ -79,10 +64,12 @@ export function buildApp(deps: { db: Queryable; events: PaymentEvents; logger: L
   });
 
   // Fastify parses text/plain bodies by default, which would let a text/plain body reach
-  // validation (400). We accept JSON only, so every other content type gets 415.
+  // validation (400). We accept JSON only, so every other content type gets 415 (400 on the
+  // provider webhooks, whose plugin inherits this and answers every client error with 400).
   app.removeContentTypeParser('text/plain');
 
-  registerPaymentRoutes(app, { db: deps.db, events: deps.events });
-  registerAccountRoutes(app, { db: deps.db });
+  registerAccountRoutes(app, { db: deps.pool });
+  registerWithdrawalRoutes(app, { pool: deps.pool });
+  registerWebhookRoutes(app, { pool: deps.pool });
   return app;
 }

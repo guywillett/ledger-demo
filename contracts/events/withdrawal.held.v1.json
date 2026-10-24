@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ledger-demo:event:withdrawal.held:v1",
+  "title": "withdrawal.held v1",
+  "description": "Published on subject withdrawal.held (stream WITHDRAWALS) when a withdrawal is created and its funds are held: the client's request is accepted, nothing is sent to the provider yet. Nats-Msg-Id is <withdrawal_id>.held (one per withdrawal). Carries our IDs (TypeIDs), the amount and the currency only: no destination IBAN, creditor name or remittance text. Those are personal data, and the stream keeps messages for 7 days beyond the database's control; consumers read the details from the database by withdrawal_id. Consumers ignore unknown fields. Hand-written; shared by the Node and Go implementations.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_type",
+    "schema_version",
+    "withdrawal_id",
+    "account_id",
+    "amount_minor",
+    "currency",
+    "occurred_at"
+  ],
+  "properties": {
+    "event_id": {
+      "description": "Identifies this business event: the outbox row's ID, the same however often the event is published.",
+      "type": "string",
+      "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+    },
+    "event_type": { "const": "withdrawal.held" },
+    "schema_version": { "const": 1 },
+    "withdrawal_id": { "type": "string", "pattern": "^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$" },
+    "account_id": { "type": "string", "pattern": "^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$" },
+    "amount_minor": {
+      "description": "Integer minor units (cents) as a string of digits, greater than zero.",
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$",
+      "maxLength": 19
+    },
+    "currency": { "const": "EUR" },
+    "occurred_at": {
+      "description": "When the withdrawal entered status held (was created).",
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

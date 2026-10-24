@@ -1,0 +1,10 @@
+{
+  "durable_name": "submitter",
+  "description": "The submitter: sends each withdrawal.held to the provider. Every submitter instance reads from this one consumer; each message goes to one of them. ack_wait 30 s outlasts a provider call (PROVIDER_TIMEOUT_MS at most 20 s), so no working() signals are needed; redelivery delays are set per nak, so no consumer backoff.",
+  "filter_subject": "withdrawal.held",
+  "ack_policy": "explicit",
+  "deliver_policy": "all",
+  "ack_wait": 30000000000,
+  "max_deliver": 100,
+  "max_ack_pending": 1000
+}

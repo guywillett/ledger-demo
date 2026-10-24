@@ -1,68 +1,41 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { jetstreamManager } from '@nats-io/jetstream';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { Uuid } from '../../src/shared/ids.ts';
-import { fromTypeId } from '../../src/shared/ids.ts';
 import { reconcile } from '../../src/reconciliation/reconcile.ts';
 import { CONSUMERS, STREAMS } from '../../src/shared/nats.ts';
 import {
   balancesOf,
+  connectTestNats,
   createTestAccount,
   createTestApp,
   notificationBody,
+  paymentByNetworkId,
   postPayment,
   statusOf,
   type TestAccount,
 } from '../helpers.ts';
+import { cleanStart, kill, startChild, waitFor, type Child } from './children.ts';
 
-// The real worker as a child process (node src/worker/main.ts), against the test database and
-// the test NATS: payments are posted through the API app, which publishes payment.created,
-// and the worker consumes them through the durable `worker` consumer.
+// The real relay and worker as child processes (node src/relay/main.ts, node src/worker/main.ts),
+// against the test database and the test NATS, as in production: payments are posted through
+// the API app, which stores payment.created in the outbox; the relay publishes it, and the
+// worker consumes it through the durable `worker` consumer. One relay runs for the whole file;
+// workers are started (and killed) per test.
 
 const testApp = await createTestApp();
-const { app, pool, nc } = testApp;
+const { app, pool } = testApp;
+const nc = await connectTestNats();
 
-type Worker = {
-  readonly process: ChildProcess;
-  readonly lines: () => Record<string, unknown>[];
-  readonly exited: Promise<number | null>;
-};
-const workers: Worker[] = [];
+const workers: Child[] = [];
+let relay: Child | undefined;
 
-function startWorker(env: Record<string, string>): Promise<Worker> {
-  const child = spawn(process.execPath, ['src/worker/main.ts'], {
-    // process.env already holds the test DATABASE_URL and NATS_URL (vitest config).
-    env: { ...process.env, LOG_LEVEL: 'info', APPROVE_RATE: '1', ...env },
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
-  let output = '';
-  child.stdout.on('data', (chunk: Buffer) => {
-    output += chunk.toString();
-  });
-  const lines = (): Record<string, unknown>[] =>
-    output
-      .split('\n')
-      .filter((line) => line.startsWith('{'))
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-  const exited = new Promise<number | null>((resolve) => child.once('exit', resolve));
-  const worker = { process: child, lines, exited };
-  workers.push(worker);
-  return waitFor(() => lines().some((l) => l.msg === 'worker started'), 'worker start').then(
-    () => worker,
+function startWorker(env: Record<string, string>): Promise<Child> {
+  return startChild('src/worker/main.ts', 'worker started', { APPROVE_RATE: '1', ...env }).then(
+    (worker) => {
+      workers.push(worker);
+      return worker;
+    },
   );
-}
-
-async function waitFor(
-  condition: () => boolean | Promise<boolean>,
-  what: string,
-  timeoutMs = 30_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await condition())) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await sleep(100);
-  }
 }
 
 // Every account the tests post to, for the final reconciliation.
@@ -70,38 +43,37 @@ const accountsUsed: Uuid<'acct'>[] = [];
 
 async function post(account: TestAccount): Promise<Uuid<'pay'>> {
   if (!accountsUsed.includes(account.id)) accountsUsed.push(account.id);
-  const response = await postPayment(app, notificationBody({ creditor_iban: account.iban }));
-  expect(response.statusCode).toBe(201);
-  return fromTypeId('pay', String(response.json.id));
+  const body = notificationBody({ creditor_iban: account.iban });
+  expect((await postPayment(app, body)).statusCode).toBe(204);
+  // The webhook answers 204 with no body: the payment is read from the database.
+  const payment = await paymentByNetworkId(pool, body.network_transaction_id);
+  if (payment === undefined) throw new Error('payment not stored');
+  return payment.id;
 }
 
 async function movementSteps(paymentId: Uuid<'pay'>): Promise<string[]> {
   const result = await pool.query<{ reference_step: string }>(
-    "SELECT reference_step FROM balance_movements WHERE reference_type = 'payment' AND reference_id = $1 ORDER BY created_at",
+    `SELECT reference_step FROM balance_movements
+     WHERE reference_type = 'payment' AND reference_id = $1 ORDER BY created_at`,
     [paymentId],
   );
   return result.rows.map((r) => r.reference_step);
 }
 
-// Deliveries of this payment's events (the event carries the payment ID; the delivery log
-// has the event ID, so match through the published events).
+// Deliveries of this payment's events: the delivery log has the event ID, and the outbox row
+// with that ID says which payment the event is about.
 async function deliveriesFor(
   paymentId: Uuid<'pay'>,
 ): Promise<{ outcome: string; delivery_attempt: number }[]> {
-  const eventIds = testApp.published
-    .filter((p) => p.event.payment_id !== undefined)
-    .filter((p) => fromTypeId('pay', String(p.event.payment_id)) === paymentId)
-    .map((p) => fromTypeId('evt', String(p.event.event_id)));
   const result = await pool.query<{ outcome: string; delivery_attempt: number }>(
-    'SELECT outcome, delivery_attempt FROM event_deliveries WHERE event_id = ANY($1) ORDER BY id',
-    [eventIds],
+    `SELECT d.outcome, d.delivery_attempt
+     FROM event_deliveries d JOIN outbox o ON o.id = d.event_id
+     WHERE o.entity_type = 'payment' AND o.entity_id = $1
+     ORDER BY d.id`,
+    [paymentId],
   );
   return result.rows;
 }
-
-// The name nats-test runs with (docker-compose.yml). Checked before purging, so a test NATS
-// URL pointing at the development server by mistake can't empty its stream.
-const TEST_NATS_SERVER_NAME = 'ledger-demo-test';
 
 async function consumerDeliveries(): Promise<number> {
   const jsm = await jetstreamManager(nc);
@@ -110,38 +82,32 @@ async function consumerDeliveries(): Promise<number> {
 }
 
 beforeAll(async () => {
-  // Start from an empty test stream: events published by unit tests would otherwise be the
-  // worker's first backlog. Only the test NATS is touched.
-  const serverName = nc.info?.server_name;
-  if (serverName !== TEST_NATS_SERVER_NAME) {
-    throw new Error(
-      `Refusing to purge ${STREAMS.payments} on NATS server "${String(serverName)}": ` +
-        `the e2e tests only run against ${TEST_NATS_SERVER_NAME} (nats-test).`,
-    );
-  }
-  const jsm = await jetstreamManager(nc);
-  await jsm.streams.purge(STREAMS.payments);
+  await cleanStart(pool, nc);
+  relay = await startChild('src/relay/main.ts', 'relay started', {});
 });
 
 afterEach(async () => {
-  for (const worker of workers.splice(0)) {
-    if (worker.process.exitCode === null && worker.process.signalCode === null) {
-      worker.process.kill('SIGKILL');
-      await worker.exited;
-    }
-  }
+  for (const worker of workers.splice(0)) await kill(worker);
 });
 
-afterAll(testApp.close);
+afterAll(async () => {
+  if (relay !== undefined) await kill(relay);
+  await nc.drain();
+  await testApp.close();
+});
 
 describe('worker process', () => {
-  it('processes a posted payment end to end, and shuts down cleanly on SIGTERM', async () => {
+  it('processes a posted payment end to end, and the worker shuts down cleanly on SIGTERM', async () => {
     const worker = await startWorker({ REVIEW_DELAY_MS: '300' });
     const account = await createTestAccount(pool);
     const paymentId = await post(account);
 
     await waitFor(async () => (await statusOf(pool, paymentId)) === 'credited', 'credited');
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(paymentId)).toEqual(['book', 'credit']);
     expect(await deliveriesFor(paymentId)).toEqual([{ outcome: 'applied', delivery_attempt: 1 }]);
 
@@ -168,7 +134,11 @@ describe('worker process', () => {
     await startWorker({ REVIEW_DELAY_MS: '5000' });
     await waitFor(async () => (await statusOf(pool, paymentId)) === 'credited', 'credited');
 
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(paymentId)).toEqual(['book', 'credit']);
     expect(await deliveriesFor(paymentId)).toEqual([
       { outcome: 'in_progress', delivery_attempt: 1 },
@@ -188,12 +158,16 @@ describe('worker process', () => {
       return statuses.every((s) => s === 'credited');
     }, 'all credited');
 
-    expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 6n * 1250n });
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 6n * 1250n,
+      held: 0n,
+    });
     for (const id of paymentIds) {
       expect(await movementSteps(id)).toEqual(['book', 'credit']);
       expect(await deliveriesFor(id)).toEqual([{ outcome: 'applied', delivery_attempt: 1 }]);
     }
-    const processed = (w: Worker | undefined): number =>
+    const processed = (w: Child | undefined): number =>
       w?.lines().filter((l) => l.msg === 'payment processed').length ?? 0;
     expect(processed(a) + processed(b)).toBe(6);
     expect(processed(a)).toBeGreaterThan(0);
@@ -229,6 +203,16 @@ describe('worker process', () => {
     }
   });
 
+  it('the relay published each event once and shuts down cleanly on SIGTERM', async () => {
+    const published = relay?.lines().filter((l) => l.msg === 'event published') ?? [];
+    expect(published.length).toBeGreaterThan(0);
+    expect(published.some((l) => l.stream_duplicate === true)).toBe(false);
+
+    relay?.process.kill('SIGTERM');
+    expect(await relay?.exited).toBe(0);
+    expect(relay?.lines().some((l) => l.msg === 'shutting down')).toBe(true);
+  });
+
   // After everything above (a kill -9 mid-review, two workers sharing the consumer, reviews
   // longer than ack_wait), the books must still agree: the "Done when" reconciliation check.
   it('leaves the books consistent for every account it used', async () => {
@@ -236,8 +220,9 @@ describe('worker process', () => {
     expect(report.accountsChecked).toBe(accountsUsed.length);
     expect(report.differences).toEqual([]);
     expect(report.mismatches).toEqual([]);
-    // Every payment finished: none left in a non-final status.
+    // Every payment finished: none left in a non-final status, and every event published.
     expect(report.stuck).toEqual([]);
+    expect(report.outbox.stuckUnpublished).toBe(0);
     expect(report.consistent).toBe(true);
   });
 });

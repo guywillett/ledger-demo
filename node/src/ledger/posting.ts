@@ -5,26 +5,19 @@ import {
   type TransitionResult,
   transitionStatus,
 } from '../payments/status.ts';
-import { move, type Bucket, type ReferenceStep } from './move.ts';
+import { moveOnce, type Bucket, type PaymentStep } from './move.ts';
 
 // Posting: the transitions that move money. Each one changes the payment's status and posts
 // its movement in the caller's transaction, so both happen or neither does. The compliance
 // transitions in between (review, decision) move no money and live in compliance/.
 
-// The transition happened but its movement already exists. Two guards disagree: payment state
-// says this is the first time, the ledger says it isn't. Thrown so the transaction rolls back
-// (the status change is undone) and the caller logs it; never silently accepted.
-export class LedgerInconsistencyError extends Error {
-  constructor(paymentId: Uuid<'pay'>, step: ReferenceStep) {
-    super(`payment ${paymentId} moved status, but its ${step} movement already exists`);
-    this.name = 'LedgerInconsistencyError';
-  }
-}
+// Withdrawal postings are in withdrawals.ts. A transition whose movement already exists throws
+// LedgerInconsistencyError (moveOnce, move.ts).
 
 // A posting step: one of posting's own status transitions, and the movement it posts.
 type PostingStep = {
   readonly status: PostingTransition;
-  readonly movement: { readonly from: Bucket; readonly to: Bucket; readonly step: ReferenceStep };
+  readonly movement: { readonly from: Bucket; readonly to: Bucket; readonly step: PaymentStep };
 };
 
 const BOOK: PostingStep = {
@@ -71,7 +64,7 @@ async function post(tx: Tx, paymentId: Uuid<'pay'>, t: PostingStep): Promise<Tra
   const payment = await transitionStatus(tx, { paymentId, ...t.status });
   if (payment === undefined) return 'skipped';
 
-  const outcome = await move(tx, {
+  await moveOnce(tx, {
     accountId: payment.accountId,
     from: t.movement.from,
     to: t.movement.to,
@@ -80,6 +73,5 @@ async function post(tx: Tx, paymentId: Uuid<'pay'>, t: PostingStep): Promise<Tra
     referenceId: paymentId,
     referenceStep: t.movement.step,
   });
-  if (outcome === 'duplicate') throw new LedgerInconsistencyError(paymentId, t.movement.step);
   return 'applied';
 }

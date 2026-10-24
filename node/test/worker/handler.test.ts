@@ -8,19 +8,16 @@ import { book } from '../../src/ledger/posting.ts';
 import { createPool, withTransaction } from '../../src/shared/db.ts';
 import { newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { createLogger } from '../../src/shared/logger.ts';
-import { startDelivery } from '../../src/worker/deliveries.ts';
-import {
-  handleDelivery,
-  retryDelay,
-  type DeliveredMessage,
-  type HandlerDeps,
-} from '../../src/worker/handler.ts';
+import { startDelivery } from '../../src/consumer/deliveries.ts';
+import type { DeliveredMessage } from '../../src/consumer/messages.ts';
+import { handleDelivery, type HandlerDeps } from '../../src/worker/handler.ts';
 import {
   balancesOf,
   capturingLogger,
   createTestAccount,
   createTestPayment,
   createTestPool,
+  failingDeliveryFinish,
   statusOf,
 } from '../helpers.ts';
 
@@ -81,7 +78,8 @@ async function deliveriesOf(
     nats_msg_id: string | null;
     delivery_attempt: number;
   }>(
-    'SELECT outcome, nats_msg_id, delivery_attempt FROM event_deliveries WHERE event_id = $1 ORDER BY id',
+    `SELECT outcome, nats_msg_id, delivery_attempt FROM event_deliveries
+     WHERE event_id = $1 ORDER BY id`,
     [eventId],
   );
   return result.rows;
@@ -89,7 +87,8 @@ async function deliveriesOf(
 
 async function movementSteps(paymentId: Uuid<'pay'>): Promise<string[]> {
   const result = await pool.query<{ reference_step: string }>(
-    "SELECT reference_step FROM balance_movements WHERE reference_type = 'payment' AND reference_id = $1 ORDER BY created_at",
+    `SELECT reference_step FROM balance_movements
+     WHERE reference_type = 'payment' AND reference_id = $1 ORDER BY created_at`,
     [paymentId],
   );
   return result.rows.map((r) => r.reference_step);
@@ -113,7 +112,11 @@ describe('handleDelivery', () => {
     expect(await handleDelivery(deps({ logger }), msg)).toBe('applied');
     expect(msg.calls).toEqual(['ack']);
     expect(await statusOf(pool, payment.id)).toBe('credited');
-    expect(await balancesOf(pool, payment.accountId)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, payment.accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(payment.id)).toEqual(['book', 'credit']);
     expect(await deliveriesOf(eventId)).toEqual([
       { outcome: 'applied', nats_msg_id: msg.natsMsgId, delivery_attempt: 1 },
@@ -132,7 +135,11 @@ describe('handleDelivery', () => {
     const msg = message(eventFor(payment).body);
     expect(await handleDelivery(deps({ decide: () => REJECT }), msg)).toBe('applied');
     expect(await statusOf(pool, payment.id)).toBe('returned');
-    expect(await balancesOf(pool, payment.accountId)).toEqual({ pendingIn: 0n, available: 0n });
+    expect(await balancesOf(pool, payment.accountId)).toEqual({
+      pendingIn: 0n,
+      available: 0n,
+      held: 0n,
+    });
     expect(await movementSteps(payment.id)).toEqual(['book', 'return']);
   });
 
@@ -149,7 +156,11 @@ describe('handleDelivery', () => {
       { outcome: 'applied', nats_msg_id: 'first', delivery_attempt: 1 },
       { outcome: 'duplicate', nats_msg_id: 'second', delivery_attempt: 1 },
     ]);
-    expect(await balancesOf(pool, payment.accountId)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, payment.accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(payment.id)).toEqual(['book', 'credit']);
   });
 
@@ -164,7 +175,11 @@ describe('handleDelivery', () => {
     ]);
 
     // Each did whatever steps it got to first; the money moved once.
-    expect(await balancesOf(pool, payment.accountId)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, payment.accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(payment.id)).toEqual(['book', 'credit']);
     expect(await historyOf(payment.id)).toEqual([
       'created',
@@ -181,11 +196,20 @@ describe('handleDelivery', () => {
   it('completes after a crash between booking and the decision, crediting pending_in once', async () => {
     const payment = await newPayment();
     const { body, eventId } = eventFor(payment);
-    await startDelivery(pool, { eventId, natsMsgId: 'crashed', deliveryAttempt: 1 });
+    await startDelivery(pool, {
+      consumer: 'worker',
+      eventId,
+      natsMsgId: 'crashed',
+      deliveryAttempt: 1,
+    });
     await withTransaction(pool, (tx) => book(tx, payment.id)); // Tx 1, then the crash
 
     expect(await handleDelivery(deps(), message(body, 'crashed', 2))).toBe('applied');
-    expect(await balancesOf(pool, payment.accountId)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, payment.accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await movementSteps(payment.id)).toEqual(['book', 'credit']);
     expect(await deliveriesOf(eventId)).toEqual([
       { outcome: 'in_progress', nats_msg_id: 'crashed', delivery_attempt: 1 },
@@ -196,7 +220,12 @@ describe('handleDelivery', () => {
   it('posts the recorded decision after a crash between deciding and posting, never re-deciding', async () => {
     const payment = await newPayment();
     const { body, eventId } = eventFor(payment);
-    await startDelivery(pool, { eventId, natsMsgId: 'crashed', deliveryAttempt: 1 });
+    await startDelivery(pool, {
+      consumer: 'worker',
+      eventId,
+      natsMsgId: 'crashed',
+      deliveryAttempt: 1,
+    });
     await withTransaction(pool, (tx) => book(tx, payment.id)); // Tx 1
     await withTransaction(pool, (tx) => startReview(tx, payment.id)); // Tx 2
     await withTransaction(pool, (tx) => decide(tx, payment.id, APPROVE)); // Tx 3, then the crash
@@ -215,7 +244,8 @@ describe('handleDelivery', () => {
     expect(await handleDelivery(deps(), msg)).toBe('invalid');
     expect(msg.calls).toEqual(['term']);
     const result = await pool.query<{ outcome: string; event_id: string | null }>(
-      "SELECT outcome, event_id FROM event_deliveries WHERE nats_msg_id = 'garbage' ORDER BY id DESC LIMIT 1",
+      `SELECT outcome, event_id FROM event_deliveries
+       WHERE nats_msg_id = 'garbage' ORDER BY id DESC LIMIT 1`,
     );
     expect(result.rows[0]).toEqual({ outcome: 'invalid', event_id: null });
   });
@@ -362,12 +392,13 @@ describe('handleDelivery: overdraft', () => {
   });
 });
 
-describe('retryDelay', () => {
-  it('doubles with each attempt, up to the maximum', () => {
-    const limits = { retryBaseDelayMs: 1000, retryMaxDelayMs: 60_000 };
-    expect([1, 2, 3, 4, 6, 7, 50].map((attempt) => retryDelay(limits, attempt))).toEqual([
-      1000, 2000, 4000, 8000, 32_000, 60_000, 60_000,
-    ]);
+describe('signal vs record', () => {
+  // A stop is signalled first (consumer/messages.ts): a failed write to the delivery log must
+  // not turn "never deliver again" into a redelivery.
+  it('terminates an invalid message even when its outcome cannot be recorded', async () => {
+    const msg = message('not json');
+    expect(await handleDelivery(deps({ pool: failingDeliveryFinish(pool) }), msg)).toBe('invalid');
+    expect(msg.calls).toEqual(['term']);
   });
 });
 

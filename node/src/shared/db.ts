@@ -31,7 +31,8 @@ types.setTypeParser(pg.types.builtins.INT8, parseInt8);
 export function createPool(options: { databaseUrl: string; logger: Logger }): pg.Pool {
   const pool = new pg.Pool({ connectionString: options.databaseUrl, types });
   // An idle connection can fail (e.g. Postgres restarts). The pool emits 'error', and an
-  // 'error' event with no listener crashes the process, so log it; the pool replaces the connection.
+  // 'error' event with no listener crashes the process, so log it; the pool replaces the
+  // connection.
   pool.on('error', (err) => {
     options.logger.error({ err }, 'idle database connection error');
   });

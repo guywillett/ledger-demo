@@ -1,13 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { decide, startReview } from '../../src/compliance/transitions.ts';
-import { move } from '../../src/ledger/move.ts';
-import {
-  book,
-  credit,
-  LedgerInconsistencyError,
-  postDecision,
-  returnToSender,
-} from '../../src/ledger/posting.ts';
+import { LedgerInconsistencyError, move } from '../../src/ledger/move.ts';
+import { book, credit, postDecision, returnToSender } from '../../src/ledger/posting.ts';
 import { withTransaction, type Tx } from '../../src/shared/db.ts';
 import { newUuid, type Uuid } from '../../src/shared/ids.ts';
 import { transitionStatus } from '../../src/payments/status.ts';
@@ -33,7 +27,8 @@ async function history(
     to_status: string;
     reason: string | null;
   }>(
-    'SELECT from_status, to_status, reason FROM payment_status_history WHERE payment_id = $1 ORDER BY id',
+    `SELECT from_status, to_status, reason FROM payment_status_history
+     WHERE payment_id = $1 ORDER BY id`,
     [paymentId],
   );
   return result.rows;
@@ -51,16 +46,28 @@ describe('payment lifecycle', () => {
 
     expect(await withTransaction(pool, (tx) => book(tx, paymentId))).toBe('applied');
     expect(await statusOf(pool, paymentId)).toBe('received');
-    expect(await balancesOf(pool, accountId)).toEqual({ pendingIn: 1250n, available: 0n });
+    expect(await balancesOf(pool, accountId)).toEqual({
+      pendingIn: 1250n,
+      available: 0n,
+      held: 0n,
+    });
 
     expect(await withTransaction(pool, (tx) => startReview(tx, paymentId))).toBe('applied');
     const approved = { outcome: 'approved' } as const;
     expect(await withTransaction(pool, (tx) => decide(tx, paymentId, approved))).toBe('applied');
     // Decisions move no money.
-    expect(await balancesOf(pool, accountId)).toEqual({ pendingIn: 1250n, available: 0n });
+    expect(await balancesOf(pool, accountId)).toEqual({
+      pendingIn: 1250n,
+      available: 0n,
+      held: 0n,
+    });
 
     expect(await withTransaction(pool, (tx) => postDecision(tx, paymentId))).toBe('credited');
-    expect(await balancesOf(pool, accountId)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
 
     expect(await history(paymentId)).toEqual([
       { from_status: null, to_status: 'created', reason: null },
@@ -80,7 +87,7 @@ describe('payment lifecycle', () => {
 
     expect(await withTransaction(pool, (tx) => postDecision(tx, paymentId))).toBe('returned');
     expect(await statusOf(pool, paymentId)).toBe('returned');
-    expect(await balancesOf(pool, accountId)).toEqual({ pendingIn: 0n, available: 0n });
+    expect(await balancesOf(pool, accountId)).toEqual({ pendingIn: 0n, available: 0n, held: 0n });
     expect((await history(paymentId))[3]).toEqual({
       from_status: 'under_review',
       to_status: 'rejected',
@@ -105,7 +112,11 @@ describe('payment lifecycle', () => {
     for (const step of steps) expect(await step()).toBe('skipped');
     expect(await withTransaction(pool, (tx) => postDecision(tx, paymentId))).toBe('skipped');
 
-    expect(await balancesOf(pool, accountId)).toEqual({ pendingIn: 0n, available: 1250n });
+    expect(await balancesOf(pool, accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1250n,
+      held: 0n,
+    });
     expect(await history(paymentId)).toHaveLength(5);
   });
 
@@ -119,7 +130,7 @@ describe('payment lifecycle', () => {
     expect(await withTransaction(pool, (tx) => postDecision(tx, paymentId))).toBe('skipped');
 
     expect(await statusOf(pool, paymentId)).toBe('created');
-    expect(await balancesOf(pool, accountId)).toEqual({ pendingIn: 0n, available: 0n });
+    expect(await balancesOf(pool, accountId)).toEqual({ pendingIn: 0n, available: 0n, held: 0n });
     expect(await history(paymentId)).toHaveLength(1);
   });
 
@@ -156,7 +167,11 @@ describe('payment lifecycle', () => {
     );
 
     expect(outcomes.filter((o) => o === 'applied')).toHaveLength(1);
-    expect(await balancesOf(pool, accountId)).toEqual({ pendingIn: 1250n, available: 0n });
+    expect(await balancesOf(pool, accountId)).toEqual({
+      pendingIn: 1250n,
+      available: 0n,
+      held: 0n,
+    });
     expect(await history(paymentId)).toHaveLength(2);
   });
 
@@ -183,7 +198,11 @@ describe('payment lifecycle', () => {
     // pending_in holds only the one booking.
     expect(await statusOf(pool, paymentId)).toBe('created');
     expect(await history(paymentId)).toHaveLength(1);
-    expect(await balancesOf(pool, accountId)).toEqual({ pendingIn: 1250n, available: 0n });
+    expect(await balancesOf(pool, accountId)).toEqual({
+      pendingIn: 1250n,
+      available: 0n,
+      held: 0n,
+    });
   });
 
   it('keeps payment_status_history append-only', async () => {

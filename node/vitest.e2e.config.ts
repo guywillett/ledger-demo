@@ -1,15 +1,15 @@
 import { defineConfig } from 'vitest/config';
-import base from './vitest.config.ts';
+import { testEnv } from './vitest.config.ts';
 
-// Process-level tests (npm run test:e2e): they start the real worker as a child process and
-// kill it, so they take seconds each. Run one file at a time, and not while `npm test` runs
-// (both use the test NATS stream, which these tests purge first).
+// Process-level tests (npm run test:e2e): they start the real worker and relay as child
+// processes and kill them, so they take seconds each. Run one file at a time, and not while
+// `npm test` runs (both use the test NATS stream, which these tests purge first, and the test
+// outbox, which they drain).
 //
-// The base test options (env: the test database and test NATS) are spread in rather than
-// merged with mergeConfig, which would concatenate the `include` arrays.
+// Only the environment is shared with vitest.config.ts: its projects would replace `include`.
 export default defineConfig({
   test: {
-    ...base.test,
+    env: testEnv,
     include: ['test/e2e/**/*.e2e.ts'],
     testTimeout: 60_000,
     hookTimeout: 30_000,

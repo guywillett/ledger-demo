@@ -18,15 +18,45 @@ if (!databaseName.endsWith('_test')) {
   );
 }
 
+// Shared with vitest.e2e.config.ts.
+export const testEnv = {
+  DATABASE_URL: databaseUrl,
+  // nats-test runs with server name ledger-demo-test, which the e2e tests check before
+  // purging its stream.
+  NATS_URL: process.env.TEST_NATS_URL ?? 'nats://localhost:4223',
+  LOG_LEVEL: process.env.TEST_LOG_LEVEL ?? 'silent',
+};
+
+// The tests that claim from the outbox (the relay's tests, and the outbox's own). Every other
+// test is independent of the rest: it creates its own accounts and payments and asserts only on
+// them, so files run in parallel. Claiming can't be scoped like that: it takes the oldest
+// unpublished events in the whole outbox, and every test that creates a payment leaves one
+// behind. These files therefore run last (groupOrder 1: after the "main" project has finished)
+// and one at a time, and their tests first drain the backlog (drainOutbox in test/helpers.ts),
+// so the events a test then creates are the only ones it can claim.
+const relayTests = [
+  'test/relay/**/*.test.ts',
+  'test/outbox/**/*.test.ts',
+  'test/api/payment-events.test.ts',
+];
+
 export default defineConfig({
   test: {
-    include: ['test/**/*.test.ts'],
-    env: {
-      DATABASE_URL: databaseUrl,
-      // nats-test runs with server name ledger-demo-test, which the e2e tests check before
-      // purging its stream.
-      NATS_URL: process.env.TEST_NATS_URL ?? 'nats://localhost:4223',
-      LOG_LEVEL: process.env.TEST_LOG_LEVEL ?? 'silent',
-    },
+    env: testEnv,
+    projects: [
+      {
+        extends: true,
+        test: { name: 'main', include: ['test/**/*.test.ts'], exclude: relayTests },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'relay',
+          include: relayTests,
+          fileParallelism: false,
+          sequence: { groupOrder: 1 },
+        },
+      },
+    ],
   },
 });

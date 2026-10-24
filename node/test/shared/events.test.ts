@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { paymentCreatedV1Schema } from '../../src/shared/events.ts';
+import { paymentCreatedV1Schema, withdrawalHeldV1Schema } from '../../src/shared/events.ts';
 import { toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { expectEventMatchesContract } from '../contract.ts';
 
@@ -67,5 +67,47 @@ describe('payment.created v1: Zod stricter than the contract', () => {
     const event = { ...valid, ...overrides };
     expect(acceptedByContract(event)).toBe(true);
     expect(paymentCreatedV1Schema.safeParse(event).success).toBe(false);
+  });
+});
+
+const validHeld = {
+  event_id: 'evt_01m5cmffcafzwacj4r9sfjgy3z',
+  event_type: 'withdrawal.held',
+  schema_version: 1,
+  withdrawal_id: 'wd_01m5cmffajfzwacj4hc9tw3ekg',
+  account_id: 'acct_01m564xr00fx7rjvqryn5dzwxx',
+  amount_minor: '2500',
+  currency: 'EUR',
+  occurred_at: '2026-10-22T12:27:16.213Z',
+};
+
+describe('withdrawal.held v1 schemas agree', () => {
+  it('both accept a valid event, and ignore unknown fields', () => {
+    for (const event of [validHeld, { ...validHeld, added_later: 'x' }]) {
+      expect(withdrawalHeldV1Schema.safeParse(event).success).toBe(true);
+      expect(acceptedByContract(event)).toBe(true);
+    }
+  });
+
+  it.each([
+    ['a payment ID as the withdrawal', { withdrawal_id: 'pay_01m5cmffajfzwacj4hc9tw3ekg' }],
+    ['numeric amount', { amount_minor: 2500 }],
+    ['zero amount', { amount_minor: '0' }],
+    ['other currency', { currency: 'USD' }],
+    ['other event type', { event_type: 'withdrawal.executed' }],
+    ['other schema version', { schema_version: 2 }],
+    ['missing account_id', { account_id: undefined }],
+    ['timestamp that is not ISO 8601', { occurred_at: '22 October 2026' }],
+  ])('both reject: %s', (_label, overrides) => {
+    const event = JSON.parse(JSON.stringify({ ...validHeld, ...overrides })) as unknown;
+    expect(withdrawalHeldV1Schema.safeParse(event).success).toBe(false);
+    expect(acceptedByContract(event)).toBe(false);
+  });
+
+  it('carries no personal data: no IBAN, creditor name or remittance text', () => {
+    const fields = Object.keys(withdrawalHeldV1Schema.shape);
+    for (const field of ['creditor_iban', 'creditor_name', 'remittance_info']) {
+      expect(fields).not.toContain(field);
+    }
   });
 });

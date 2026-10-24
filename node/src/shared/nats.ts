@@ -7,9 +7,19 @@ export type { NatsConnection };
 
 // Streams are created by the nats-setup compose service from nats/streams/*.json, not by the
 // apps; see nats/setup.sh.
-export const STREAMS = { payments: 'PAYMENTS' } as const;
+export const STREAMS = { payments: 'PAYMENTS', withdrawals: 'WITHDRAWALS' } as const;
+export type StreamName = (typeof STREAMS)[keyof typeof STREAMS];
+
+// The stream each subject is published to: one stream per entity, subjects <entity>.<status>.
+// An unknown subject is a bug (an event nobody routed); it throws, which the relay records as a
+// publish failure for that event.
+export function streamForSubject(subject: string): StreamName {
+  if (subject.startsWith('payment.')) return STREAMS.payments;
+  if (subject.startsWith('withdrawal.')) return STREAMS.withdrawals;
+  throw new Error(`no stream for subject ${subject}`);
+}
 // Durable consumers, created by nats-setup from nats/consumers/<STREAM>/<NAME>.json.
-export const CONSUMERS = { worker: 'worker' } as const;
+export const CONSUMERS = { worker: 'worker', submitter: 'submitter' } as const;
 
 // How long a publish waits for the stream's acknowledgement before it counts as failed.
 export const PUBLISH_TIMEOUT_MS = 2000;
@@ -82,9 +92,9 @@ export type PublishResult = {
   readonly duplicate: boolean;
 };
 
-// The transport layer: how an event gets onto NATS. Code that announces events depends on
-// this type, not on JetStream, so the publisher is chosen where the app is wired together:
-// jetStreamPublisher in src/api/main.ts, a recording or failing one in the tests
+// The transport layer: how an event gets onto NATS. The relay (the only publisher) depends on
+// this type, not on JetStream, so the publisher is chosen where it is wired together:
+// jetStreamPublisher in src/relay/main.ts, a recording or failing one in the tests
 // (test/helpers.ts).
 export type EventPublisher = {
   // Publishes a JSON event and waits for the stream to acknowledge it. `msgId` becomes the
@@ -92,19 +102,22 @@ export type EventPublisher = {
   publish(subject: string, event: object, msgId: string): Promise<PublishResult>;
 };
 
+// Publishes each event to its subject's stream (streamForSubject).
 export function jetStreamPublisher(
   nc: NatsConnection,
-  options: { stream: string; timeoutMs: number },
+  options: { timeoutMs: number },
 ): EventPublisher {
   const js = jetstream(nc);
   return {
     async publish(subject, event, msgId) {
+      // Inside the async function, so an unknown subject rejects like any failed publish.
+      const stream = streamForSubject(subject);
       const ack = await js.publish(subject, JSON.stringify(event), {
         msgID: msgId,
         timeout: options.timeoutMs,
-        // The server rejects the message unless it lands in this stream, so a misconfigured
-        // subject fails loudly instead of being published to no stream.
-        expect: { streamName: options.stream },
+        // The server rejects the message unless it lands in this stream, so a subject that
+        // lands in another stream, or in none, fails loudly instead of being stored elsewhere.
+        expect: { streamName: stream },
       });
       return { stream: ack.stream, seq: ack.seq, duplicate: ack.duplicate };
     },

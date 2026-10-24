@@ -106,13 +106,14 @@ services:
 
   api:
     build: ./node
-    # Named, and built the same way by the worker service: one image for both.
+    # Named, and built the same way by the worker and relay services: one image for all three.
     image: ledger-demo-node
-    # The API exits with a failing code if it can't start or loses NATS for good; restart it.
+    # The API exits with a failing code if it can't start; restart it.
     restart: unless-stopped
+    # Postgres only: the API stores events in the outbox and never talks to NATS (the relay
+    # publishes them).
     environment:
       DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
-      NATS_URL: nats://nats:4222
       PORT: "3000"
       LOG_LEVEL: info
     # No healthcheck yet (no health endpoint; see Known gaps in the slice spec): nothing waits
@@ -121,6 +122,26 @@ services:
     # npm run dev:api on the host, which wants the same port.
     ports:
       - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # Publishes the outbox to JetStream (src/relay/). Several instances can run at once
+  # (docker compose up -d --scale relay=2): each claims its own batches of events.
+  relay:
+    build: ./node
+    image: ledger-demo-node
+    command: ["node", "src/relay/main.ts"]
+    # Exits with a failing code if it can't start or loses NATS for good; restart it.
+    restart: unless-stopped
+    # Graceful shutdown finishes the batch in progress first. If NATS is unreachable, each
+    # publish in it can take PUBLISH_TIMEOUT_MS (2 s): 10 × 2 s, then up to 5 s to drain NATS.
+    # After this, Docker sends SIGKILL (the batch's leases expire and it is published again).
+    stop_grace_period: 30s
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: info
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -154,6 +175,50 @@ services:
         condition: service_completed_successfully
       nats-setup:
         condition: service_completed_successfully
+
+  # Sends each held withdrawal to the provider (src/submitter/). Several instances can run at once
+  # (docker compose up -d --scale submitter=2): they share the durable consumer.
+  submitter:
+    build: ./node
+    image: ledger-demo-node
+    command: ["node", "src/submitter/main.ts"]
+    # Exits with a failing code if it can't start or loses NATS for good; restart it.
+    restart: unless-stopped
+    # As the worker: 5 s grace for in-flight submissions, up to 5 s to drain NATS. An unfinished
+    # submission is redelivered and sent again with the same key.
+    stop_grace_period: 15s
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      NATS_URL: nats://nats:4222
+      PROVIDER_URL: http://provider-sim:4000
+      LOG_LEVEL: info
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats-setup:
+        condition: service_completed_successfully
+      provider-sim:
+        condition: service_started
+
+  # A fake BaaS provider (src/provider-sim/): accepts SEPA transfers idempotently and reports
+  # their results to a webhook. Test infrastructure, part of neither implementation (slice 2
+  # decision 31). Failures are chosen by triggers in remittance_info (SIM REFUSE, SIM ERROR, …)
+  # or by the SIM_*_RATE variables (0, off, by default). State is in memory: a restart forgets
+  # every transfer.
+  provider-sim:
+    build: ./node
+    image: ledger-demo-node
+    command: ["node", "src/provider-sim/main.ts"]
+    restart: unless-stopped
+    environment:
+      PORT: "4000"
+      LOG_LEVEL: info
+      SIM_EXECUTION_DELAY_MS: "2000"
+      # Each transfer's result goes to the API's webhook, retried until it answers 2xx.
+      SIM_WEBHOOK_URL: http://api:3000/provider/transfer-updates
+    # Host port 4000, for curl.
+    ports:
+      - "4000:4000"
 
   # Reconciliation on demand: docker compose run --rm reconcile [options]. It only reads the
   # shared database, so it checks whichever implementation wrote the data; scripts/demo.sh

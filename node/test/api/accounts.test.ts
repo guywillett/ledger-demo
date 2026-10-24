@@ -40,7 +40,12 @@ describe('GET /accounts/:id/balance', () => {
     const account = await createTestAccount(pool);
     const response = await balanceOf(account);
     expect(response.statusCode).toBe(200);
-    expect(response.json).toEqual({ pending_in: '0', available: '0', currency: 'EUR' });
+    expect(response.json).toEqual({
+      pending_in: '0',
+      available: '0',
+      held: '0',
+      currency: 'EUR',
+    });
   });
 
   it('shows funds in pending_in once booked, then in available once credited', async () => {
