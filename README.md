@@ -4,7 +4,7 @@
 
 A small payment event-processing system (incoming payments, pseudo compliance review, ledger balances) built to demonstrate correctness under duplicates, retries, crashes and concurrency: **however often a notification or event is repeated, redelivered or processed concurrently, and wherever a process crashes, every balance changes exactly once.** Implemented in Node.js/TypeScript; a Go implementation against the same database schema and contracts comes later.
 
-The specs and decisions are in [`docs/`](docs/): [slice 1](docs/slices/slice-1-incoming-payments.md) is built, and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) (transactional outbox, withdrawals) is in progress: the outbox is done.
+The specs and decisions are in [`docs/`](docs/): [slice 1](docs/slices/slice-1-incoming-payments.md) is built, and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) (transactional outbox, withdrawals) is in progress: the outbox and withdrawals end to end are done.
 
 ```text
 provider ──POST /payments──► API ──► Postgres, one transaction:
@@ -23,8 +23,24 @@ provider ──POST /payments──► API ──► Postgres, one transaction:
                 (pending_in)                (approve/reject)   (available, or returned)
                           each step one transaction, through ledger/move()
 
-  GET /accounts/:id/balance, /transactions          reconciliation: do the books agree?
+client ──POST /accounts/:id/withdrawals (Idempotency-Key)──► API ──► Postgres, one transaction:
+                                       withdrawal `held` (available → held)
+                                       + withdrawal.held in the outbox
+                                               │
+                                     relay ──► JetStream: withdrawal.held
+                                               │
+                                               ▼
+                                 submitter ──POST /transfers (same key on every retry)──► provider
+                                    held → submitted                                       │
+                                                                                           │
+provider ──POST /provider/transfer-updates (webhook)──► API ──► Postgres, one transaction:◄─┘
+                                       update recorded + withdrawal settled:
+                                       executed (held → external) or failed (held → available)
+
+  GET /accounts/:id/balance, /transactions, /withdrawals/:id        reconciliation: do the books agree?
 ```
+
+Status codes follow the caller: our client's API answers with conventional REST codes (`201`, `200`, `409`, `422`…); provider webhooks get the webhook contract, `204` for anything recorded or deliberately handled and non-2xx only when a retry could help (`POST /provider/transfer-updates` now; `POST /payments` follows in step 6b).
 
 ## What it demonstrates
 
@@ -32,6 +48,7 @@ provider ──POST /payments──► API ──► Postgres, one transaction:
 |---|---|---|
 | A repeated notification changes nothing | `UNIQUE (network, network_transaction_id)` and one upsert statement; same details → `200`, different → `409` | `test/api/payments.test.ts` (5 repeats, 10 concurrent, conflicts) |
 | An event is never lost between commit and publish | the event is written to `outbox` in the same transaction as the payment; a relay publishes it at least once (claims leased with `FOR UPDATE SKIP LOCKED`, marked after the stream's acknowledgement); the stream drops a repeat by its `msg_id` | `test/api/payment-events.test.ts` (one outbox row, same transaction); `test/outbox/outbox.test.ts` (rollback, leases, disjoint concurrent claims); `test/relay/relay.test.ts` (failure and retry; a relay "crashing" after publishing, before marking: published again, dropped by the stream) |
+| A provider result is applied exactly once, even when it arrives first, twice, or contradicts itself | the update is recorded and the withdrawal settled in one transaction, by a conditional transition from `held` or `submitted`; a resend is counted, a second event for the same result skips, a contradiction (the other final status, another transfer ID) or an unmatched update is recorded and alerted, moving no money; every handled case answers `204` | `test/api/transfer-updates.test.ts`; `test/e2e/submitter.e2e.ts` (`SIM EARLY`, `SIM DUPLICATE`, `SIM FAIL`) |
 | A retried withdrawal request never pays twice | the client's `Idempotency-Key` is unique per account on the withdrawal itself, so only a request that commits takes it (a `422`, `404` or crash leaves it free); the funds are held in the request's own transaction, and the balance CHECK is the insufficient-funds check; a repeat returns the withdrawal's current state, a reused key with other details is a `409` | `test/api/withdrawals.test.ts` (5 repeats, 10 concurrent, conflicts, `422` then the same key succeeds, two concurrent withdrawals exceeding the balance) |
 | A repeated or concurrent event moves money once | every step is a conditional transition (`UPDATE … WHERE status = $expected`), never check-then-act | `test/worker/handler.test.ts` (same event twice, two consumers at once) |
 | The ledger protects itself | `move()` records each movement under `UNIQUE (reference_type, reference_id, reference_step)`; a reused reference with other details is refused; a reference's type and step are checked as a pair, in the database and in the `Movement` type. Withdrawals reserve funds with a `held` bucket, and the balance CHECK is the insufficient-funds check, so concurrent withdrawals can't overspend | `test/ledger/move.test.ts`, `test/ledger/withdrawals.test.ts` (two concurrent withdrawals exceeding the balance: exactly one commits) |
@@ -62,7 +79,8 @@ Deliberate, and described with their evolution path under *Known gaps* in the [s
 - **Outbox growth and relay latency:** published outbox rows are kept (pruning or partitioning is the evolution), and the relay polls, so an event can wait up to 1 s before it is published (`LISTEN/NOTIFY` is the evolution).
 - **No dead-letter handling:** a message that exhausts `max_deliver`, or that the worker terminates, is only logged; reconciliation shows the payment as stuck.
 - **Security:** no authentication on the API (including webhook signatures) or on NATS, and one database user for everything (append-only is enforced by triggers rather than per-service roles).
-- **Simplifications:** approve/reject is random; demo HTTP status codes rather than a real webhook contract; one IBAN per account and a single provider; no health endpoint; the SEPA country list in `node/src/shared/iban.ts` is not yet verified against the EPC's official list.
+- **One provider:** the provider webhooks live in `src/api/webhooks/` and speak provider-sim's format. With several providers, each gets an adapter, `src/api/webhooks/<provider>/transfer-updates.ts` and so on, that verifies its signature, parses its payload and maps its statuses and error codes onto the same provider-neutral ingestion functions (`recordTransferUpdate`, `recordNotification`); the submitter's provider client would be chosen per withdrawal the same way.
+- **Simplifications:** approve/reject is random; demo HTTP status codes on `POST /payments` (the webhook contract follows in step 6b); one IBAN per account; no health endpoint; the SEPA country list in `node/src/shared/iban.ts` is not yet verified against the EPC's official list.
 
 ## Local development
 
@@ -122,7 +140,7 @@ $NATS consumer info PAYMENTS worker              # the worker's consumer: pendin
 
 ### Fake provider
 
-`provider-sim` stands in for the BaaS the withdrawals go out through (test infrastructure; see *Fake provider* in the [slice 2 spec](docs/slices/slice-2-outbox-and-withdrawals.md)). `POST /transfers` is idempotent on `Idempotency-Key`; each transfer's result (`executed` or `failed`) follows after `SIM_EXECUTION_DELAY_MS`. Until the API's webhook exists, results are only logged. Failure modes are chosen by the start of `remittance_info`: `SIM REFUSE`, `SIM ERROR`, `SIM SLOW`, `SIM FAIL`, `SIM DUPLICATE`, `SIM EARLY`.
+`provider-sim` stands in for the BaaS the withdrawals go out through (test infrastructure; see *Fake provider* in the [slice 2 spec](docs/slices/slice-2-outbox-and-withdrawals.md)). `POST /transfers` is idempotent on `Idempotency-Key`; each transfer's result (`executed` or `failed`) follows after `SIM_EXECUTION_DELAY_MS`. Results go to the API's webhook (`SIM_WEBHOOK_URL`), resent until it answers 2xx. Failure modes are chosen by the start of `remittance_info`: `SIM REFUSE`, `SIM ERROR`, `SIM SLOW`, `SIM FAIL`, `SIM DUPLICATE`, `SIM EARLY`.
 
 ```sh
 curl -s -X POST localhost:4000/transfers -H 'content-type: application/json' \
@@ -153,7 +171,7 @@ docker compose exec postgres psql -U ledger -d ledger -c \
 
 ### Submitter
 
-`docker compose up -d` starts one submitter. It pulls `withdrawal.held` from the durable `submitter` consumer on `WITHDRAWALS` and sends each withdrawal to the provider (`PROVIDER_URL`, provider-sim in compose) with its TypeID as `Idempotency-Key`, within `PROVIDER_TIMEOUT_MS` (default 5 s). Accepted → `submitted`; refused (`422`) → `failed` with the funds released; an unknown outcome (timeout, `5xx`) → retried later with the same key, the withdrawal still `held`. Results don't come back until the transfer-update webhook exists, so a withdrawal ends at `submitted` for now (and reconciliation counts it as stuck, which fails `scripts/demo.sh`'s final check while one is left in the development database).
+`docker compose up -d` starts one submitter. It pulls `withdrawal.held` from the durable `submitter` consumer on `WITHDRAWALS` and sends each withdrawal to the provider (`PROVIDER_URL`, provider-sim in compose) with its TypeID as `Idempotency-Key`, within `PROVIDER_TIMEOUT_MS` (default 5 s). Accepted → `submitted`; refused (`422`) → `failed` with the funds released; an unknown outcome (timeout, `5xx`) → retried later with the same key, the withdrawal still `held`. The provider then reports the result to `POST /provider/transfer-updates`, which settles the withdrawal: `executed` (the held funds leave) or `failed` (they're released).
 
 ```sh
 docker compose logs -f submitter           # one line per submission and its outcome
@@ -300,7 +318,7 @@ curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?li
 # next page: add &before=<next_before from the previous response>
 ```
 
-Request a withdrawal from alice (repeat it with the same key to get `200` and the same withdrawal; change the amount to see a `409`; ask for more than `available` to see a `422`), then read it back with the `Location` it returns. The submitter sends it to provider-sim within a second or two, so it moves to `submitted`, its amount still in the balance's `held`. Results don't come back yet (the transfer-update webhook is next), so it stays there, and reconciliation counts it as stuck: `scripts/demo.sh`'s final check fails while one is left in the development database:
+Request a withdrawal from alice (repeat it with the same key to get `200` and the same withdrawal; change the amount to see a `409`; ask for more than `available` to see a `422`), then read it back with the `Location` it returns. Within a few seconds the submitter sends it to provider-sim (`submitted`) and the provider's result settles it: `executed`, with its amount gone from `held`; put `SIM FAIL` in `remittance_info` to see it `failed` with the funds back in `available`:
 
 ```sh
 curl -i -X POST localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/withdrawals \
@@ -312,6 +330,18 @@ curl -i -X POST localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/withdraw
   "remittance_info": "Rent October"
 }'
 curl -s 'localhost:3000/withdrawals/wd_…?include=history'
+```
+
+The provider's webhook can be called by hand too. Every update it can parse gets `204` with no body, whatever it did (applied, a duplicate, a contradiction, an unknown reference); `docker compose logs api` and the `transfer_updates` table show what happened:
+
+```sh
+curl -i -X POST localhost:3000/provider/transfer-updates -H 'content-type: application/json' -d '{
+  "provider_event_id": "pev_manual_1",
+  "transfer_id": "tr_manual",
+  "reference": "wd_…",
+  "status": "executed",
+  "occurred_at": "2026-10-24T09:00:00Z"
+}'
 ```
 
 #### Lint and format

@@ -31,7 +31,7 @@ Two things slice 1 could not do:
 - Cancelling a withdrawal (a nice race to demonstrate later: cancel vs submit, settled by a conditional transition)
 - Returns after execution (SEPA R-transactions): a separate flow with compensating movements, as for incoming payments
 - Compliance review of withdrawals (decision 30)
-- Polling the provider for transfers whose webhook never arrives
+- Polling the provider (for transfers whose webhook never arrives, and discovery of incoming payments): see *Known gaps*
 - Authentication (clients, webhook signatures), double-entry, Go implementation, load testing
 
 ## Part A — Transactional outbox
@@ -191,16 +191,35 @@ If `max_deliver` is exhausted, the withdrawal stays `held` (dead-letter handling
 
 ### `POST /provider/transfer-updates`
 
-The provider's webhook: `{ provider_event_id, transfer_id, reference (our withdrawal TypeID), status: "executed" | "failed", reason?, occurred_at }`. This is ingestion's second kind of provider notification: `ingestion/notifications.ts` splits into `incoming-payments.ts` and `transfer-updates.ts` (as discussed for slice 1).
+The provider's webhook: `{ provider_event_id, transfer_id, reference (our withdrawal TypeID), status: "executed" | "failed", reason?, occurred_at }`, a tolerant reader (`reason` required for `failed`, absent for `executed`). This is ingestion's second kind of provider notification: `ingestion/notifications.ts` split into `incoming-payments.ts` and `transfer-updates.ts`.
 
-One transaction (decision 29):
-- `executed` → transition `held | submitted → executed` with `move(held → external, step execute)`.
-- `failed` → transition `held | submitted → failed` with `move(held → available, step release)`.
-- Transition skipped and the withdrawal already in **that** status → duplicate, `200` (providers retry webhooks).
-- Withdrawal in the **other** final status (e.g. `failed` after `executed`) → conflict: `409` and an `error` log; a contradiction from the provider, not a retry (a real webhook: 2xx, record and alert, as slice 1's *Webhook semantics*).
-- Unknown reference → `422`.
+**`transfer_updates`** (an internal log, `bigserial` key): one row per distinct `provider_event_id` (`UNIQUE`), with `withdrawal_id` (nullable: `NULL` when the reference matches no withdrawal), `reference` as sent, `transfer_id`, `status`, `reason`, the provider's `occurred_at`, `received_at`, `notification_count` and `outcome` (what the first receipt did: `applied`, `duplicate`, `conflict`, `unmatched`). A record, not a guard: the money is decided by the withdrawal's conditional transition; the table recognises a resent update and keeps contradictions and unmatched updates on file.
 
-Updates are recorded in `transfer_updates` (one row per distinct `provider_event_id`, with a `notification_count` like incoming payments) for audit and duplicate counting; idempotency itself comes from the conditional transition, never from that table.
+One transaction (decision 29), `recordTransferUpdate()`:
+1. **Record**, one statement: insert the update with `withdrawal_id` resolved from the reference, or, for the same `provider_event_id`, count a resend when its details match (`IS NOT DISTINCT FROM`, since `reason` is `NULL` for `executed`).
+2. **Settle** a new, matched update: `execute(tx, id, transfer_id)` or `release(tx, id, reason, transfer_id)`. A skipped transition is then classified by a read (it only classifies; the transition decided).
+3. **Set the final outcome** on the row. Conflicts and unmatched updates are **committed, not rolled back**, so they stay on file; they move no money (decision 35). Only invariant violations roll back.
+
+| Situation | Outcome | Effect |
+|---|---|---|
+| New update, transition applies (from `held` or `submitted`, decision 27) | `applied` | settled: `held → external`, or funds released |
+| The same `provider_event_id` resent with the same details | duplicate | `notification_count` + 1; nothing settled again |
+| A second event ID for the result already recorded | `duplicate` | nothing moved |
+| The withdrawal already has the **other** final status (`failed` after `executed`, or the reverse; SEPA allows neither, returns are a separate flow) | `conflict` | recorded, `error` log with `alert: true`, nothing moved |
+| Another transfer ID than the one stored (`TransferIdMismatchError`, thrown after a read, so the transaction is still usable) | `conflict` | as above |
+| The same `provider_event_id` with other details (the provider reused its event ID) | event conflict | nothing changed; alert |
+| The reference matches no withdrawal (or isn't a `wd_` TypeID) | `unmatched` | recorded with `withdrawal_id` `NULL`; alert. Not a timing race (a withdrawal exists before it is submitted) |
+| A ledger invariant violation | (rolled back) | `500`, `fatal` with `alert: true` |
+
+**Webhook semantics** (decision 37), the real contract, unlike `POST /payments` so far:
+
+| Answer | When |
+|---|---|
+| `204`, no body | everything recorded or deliberately handled: applied, duplicate, conflict, event conflict, unmatched. The outcome is never echoed: the endpoint is no oracle for which withdrawals exist or their state, and providers ignore webhook bodies |
+| `400` (problem details, field paths only) | a body that doesn't parse: if the bug is ours, the provider's retries deliver the update once it's fixed |
+| `500` | an invariant violation (rolled back, alerted) or a transient failure: a retry helps once fixed, and keeps it visible meanwhile |
+
+Compose sets provider-sim's `SIM_WEBHOOK_URL` to this endpoint, so a withdrawal completes end to end; since every handled case answers `204`, the sim stops resending after the first delivery, as a real provider would. Reconciliation lists `conflict` and `unmatched` updates for a person (not inconsistent books), and a withdrawal stuck in `submitted` now means a webhook that never came.
 
 ### Fake provider (`provider-sim`)
 
@@ -283,7 +302,9 @@ Slice 1's gaps stand, except the commit-then-publish gap (closed by the outbox).
 - **Single scheme:** field validation (lengths, the SEPA basic character set) is SEPA-specific and partly enforced by database CHECKs. With several schemes (Faster Payments, SWIFT, …), the scheme becomes a routing decision and validation moves to per-scheme rules in code, with the database keeping only scheme-independent constraints.
 - **Relay latency:** idle polling adds up to the poll interval (≤ 1 s) per event; `LISTEN/NOTIFY` is the evolution.
 - **No compliance review of withdrawals** (decision 30); in reality outgoing payments are screened (sanctions, fraud) before submission.
-- **No polling of the provider:** a withdrawal whose webhook never arrives stays `submitted`; reconciliation lists it. Real systems poll the provider's transfer status after a timeout.
+- **Webhooks are the fast path, not the guarantee.** A real integration also polls the provider (the source of truth) and reconciles against the daily statement. For withdrawals that's a status check on withdrawals still `submitted` after a threshold. For incoming payments it's **discovery**: the provider's transaction list since a checkpoint, with an overlap window, since list order isn't commit order. Both feed the same idempotent paths (`execute` / `release`; `recordNotification`), so a polled result and a webhook for the same transfer or payment apply once, and a disagreement takes the conflict path. Not built: provider-sim would need `GET /transfers/:id` and a transactions list, plus a poller.
+- **Webhook authentication:** an HMAC signature over the body with a shared secret, checked before parsing; an unsigned or wrongly signed request gets a bare `401`. The precondition for any of this endpoint's answers.
+- **Inbox:** storing every raw payload first, answering 2xx and processing separately: the inbound mirror of the outbox. It suits heavy, locking or waiting processing, and keeps raw payloads for audit (including unparseable ones); with polling in place, a missed webhook can't strand anything, so it isn't needed for correctness. It doesn't replace idempotency: an inbox needs its own dedupe key, and processing keeps its conditional transitions.
 - **No cancellation**, and **no returns after execution** (SEPA R-transactions).
 - **Idempotency keys never expire.**
 - **The transactions list shows payments only;** withdrawals are read individually.
@@ -309,3 +330,5 @@ Numbering continues from slice 1.
 34. **provider-sim failures are chosen deterministically by triggers in the remittance text** (as provider sandboxes use magic amounts or names), with optional random rates for chaos runs. Probabilities alone would make tests and the demo flaky; a trigger makes each failure mode a test case that always happens.
 35. **A provider answer that signals our bug (a `400`, a `409`, a transfer-ID mismatch) moves no money:** the message is terminated with an alert and the withdrawal stays `held` for a person. Only a definitive refusal (`422`) releases funds automatically. Releasing on a bug would guess at an outcome the provider may not share. The meaning of each answer is provider-sim's contract (a `409` is only ever our key reused with another body); a real provider's answers are mapped to these outcomes by its integration (*Known gaps*).
 36. **One delivery log for every consumer**, `event_deliveries` with a `consumer` column (`worker`, `submitter`), rather than a table per consumer: the same columns and the same crash trace, and reconciliation reports duplicates and stale `in_progress` rows per consumer.
+37. **Transfer updates use the real webhook contract:** `204` (no body) for everything recorded or deliberately handled (contradictions and unmatched updates recorded and alerted, moving no money; no outcome echoed, so the endpoint is no oracle); `400` only for an unparseable body; `500` when a retry can help.
+38. **Status codes follow the caller:** our client's API uses conventional REST codes; provider webhooks use the webhook contract. `POST /payments` moves to the webhook contract in step 6b (revising slice 1 decision 13), recording unknown-account payments in suspense and conflicts as records, not 4xx. The code follows the same split: `src/api/` holds the client API at its top level and the provider webhooks under `src/api/webhooks/` (`transfer-updates.ts`; `POST /payments` moves there in step 6b as `incoming-payments.ts`, at `POST /provider/incoming-payments`, so every provider webhook lives under `/provider/`).

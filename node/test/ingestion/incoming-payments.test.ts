@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type Notification, recordNotification } from '../../src/ingestion/notifications.ts';
+import { type Notification, recordNotification } from '../../src/ingestion/incoming-payments.ts';
 import { withTransaction } from '../../src/shared/db.ts';
 import { parseIban, type Iban } from '../../src/shared/iban.ts';
 import { refusingPool } from '../helpers.ts';

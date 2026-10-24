@@ -71,6 +71,15 @@ export function expectMatchesContract(
   if (documented === undefined) {
     throw new Error(`contract has no ${response.statusCode} response for ${method} ${path}`);
   }
+  // A response documented without content (e.g. 204) must have no body.
+  if (documented.content === undefined) {
+    if (response.body !== '') {
+      throw new Error(
+        `contract has no body for ${response.statusCode} on ${method} ${path}, got: ${response.body}`,
+      );
+    }
+    return;
+  }
   const contentType = String(response.headers['content-type'] ?? '').split(';')[0] ?? '';
   const media = documented.content?.[contentType];
   if (media === undefined) {

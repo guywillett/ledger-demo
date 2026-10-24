@@ -5,7 +5,7 @@ import { buildApp } from '../src/api/app.ts';
 import type { App } from '../src/api/types.ts';
 import { loadSharedConfig, natsEnvSchema, parseEnv } from '../src/shared/config.ts';
 import { decide, startReview } from '../src/compliance/transitions.ts';
-import { recordNotification } from '../src/ingestion/notifications.ts';
+import { recordNotification } from '../src/ingestion/incoming-payments.ts';
 import { book, postDecision } from '../src/ledger/posting.ts';
 import { type Payment } from '../src/payments/payments.ts';
 import { relayBatch, type RelayDeps } from '../src/relay/relay.ts';

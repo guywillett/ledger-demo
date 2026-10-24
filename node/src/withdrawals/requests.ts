@@ -5,7 +5,7 @@ import { enqueueWithdrawalHeld } from './events.ts';
 import { getWithdrawalByKey, type NewWithdrawal, type Withdrawal } from './withdrawals.ts';
 
 // Client withdrawal requests: turns a request into a result, so the route stays thin. The
-// client-facing counterpart of ingestion/notifications.ts (provider notifications).
+// client-facing counterpart of ingestion/incoming-payments.ts (provider notifications).
 //
 // Idempotency (slice 2 decision 24): the key is a unique column on the withdrawal itself, so
 // only a request that commits takes it. Everything that fails rolls back and leaves it free:

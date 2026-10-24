@@ -214,9 +214,8 @@ services:
       PORT: "4000"
       LOG_LEVEL: info
       SIM_EXECUTION_DELAY_MS: "2000"
-      # Unset until the API's transfer-update webhook exists (step 6, which sets it to
-      # http://api:3000/provider/transfer-updates): results are logged, not sent.
-      # SIM_WEBHOOK_URL: http://api:3000/provider/transfer-updates
+      # Each transfer's result goes to the API's webhook, retried until it answers 2xx.
+      SIM_WEBHOOK_URL: http://api:3000/provider/transfer-updates
     # Host port 4000, for curl.
     ports:
       - "4000:4000"

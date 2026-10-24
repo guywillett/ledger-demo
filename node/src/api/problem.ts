@@ -1,7 +1,7 @@
 import { STATUS_CODES } from 'node:http';
 import type { FastifyReply } from 'fastify';
 import type { z } from 'zod';
-import type { ComparedField } from '../ingestion/notifications.ts';
+import type { ComparedField } from '../ingestion/incoming-payments.ts';
 import type { ComparedWithdrawalField } from '../withdrawals/requests.ts';
 
 // RFC 9457 problem details. `type` identifies the kind of problem: a URN for our own types
@@ -45,6 +45,12 @@ export const problems = {
     title: 'Unknown account',
     status: 422,
     detail: 'The creditor IBAN does not match any account managed by this application.',
+  }),
+  invalidTransferUpdate: (errors: readonly ValidationError[]) => ({
+    type: 'urn:ledger-demo:problem:invalid-transfer-update',
+    title: 'Invalid transfer update',
+    status: 400,
+    errors,
   }),
   invalidRequest: (errors: readonly ValidationError[]) => ({
     type: 'urn:ledger-demo:problem:invalid-request',

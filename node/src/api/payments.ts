@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { recordNotification } from '../ingestion/notifications.ts';
+import { recordNotification } from '../ingestion/incoming-payments.ts';
 import { withTransaction } from '../shared/db.ts';
 import { maskIban } from '../shared/iban.ts';
 import { toTypeId } from '../shared/ids.ts';

@@ -110,6 +110,19 @@ export type StuckWithdrawal = {
   readonly ageSeconds: number;
 };
 
+// A provider transfer update a person should look at: a contradiction (the other final status,
+// or another transfer ID) or one matching no withdrawal. Recorded and moving no money, so not
+// inconsistent books.
+export type TransferUpdateProblem = {
+  readonly providerEventId: string;
+  readonly outcome: 'conflict' | 'unmatched';
+  // null for an unmatched update.
+  readonly withdrawalId: Uuid<'wd'> | null;
+  readonly reference: string;
+  readonly status: string;
+  readonly receivedAt: Date;
+};
+
 export type OutboxStats = {
   // Events unpublished for longer than the stuck threshold: the relay is down or failing.
   readonly stuckUnpublished: number;
@@ -141,6 +154,9 @@ export type ReconcileReport = {
   readonly withdrawalMismatches: readonly WithdrawalMismatch[];
   readonly stuck: readonly StuckPayment[];
   readonly stuckWithdrawals: readonly StuckWithdrawal[];
+  // Conflicting and unmatched transfer updates, oldest first. With an account filter, only that
+  // account's conflicts: an unmatched update belongs to no account.
+  readonly transferUpdateProblems: readonly TransferUpdateProblem[];
   readonly outbox: OutboxStats;
   readonly deliveries: DeliveryStats;
   // The books agree: no account differences and no payment or withdrawal mismatches. Stuck
@@ -364,6 +380,15 @@ WHERE o.published_at IS NULL
          WHERE o.entity_type = 'withdrawal' AND w.id = o.entity_id AND w.account_id = ANY($1)))
 `;
 
+const TRANSFER_UPDATE_PROBLEMS_SQL = `
+SELECT u.provider_event_id, u.outcome, u.withdrawal_id, u.reference, u.status, u.received_at
+FROM transfer_updates u
+LEFT JOIN withdrawals w ON w.id = u.withdrawal_id
+WHERE u.outcome IN ('conflict', 'unmatched')
+  AND ($1::uuid[] IS NULL OR w.account_id = ANY($1))
+ORDER BY u.received_at, u.id
+`;
+
 const DELIVERIES_BY_OUTCOME_SQL = `
 SELECT consumer, outcome, count(*)::int AS n
 FROM event_deliveries
@@ -542,6 +567,23 @@ export async function reconcile(
     ageSeconds: row.age_seconds,
   }));
 
+  const transferUpdates = await db.query<{
+    provider_event_id: string;
+    outcome: 'conflict' | 'unmatched';
+    withdrawal_id: string | null;
+    reference: string;
+    status: string;
+    received_at: Date;
+  }>(TRANSFER_UPDATE_PROBLEMS_SQL, [accounts]);
+  const transferUpdateProblems: TransferUpdateProblem[] = transferUpdates.rows.map((row) => ({
+    providerEventId: row.provider_event_id,
+    outcome: row.outcome,
+    withdrawalId: row.withdrawal_id as Uuid<'wd'> | null,
+    reference: row.reference,
+    status: row.status,
+    receivedAt: row.received_at,
+  }));
+
   const outbox = await db.query<{
     stuck: number;
     oldest_age_seconds: number | null;
@@ -570,6 +612,7 @@ export async function reconcile(
     withdrawalMismatches,
     stuck,
     stuckWithdrawals,
+    transferUpdateProblems,
     outbox: {
       stuckUnpublished: outboxRow?.stuck ?? 0,
       oldestUnpublishedAgeSeconds: outboxRow?.oldest_age_seconds ?? null,

@@ -111,6 +111,10 @@ function toJson(report: ReconcileReport): string {
         withdrawalId: toTypeId('wd', s.withdrawalId),
         accountId: toTypeId('acct', s.accountId),
       })),
+      transferUpdateProblems: report.transferUpdateProblems.map((p) => ({
+        ...p,
+        withdrawalId: p.withdrawalId === null ? null : toTypeId('wd', p.withdrawalId),
+      })),
     },
     (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value),
     2,
@@ -211,6 +215,26 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
           toTypeId('wd', s.withdrawalId),
           s.status,
           `${Math.round(s.ageSeconds / 60)} min`,
+        ]),
+      ]),
+    );
+  }
+
+  lines.push(
+    '',
+    `Transfer updates for a person to look at (conflicts, unmatched): ` +
+      `${report.transferUpdateProblems.length}`,
+  );
+  if (report.transferUpdateProblems.length > 0) {
+    lines.push(
+      table([
+        ['provider event', 'outcome', 'withdrawal', 'status', 'received'],
+        ...report.transferUpdateProblems.map((p) => [
+          p.providerEventId,
+          p.outcome,
+          p.withdrawalId === null ? `(none: ${p.reference})` : toTypeId('wd', p.withdrawalId),
+          p.status,
+          p.receivedAt.toISOString(),
         ]),
       ]),
     );

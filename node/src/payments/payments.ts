@@ -5,7 +5,7 @@ import { parseStatus, type PaymentStatus } from './status.ts';
 
 // The payment entity and how it is read. Its lifecycle and the transitions that move it
 // along are in status.ts; recording a provider notification as a new payment is in
-// ingestion/notifications.ts.
+// ingestion/incoming-payments.ts.
 
 export type Payment = {
   readonly id: Uuid<'pay'>;

@@ -295,6 +295,50 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /provider/transfer-updates:
+    post:
+      summary: The provider's result for a transfer we sent (its webhook)
+      description: |
+        Recorded and settled in one transaction: executed moves the held funds out, failed
+        releases them. The real webhook contract (a provider retries anything but a 2xx): 204,
+        with no body, for everything recorded or deliberately handled (applied, a resent or
+        repeated update, a contradiction, an update matching no withdrawal); 400 only for a
+        body that doesn't parse; 500 when a retry can help. The response never says what the
+        update did, so the endpoint can't be used to probe withdrawals. Unknown fields are
+        ignored (tolerant reader).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferUpdate'
+            example:
+              provider_event_id: pev_6b1c9a7e-0d2f-4a31-9c1e-2f4b8e7d5a10
+              transfer_id: tr_b705d586-66b2-443b-8f8d-96fe4249aa46
+              reference: wd_01m5jjt69mec4t28vcqmrkmf79
+              status: executed
+              occurred_at: '2026-10-24T09:00:00.000Z'
+      responses:
+        '204':
+          description: Recorded or deliberately handled (whatever it did)
+        '400':
+          description: The body doesn't parse
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '415':
+          description: Unsupported content type
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Not recorded; a retry can help (e.g. once a bug is fixed)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 components:
   parameters:
     AccountId:
@@ -565,6 +609,35 @@ components:
         reason:
           type: [string, 'null']
         at:
+          type: string
+          format: date-time
+    TransferUpdate:
+      type: object
+      description: Unknown fields are ignored (tolerant reader).
+      required: [provider_event_id, transfer_id, reference, status, occurred_at]
+      properties:
+        provider_event_id:
+          description: The provider's ID for this update; a resend carries the same one.
+          type: string
+          minLength: 1
+          maxLength: 255
+        transfer_id:
+          type: string
+          minLength: 1
+          maxLength: 255
+        reference:
+          description: Our withdrawal ID as we sent it (a wd_ TypeID).
+          type: string
+          minLength: 1
+          maxLength: 255
+        status:
+          enum: [executed, failed]
+        reason:
+          description: Required for failed; must be absent for executed.
+          type: string
+          minLength: 1
+          maxLength: 1000
+        occurred_at:
           type: string
           format: date-time
     Problem:

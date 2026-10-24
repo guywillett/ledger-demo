@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { afterAll, describe, expect, it } from 'vitest';
 import { decide, startReview } from '../../src/compliance/transitions.ts';
 import type { Decision } from '../../src/compliance/decision.ts';
-import { recordNotification } from '../../src/ingestion/notifications.ts';
+import { recordNotification } from '../../src/ingestion/incoming-payments.ts';
 import { type Payment } from '../../src/payments/payments.ts';
 import { move } from '../../src/ledger/move.ts';
 import { book, postDecision } from '../../src/ledger/posting.ts';

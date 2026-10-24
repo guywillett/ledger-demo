@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { toTypeId, type TypeIdString } from '../shared/ids.ts';
+import { fromTypeId, toTypeId, type TypeIdString } from '../shared/ids.ts';
+import type { TransferUpdate } from '../ingestion/transfer-updates.ts';
 import {
   amountMinorSchema,
   ibanSchema,
@@ -7,7 +8,7 @@ import {
   sepaTextSchema,
   typeIdSchema,
 } from '../shared/schemas.ts';
-import type { Notification } from '../ingestion/notifications.ts';
+import type { Notification } from '../ingestion/incoming-payments.ts';
 import type { Payment } from '../payments/payments.ts';
 import type { Balance } from '../ledger/balances.ts';
 import type { PaymentStatus, StatusChange } from '../payments/status.ts';
@@ -217,4 +218,43 @@ export function toWithdrawalStatusChangeResponse(
     reason: change.reason,
     at: change.at.toISOString(),
   };
+}
+
+// POST /provider/transfer-updates body: the provider's result for one transfer. A tolerant
+// reader (z.object), like POST /payments: providers add fields to webhooks over time.
+export const transferUpdateBodySchema = z
+  .object({
+    provider_event_id: z.string().min(1).max(255),
+    transfer_id: z.string().min(1).max(255),
+    // Our withdrawal TypeID, as we sent it; anything else is kept as text and unmatched.
+    reference: z.string().min(1).max(255),
+    status: z.enum(['executed', 'failed']),
+    reason: z.string().min(1).max(1000).optional(),
+    occurred_at: z.iso.datetime(),
+  })
+  .refine((u) => (u.status === 'failed') === (u.reason !== undefined), {
+    error: 'is required for failed, and must be absent for executed',
+    path: ['reason'],
+  });
+
+export function toTransferUpdate(body: z.infer<typeof transferUpdateBodySchema>): TransferUpdate {
+  return {
+    providerEventId: body.provider_event_id,
+    transferId: body.transfer_id,
+    reference: body.reference,
+    withdrawalId: withdrawalIdOrNull(body.reference),
+    status: body.status,
+    reason: body.reason ?? null,
+    occurredAt: new Date(body.occurred_at),
+  };
+}
+
+// The reference as a withdrawal ID if it is a wd_ TypeID holding a UUIDv7; null otherwise (the
+// update is then recorded as unmatched, not refused).
+function withdrawalIdOrNull(reference: string): Uuid<'wd'> | null {
+  try {
+    return fromTypeId('wd', reference);
+  } catch {
+    return null;
+  }
 }
