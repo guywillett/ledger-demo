@@ -75,7 +75,8 @@ export function expectMatchesContract(
   if (documented.content === undefined) {
     if (response.body !== '') {
       throw new Error(
-        `contract has no body for ${response.statusCode} on ${method} ${path}, got: ${response.body}`,
+        `contract has no body for ${response.statusCode} on ${method} ${path}, ` +
+          `got: ${response.body}`,
       );
     }
     return;

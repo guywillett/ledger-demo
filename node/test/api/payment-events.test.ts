@@ -21,10 +21,10 @@ import {
   testStreamPublisher,
 } from '../helpers.ts';
 
-// payment.created: stored in the outbox by POST /provider/incoming-payments, in the payment's own transaction,
-// and published by the relay. Runs in the serial "relay" project (vitest.config.ts): nothing
-// else writes to the outbox or the test stream meanwhile, so counts before and after a request
-// are exact.
+// payment.created: stored in the outbox by POST /provider/incoming-payments, in the payment's
+// own transaction, and published by the relay. Runs in the serial "relay" project
+// (vitest.config.ts): nothing else writes to the outbox or the test stream meanwhile, so counts
+// before and after a request are exact.
 
 const testApp = await createTestApp();
 const { app, pool } = testApp;

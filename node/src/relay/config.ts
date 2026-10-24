@@ -30,10 +30,10 @@ const relayEnvSchema = natsEnvSchema
     (env) => env.RELAY_LEASE_MS >= env.RELAY_BATCH_SIZE * PUBLISH_TIMEOUT_MS + LEASE_MARGIN_MS,
     {
       message:
-        `RELAY_LEASE_MS must be at least RELAY_BATCH_SIZE × ${PUBLISH_TIMEOUT_MS} ms (the publish ` +
-        `timeout) + ${LEASE_MARGIN_MS} ms (database work): a batch whose publishes all time out ` +
-        'would otherwise outlast its lease, and another relay would claim and publish the same ' +
-        'events while this one is still on them',
+        `RELAY_LEASE_MS must be at least RELAY_BATCH_SIZE × ${PUBLISH_TIMEOUT_MS} ms ` +
+        `(the publish timeout) + ${LEASE_MARGIN_MS} ms (database work): a batch whose ` +
+        'publishes all time out would otherwise outlast its lease, and another relay would ' +
+        'claim and publish the same events while this one is still on them',
       path: ['RELAY_LEASE_MS'],
     },
   );

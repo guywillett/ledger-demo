@@ -78,7 +78,8 @@ async function deliveriesOf(
     nats_msg_id: string | null;
     delivery_attempt: number;
   }>(
-    'SELECT outcome, nats_msg_id, delivery_attempt FROM event_deliveries WHERE event_id = $1 ORDER BY id',
+    `SELECT outcome, nats_msg_id, delivery_attempt FROM event_deliveries
+     WHERE event_id = $1 ORDER BY id`,
     [eventId],
   );
   return result.rows;
@@ -86,7 +87,8 @@ async function deliveriesOf(
 
 async function movementSteps(paymentId: Uuid<'pay'>): Promise<string[]> {
   const result = await pool.query<{ reference_step: string }>(
-    "SELECT reference_step FROM balance_movements WHERE reference_type = 'payment' AND reference_id = $1 ORDER BY created_at",
+    `SELECT reference_step FROM balance_movements
+     WHERE reference_type = 'payment' AND reference_id = $1 ORDER BY created_at`,
     [paymentId],
   );
   return result.rows.map((r) => r.reference_step);
@@ -242,7 +244,8 @@ describe('handleDelivery', () => {
     expect(await handleDelivery(deps(), msg)).toBe('invalid');
     expect(msg.calls).toEqual(['term']);
     const result = await pool.query<{ outcome: string; event_id: string | null }>(
-      "SELECT outcome, event_id FROM event_deliveries WHERE nats_msg_id = 'garbage' ORDER BY id DESC LIMIT 1",
+      `SELECT outcome, event_id FROM event_deliveries
+       WHERE nats_msg_id = 'garbage' ORDER BY id DESC LIMIT 1`,
     );
     expect(result.rows[0]).toEqual({ outcome: 'invalid', event_id: null });
   });

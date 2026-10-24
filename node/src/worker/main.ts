@@ -1,4 +1,5 @@
 import { decideRandomly } from '../compliance/decision.ts';
+import { DELIVERY_RETRY } from '../consumer/delivery-log.ts';
 import { runConsumerProcess } from '../consumer/process.ts';
 import { CONSUMERS, STREAMS } from '../shared/nats.ts';
 import { loadWorkerConfig } from './config.ts';
@@ -12,8 +13,7 @@ import { handleDelivery, type HandlerDeps } from './handler.ts';
 
 // working() at least this often during a review: well under the consumer's 10 s ack_wait.
 const WORKING_INTERVAL_MS = 3000;
-// After a transient failure handling a message: nak with 1 s, doubling per attempt up to 60 s.
-const DELIVERY_RETRY = { retryBaseDelayMs: 1000, retryMaxDelayMs: 60_000 };
+// A transient failure handling a message is retried with DELIVERY_RETRY (consumer/delivery-log.ts).
 
 const config = loadWorkerConfig();
 

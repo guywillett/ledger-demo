@@ -27,7 +27,8 @@ async function history(
     to_status: string;
     reason: string | null;
   }>(
-    'SELECT from_status, to_status, reason FROM payment_status_history WHERE payment_id = $1 ORDER BY id',
+    `SELECT from_status, to_status, reason FROM payment_status_history
+     WHERE payment_id = $1 ORDER BY id`,
     [paymentId],
   );
   return result.rows;

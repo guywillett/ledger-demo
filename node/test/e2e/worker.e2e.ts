@@ -53,7 +53,8 @@ async function post(account: TestAccount): Promise<Uuid<'pay'>> {
 
 async function movementSteps(paymentId: Uuid<'pay'>): Promise<string[]> {
   const result = await pool.query<{ reference_step: string }>(
-    "SELECT reference_step FROM balance_movements WHERE reference_type = 'payment' AND reference_id = $1 ORDER BY created_at",
+    `SELECT reference_step FROM balance_movements
+     WHERE reference_type = 'payment' AND reference_id = $1 ORDER BY created_at`,
     [paymentId],
   );
   return result.rows.map((r) => r.reference_step);

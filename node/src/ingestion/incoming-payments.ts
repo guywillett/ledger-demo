@@ -75,7 +75,8 @@ WITH upsert AS (
   ON CONFLICT (network, network_transaction_id) DO UPDATE
     SET notification_count = incoming_payments.notification_count + 1,
         updated_at = now()
-    WHERE (incoming_payments.creditor_iban, incoming_payments.amount_minor, incoming_payments.currency)
+    WHERE (incoming_payments.creditor_iban, incoming_payments.amount_minor,
+           incoming_payments.currency)
         = (EXCLUDED.creditor_iban, EXCLUDED.amount_minor, EXCLUDED.currency)
   RETURNING new.*, (old.id IS NULL) AS inserted
 ),

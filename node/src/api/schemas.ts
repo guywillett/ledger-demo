@@ -109,9 +109,9 @@ export const idempotencyKeyHeadersSchema = z.object({
 });
 
 // POST /accounts/:account_id/withdrawals body. z.strictObject: unknown fields are rejected, the
-// opposite of the provider webhook (notificationBodySchema, webhooks/schemas.ts). This is our own client's request
-// to move money, so a misspelt optional field (remitance_info) must fail rather than be
-// silently dropped (slice 2 decision 33).
+// opposite of the provider webhook (notificationBodySchema, webhooks/schemas.ts). This is our
+// own client's request to move money, so a misspelt optional field (remitance_info) must fail
+// rather than be silently dropped (slice 2 decision 33).
 export const withdrawalBodySchema = z.strictObject({
   amount_minor: amountMinorSchema,
   currency: z.literal('EUR'),

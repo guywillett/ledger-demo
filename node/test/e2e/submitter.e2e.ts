@@ -29,7 +29,8 @@ const PROVIDER_TIMEOUT_MS = '3000';
 const testApp = await createTestApp();
 const { app, pool } = testApp;
 await app.listen({ host: '127.0.0.1', port: 0 });
-const webhookUrl = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/provider/transfer-updates`;
+const appPort = (app.server.address() as AddressInfo).port;
+const webhookUrl = `http://127.0.0.1:${appPort}/provider/transfer-updates`;
 const nc = await connectTestNats();
 
 let sim: Child | undefined;

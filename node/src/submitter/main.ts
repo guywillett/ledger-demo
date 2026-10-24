@@ -1,4 +1,5 @@
 import { jetstreamManager } from '@nats-io/jetstream';
+import { DELIVERY_RETRY } from '../consumer/delivery-log.ts';
 import { runConsumerProcess } from '../consumer/process.ts';
 import { CONSUMERS, STREAMS } from '../shared/nats.ts';
 import { assertTimeoutFitsAckWait, loadSubmitterConfig } from './config.ts';
@@ -12,8 +13,8 @@ import { providerClient } from './provider.ts';
 // JetStream gives each message to one of them. An unfinished submission is redelivered on
 // shutdown, and asks again with the same key.
 
-// After an unknown outcome or a transient failure: nak with 1 s, doubling per attempt up to 60 s.
-const DELIVERY_RETRY = { retryBaseDelayMs: 1000, retryMaxDelayMs: 60_000 };
+// An unknown provider outcome or a transient failure is retried with DELIVERY_RETRY
+// (consumer/delivery-log.ts), always with the same key.
 
 const config = loadSubmitterConfig();
 const provider = providerClient({

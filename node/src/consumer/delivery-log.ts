@@ -18,6 +18,12 @@ import { parseEvent, peekEventId, type DeliveredMessage } from './messages.ts';
 // (consumer/messages.ts). Unexpected errors are classified once here: our bug, terminated with
 // an alert, or transient, retried later.
 
+// The consumers' redelivery policy after a failed delivery (each says what triggers one): nak
+// after 1 s, doubling per attempt, at most 60 s. Set on each nak rather than as a consumer
+// backoff, because a consumer backoff also replaces ack_wait for messages still being processed.
+// Handlers take the values as dependencies, so tests inject their own.
+export const DELIVERY_RETRY: Backoff = { retryBaseDelayMs: 1000, retryMaxDelayMs: 60_000 };
+
 // What a handler must return: proof that it settled the message. Only the context's done(),
 // stop() and retryLater() create one (as only withTransaction creates a Tx), so a handler path
 // that never acks, terminates or naks doesn't compile. That guarantees at least once; settling a
