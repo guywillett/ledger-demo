@@ -4,7 +4,7 @@ import { withTransaction } from '../../shared/db.ts';
 import { maskIban } from '../../shared/iban.ts';
 import { toTypeId } from '../../shared/ids.ts';
 import { problems, sendProblem, validationErrors } from '../problem.ts';
-import { notificationBodySchema, toNotification } from '../schemas.ts';
+import { notificationBodySchema, toNotification } from './schemas.ts';
 import type { App } from '../types.ts';
 
 // POST /provider/incoming-payments: the provider's notification of an incoming payment (its

@@ -215,6 +215,12 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/IdempotencyKeyConflictProblem'
+        '413':
+          description: Body too large
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '415':
           description: Unsupported content type
           content:

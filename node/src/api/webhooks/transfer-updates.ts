@@ -4,7 +4,7 @@ import { isInvariantViolation } from '../../ledger/invariants.ts';
 import { withTransaction } from '../../shared/db.ts';
 import { toTypeId } from '../../shared/ids.ts';
 import { problems, sendProblem, validationErrors } from '../problem.ts';
-import { toTransferUpdate, transferUpdateBodySchema } from '../schemas.ts';
+import { toTransferUpdate, transferUpdateBodySchema } from './schemas.ts';
 import type { App } from '../types.ts';
 
 // POST /provider/transfer-updates: the provider's result for a transfer we sent (its webhook).
