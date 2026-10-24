@@ -7,9 +7,10 @@ A small payment event-processing system (incoming payments, pseudo compliance re
 The specs and decisions are in [`docs/`](docs/): [slice 1](docs/slices/slice-1-incoming-payments.md) is built, and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) (transactional outbox, withdrawals) is in progress: the outbox and withdrawals end to end are done.
 
 ```text
-provider ──POST /payments──► API ──► Postgres, one transaction:
+provider ──POST /provider/incoming-payments──► API ──► Postgres, one transaction:
 (webhook)                              payment `created` (no balance change)
                                        + payment.created in the outbox
+                                       (unknown account: recorded in suspense, no event)
                                                │
                                                ▼
                                  relay (any number of instances): claim, publish, mark
@@ -40,13 +41,13 @@ provider ──POST /provider/transfer-updates (webhook)──► API ──► 
   GET /accounts/:id/balance, /transactions, /withdrawals/:id        reconciliation: do the books agree?
 ```
 
-Status codes follow the caller: our client's API answers with conventional REST codes (`201`, `200`, `409`, `422`…); provider webhooks get the webhook contract, `204` for anything recorded or deliberately handled and non-2xx only when a retry could help (`POST /provider/transfer-updates` now; `POST /payments` follows in step 6b).
+Status codes follow the caller: our client's API answers with conventional REST codes (`201`, `200`, `409`, `422`…); provider webhooks get the webhook contract, `204` for anything recorded or deliberately handled and non-2xx only when a retry could help (`POST /provider/incoming-payments`, `POST /provider/transfer-updates`; both live under `src/api/webhooks/`).
 
 ## What it demonstrates
 
 | Guarantee | How | Proved by |
 |---|---|---|
-| A repeated notification changes nothing | `UNIQUE (network, network_transaction_id)` and one upsert statement; same details → `200`, different → `409` | `test/api/payments.test.ts` (5 repeats, 10 concurrent, conflicts) |
+| A repeated notification changes nothing | `UNIQUE (network, network_transaction_id)` and one upsert statement: same details → a duplicate, counted; different → recorded as a conflict, nothing changed; unknown account → recorded in suspense, booking nothing (every one answered `204`, the webhook contract) | `test/api/incoming-payments.test.ts` (5 repeats, 10 concurrent, conflicts, suspense) |
 | An event is never lost between commit and publish | the event is written to `outbox` in the same transaction as the payment; a relay publishes it at least once (claims leased with `FOR UPDATE SKIP LOCKED`, marked after the stream's acknowledgement); the stream drops a repeat by its `msg_id` | `test/api/payment-events.test.ts` (one outbox row, same transaction); `test/outbox/outbox.test.ts` (rollback, leases, disjoint concurrent claims); `test/relay/relay.test.ts` (failure and retry; a relay "crashing" after publishing, before marking: published again, dropped by the stream) |
 | A provider result is applied exactly once, even when it arrives first, twice, or contradicts itself | the update is recorded and the withdrawal settled in one transaction, by a conditional transition from `held` or `submitted`; a resend is counted, a second event for the same result skips, a contradiction (the other final status, another transfer ID) or an unmatched update is recorded and alerted, moving no money; every handled case answers `204` | `test/api/transfer-updates.test.ts`; `test/e2e/submitter.e2e.ts` (`SIM EARLY`, `SIM DUPLICATE`, `SIM FAIL`) |
 | A retried withdrawal request never pays twice | the client's `Idempotency-Key` is unique per account on the withdrawal itself, so only a request that commits takes it (a `422`, `404` or crash leaves it free); the funds are held in the request's own transaction, and the balance CHECK is the insufficient-funds check; a repeat returns the withdrawal's current state, a reused key with other details is a `409` | `test/api/withdrawals.test.ts` (5 repeats, 10 concurrent, conflicts, `422` then the same key succeeds, two concurrent withdrawals exceeding the balance) |
@@ -80,7 +81,7 @@ Deliberate, and described with their evolution path under *Known gaps* in the [s
 - **No dead-letter handling:** a message that exhausts `max_deliver`, or that the worker terminates, is only logged; reconciliation shows the payment as stuck.
 - **Security:** no authentication on the API (including webhook signatures) or on NATS, and one database user for everything (append-only is enforced by triggers rather than per-service roles).
 - **One provider:** the provider webhooks live in `src/api/webhooks/` and speak provider-sim's format. With several providers, each gets an adapter, `src/api/webhooks/<provider>/transfer-updates.ts` and so on, that verifies its signature, parses its payload and maps its statuses and error codes onto the same provider-neutral ingestion functions (`recordTransferUpdate`, `recordNotification`); the submitter's provider client would be chosen per withdrawal the same way.
-- **Simplifications:** approve/reject is random; demo HTTP status codes on `POST /payments` (the webhook contract follows in step 6b); one IBAN per account; no health endpoint; the SEPA country list in `node/src/shared/iban.ts` is not yet verified against the EPC's official list.
+- **Simplifications:** approve/reject is random; suspense is a status rather than a ledger account (see *Known gaps* in the slice 2 spec); one IBAN per account; no health endpoint; the SEPA country list in `node/src/shared/iban.ts` is not yet verified against the EPC's official list.
 
 ## Local development
 
@@ -298,16 +299,17 @@ npm run start:api               # without watching
 docker compose start api        # afterwards, back to the container
 ```
 
-The same curl works against either. Record a payment notification for alice (repeat it to see the duplicate handling: `200` and a rising `notification_count`; change the amount to see a `409`). Each `201` stores a `payment.created` event in the outbox, and the relay publishes it (see *Streams* above to read it back):
+The same curl works against either. Send a payment notification for alice to the provider webhook. It answers `204` with no body whatever the notification did (the webhook contract), so look at the effect in alice's transactions: a new payment (`created`, then booked and reviewed by the worker), a rising `notification_count` when you repeat it, an unchanged payment when you change the amount (recorded as a conflict), and nothing in any account for an IBAN that isn't ours (recorded in suspense; `docker compose run --rm reconcile` lists it). Each new payment's `payment.created` event goes to the outbox, and the relay publishes it (see *Streams* above to read it back):
 
 ```sh
-curl -i -X POST localhost:3000/payments -H 'content-type: application/json' -d '{
+curl -i -X POST localhost:3000/provider/incoming-payments -H 'content-type: application/json' -d '{
   "network_transaction_id": "NTX-0001",
   "creditor_iban": "FR76 1234 5000 0100 0000 0000 193",
   "amount_minor": "1250",
   "currency": "EUR",
   "network": "SEPA"
 }'
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=1'   # the effect
 ```
 
 Read an account (alice here; TypeIDs of the demo accounts are listed under *Demo accounts*):

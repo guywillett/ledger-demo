@@ -1,7 +1,6 @@
 import { STATUS_CODES } from 'node:http';
 import type { FastifyReply } from 'fastify';
 import type { z } from 'zod';
-import type { ComparedField } from '../ingestion/incoming-payments.ts';
 import type { ComparedWithdrawalField } from '../withdrawals/requests.ts';
 
 // RFC 9457 problem details. `type` identifies the kind of problem: a URN for our own types
@@ -30,21 +29,6 @@ export const problems = {
     title: 'Invalid payment notification',
     status: 400,
     errors,
-  }),
-  notificationConflict: (differingFields: readonly ComparedField[]) => ({
-    type: 'urn:ledger-demo:problem:notification-conflict',
-    title: 'Notification conflicts with a stored payment',
-    status: 409,
-    detail:
-      'A payment with this network transaction ID exists with different details. ' +
-      'This is not treated as a retry.',
-    differing_fields: differingFields,
-  }),
-  unknownAccount: () => ({
-    type: 'urn:ledger-demo:problem:unknown-account',
-    title: 'Unknown account',
-    status: 422,
-    detail: 'The creditor IBAN does not match any account managed by this application.',
   }),
   invalidTransferUpdate: (errors: readonly ValidationError[]) => ({
     type: 'urn:ledger-demo:problem:invalid-transfer-update',

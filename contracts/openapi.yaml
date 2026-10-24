@@ -7,16 +7,20 @@ info:
     it. Amounts are integer minor units as digit strings; IDs are TypeIDs.
     Errors are RFC 9457 problem details (application/problem+json).
 paths:
-  /payments:
+  /provider/incoming-payments:
     post:
-      summary: Record an incoming payment notification from the network / BaaS provider
+      summary: The provider's notification of an incoming payment (its webhook)
       description: |
-        Webhook-style ingestion. Idempotent on (network, network_transaction_id): a repeat with
-        the same creditor_iban, amount_minor and currency is a duplicate (200); with different
-        details it is a conflict (409). A new payment is stored together with its
-        payment.created event, which is published asynchronously; a duplicate publishes nothing.
-        The status codes are the demo's; see "Webhook semantics" in
-        docs/slices/slice-1-incoming-payments.md for how a real provider contract differs.
+        Idempotent on (network, network_transaction_id). The real webhook contract (a provider
+        retries anything but a 2xx): 204, with no body, for everything recorded or deliberately
+        handled: a new payment (stored with its payment.created event, published
+        asynchronously), a repeat with the same creditor_iban, amount_minor and currency
+        (counted), a notification for an IBAN matching none of our accounts (recorded in
+        suspense: money can't be refused over HTTP), and one that conflicts with the stored
+        payment (recorded, nothing changed). 400 only for a body that doesn't parse, an invalid
+        IBAN included; 500 when a retry can help. The response never says what the
+        notification did, so the endpoint can't be used to probe accounts or payments. Unknown
+        fields are ignored (tolerant reader).
       parameters:
         - name: x-request-id
           in: header
@@ -38,50 +42,19 @@ paths:
               currency: EUR
               network: SEPA
       responses:
-        '201':
-          description: Payment recorded (status created)
+        '204':
+          description: Recorded or deliberately handled (whatever it did)
           headers:
             x-request-id:
               $ref: '#/components/headers/RequestId'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Payment'
-        '200':
-          description: Duplicate notification with the same details; the existing payment
-          headers:
-            x-request-id:
-              $ref: '#/components/headers/RequestId'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Payment'
         '400':
-          description: Invalid body (including an invalid IBAN) or malformed JSON
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '409':
-          description: Same network transaction ID with different details
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/ConflictProblem'
-        '415':
-          description: Unsupported content type
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '422':
-          description: Valid IBAN that matches none of our accounts
+          description: The body can't be used (malformed, oversized or not JSON) or doesn't parse (an invalid IBAN included)
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
-          description: Unexpected failure
+          description: Not recorded; a retry can help (e.g. once a bug is fixed)
           content:
             application/problem+json:
               schema:
@@ -170,7 +143,7 @@ paths:
         400, 404, 422 or 5xx the same key can be used again.
 
         The body is strict: unknown fields are rejected (unlike the provider webhook POST
-        /payments, which ignores them). creditor_name and remittance_info are trimmed of
+        /provider/incoming-payments, which ignores them). creditor_name and remittance_info are trimmed of
         leading and trailing whitespace and must use the SEPA basic character set (letters,
         digits, spaces and / - ? : ( ) . , ' +); text outside it is rejected, never
         transliterated.
@@ -322,13 +295,7 @@ paths:
         '204':
           description: Recorded or deliberately handled (whatever it did)
         '400':
-          description: The body doesn't parse
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '415':
-          description: Unsupported content type
+          description: The body can't be used (malformed, oversized or not JSON) or doesn't parse
           content:
             application/problem+json:
               schema:
@@ -384,8 +351,8 @@ components:
           const: EUR
         network:
           const: SEPA
-    # The fields of a payment, shared by Payment and Transaction. Each of those closes itself
-    # with unevaluatedProperties: false, which (unlike additionalProperties) also counts the
+    # The fields of a payment in an account's transaction list. Transaction closes itself with
+    # unevaluatedProperties: false, which (unlike additionalProperties) also counts the
     # properties described through allOf.
     PaymentFields:
       type: object
@@ -434,11 +401,6 @@ components:
         updated_at:
           type: string
           format: date-time
-    Payment:
-      type: object
-      allOf:
-        - $ref: '#/components/schemas/PaymentFields'
-      unevaluatedProperties: false
     Transaction:
       description: A payment in an account's transaction list.
       type: object
@@ -666,19 +628,6 @@ components:
                 type: string
               message:
                 type: string
-    ConflictProblem:
-      allOf:
-        - $ref: '#/components/schemas/Problem'
-        - type: object
-          required: [differing_fields]
-          properties:
-            differing_fields:
-              type: array
-              description: Names of the stored fields that differ (never their values).
-              minItems: 1
-              items:
-                type: string
-                enum: [creditor_iban, amount_minor, currency]
     IdempotencyKeyConflictProblem:
       allOf:
         - $ref: '#/components/schemas/Problem'

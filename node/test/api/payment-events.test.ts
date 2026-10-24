@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { jetstreamManager } from '@nats-io/jetstream';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { relayBatch } from '../../src/relay/relay.ts';
-import { fromTypeId, toTypeId, type Uuid } from '../../src/shared/ids.ts';
+import { toTypeId } from '../../src/shared/ids.ts';
 import { STREAMS } from '../../src/shared/nats.ts';
 import { expectEventMatchesContract } from '../contract.ts';
 import {
@@ -13,13 +13,15 @@ import {
   drainOutbox,
   notificationBody,
   outboxRowsFor,
+  paymentByNetworkId,
   postPayment,
+  type StoredPayment,
   recordingPublisher,
   testRelayDeps,
   testStreamPublisher,
 } from '../helpers.ts';
 
-// payment.created: stored in the outbox by POST /payments, in the payment's own transaction,
+// payment.created: stored in the outbox by POST /provider/incoming-payments, in the payment's own transaction,
 // and published by the relay. Runs in the serial "relay" project (vitest.config.ts): nothing
 // else writes to the outbox or the test stream meanwhile, so counts before and after a request
 // are exact.
@@ -36,8 +38,12 @@ afterAll(async () => {
   await testApp.close();
 });
 
-function paymentIdOf(response: { json: Record<string, unknown> }): Uuid<'pay'> {
-  return fromTypeId('pay', String(response.json.id));
+// The payment a notification created, read from the database (the webhook answers 204 with no
+// body).
+async function storedPayment(body: { network_transaction_id?: unknown }): Promise<StoredPayment> {
+  const payment = await paymentByNetworkId(pool, body.network_transaction_id);
+  if (payment === undefined) throw new Error('no payment stored');
+  return payment;
 }
 
 async function outboxCount(): Promise<number> {
@@ -48,9 +54,10 @@ async function outboxCount(): Promise<number> {
 describe('payment.created in the outbox', () => {
   it('is stored once for a new payment, in the transaction that created it', async () => {
     const body = notificationBody();
-    const response = await postPayment(app, body);
-    expect(response.statusCode).toBe(201);
-    const paymentId = paymentIdOf(response);
+    expect((await postPayment(app, body)).statusCode).toBe(204);
+    const payment = await storedPayment(body);
+    const paymentId = payment.id;
+    const paymentTypeId = toTypeId('pay', paymentId);
 
     const rows = await outboxRowsFor(pool, paymentId);
     expect(rows).toHaveLength(1);
@@ -59,7 +66,7 @@ describe('payment.created in the outbox', () => {
       entity_type: 'payment',
       entity_id: paymentId,
       subject: 'payment.created',
-      msg_id: `${String(response.json.id)}.created`,
+      msg_id: `${paymentTypeId}.created`,
       attempts: 0,
       published_at: null,
     });
@@ -68,13 +75,13 @@ describe('payment.created in the outbox', () => {
       event_id: row && toTypeId('evt', row.id),
       event_type: 'payment.created',
       schema_version: 1,
-      payment_id: response.json.id,
+      payment_id: paymentTypeId,
       network: 'SEPA',
       network_transaction_id: body.network_transaction_id,
       account_id: ALICE.id,
       amount_minor: '1250',
       currency: 'EUR',
-      occurred_at: response.json.created_at,
+      occurred_at: payment.created_at.toISOString(),
     });
     expectEventMatchesContract(row?.payload);
     // No provider identifiers downstream.
@@ -93,18 +100,18 @@ describe('payment.created in the outbox', () => {
 
   it('is not stored again for duplicates', async () => {
     const body = notificationBody();
-    const first = await postPayment(app, body);
+    await postPayment(app, body);
     const before = await outboxCount();
 
     const repeats = [await postPayment(app, body), await postPayment(app, body)];
-    expect([first.statusCode, ...repeats.map((r) => r.statusCode)]).toEqual([201, 200, 200]);
+    expect(repeats.map((r) => r.statusCode)).toEqual([204, 204]);
     expect(await outboxCount()).toBe(before);
-    expect(await outboxRowsFor(pool, paymentIdOf(first))).toHaveLength(1);
+    expect(await outboxRowsFor(pool, (await storedPayment(body)).id)).toHaveLength(1);
   });
 
-  it('is not stored for conflicts, unknown accounts or invalid bodies', async () => {
+  it('is not stored for conflicts, unmatched payments or invalid bodies', async () => {
     const body = notificationBody();
-    const created = await postPayment(app, body);
+    await postPayment(app, body);
     const before = await outboxCount();
 
     const responses = [
@@ -112,9 +119,9 @@ describe('payment.created in the outbox', () => {
       await postPayment(app, notificationBody({ creditor_iban: FOREIGN_IBAN })),
       await postPayment(app, notificationBody({ amount_minor: '0' })),
     ];
-    expect(responses.map((r) => r.statusCode)).toEqual([409, 422, 400]);
+    expect(responses.map((r) => r.statusCode)).toEqual([204, 204, 400]);
     expect(await outboxCount()).toBe(before);
-    expect(await outboxRowsFor(pool, paymentIdOf(created))).toHaveLength(1);
+    expect(await outboxRowsFor(pool, (await storedPayment(body)).id)).toHaveLength(1);
   });
 });
 
@@ -123,11 +130,12 @@ describe('payment.created through the relay', () => {
     const jsm = await jetstreamManager(nc);
     const messagesBefore = (await jsm.streams.info(STREAMS.payments)).state.messages;
 
-    const response = await postPayment(app, notificationBody());
-    expect(response.statusCode).toBe(201);
-    const [row] = await outboxRowsFor(pool, paymentIdOf(response));
+    const body = notificationBody();
+    expect((await postPayment(app, body)).statusCode).toBe(204);
+    const paymentId = (await storedPayment(body)).id;
+    const [row] = await outboxRowsFor(pool, paymentId);
 
-    const msgId = `${String(response.json.id)}.created`;
+    const msgId = `${toTypeId('pay', paymentId)}.created`;
     const { publisher, published } = recordingPublisher(streamPublisher);
     await relayBatch(testRelayDeps(pool, publisher));
     // A second batch doesn't publish it again: it is marked published.

@@ -286,6 +286,17 @@ describe('POST /provider/transfer-updates', () => {
     expect((await getWithdrawal(pool, w.id))?.status).toBe('submitted');
   });
 
+  it('answers 400 (not 415) for a non-JSON content type: a webhook has one 4xx', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/provider/transfer-updates',
+      headers: { 'content-type': 'text/plain' },
+      payload: 'executed',
+    });
+    expectMatchesContract('POST', '/provider/transfer-updates', response);
+    expect(response.statusCode).toBe(400);
+  });
+
   it('answers 500 for an invariant violation, rolling everything back, and alerts', async () => {
     // An execute movement already exists for a withdrawal still submitted: the guards disagree.
     const w = await withdrawal();

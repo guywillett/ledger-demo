@@ -1,7 +1,6 @@
 import { jetstreamManager } from '@nats-io/jetstream';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { Uuid } from '../../src/shared/ids.ts';
-import { fromTypeId } from '../../src/shared/ids.ts';
 import { reconcile } from '../../src/reconciliation/reconcile.ts';
 import { CONSUMERS, STREAMS } from '../../src/shared/nats.ts';
 import {
@@ -10,6 +9,7 @@ import {
   createTestAccount,
   createTestApp,
   notificationBody,
+  paymentByNetworkId,
   postPayment,
   statusOf,
   type TestAccount,
@@ -43,9 +43,12 @@ const accountsUsed: Uuid<'acct'>[] = [];
 
 async function post(account: TestAccount): Promise<Uuid<'pay'>> {
   if (!accountsUsed.includes(account.id)) accountsUsed.push(account.id);
-  const response = await postPayment(app, notificationBody({ creditor_iban: account.iban }));
-  expect(response.statusCode).toBe(201);
-  return fromTypeId('pay', String(response.json.id));
+  const body = notificationBody({ creditor_iban: account.iban });
+  expect((await postPayment(app, body)).statusCode).toBe(204);
+  // The webhook answers 204 with no body: the payment is read from the database.
+  const payment = await paymentByNetworkId(pool, body.network_transaction_id);
+  if (payment === undefined) throw new Error('payment not stored');
+  return payment.id;
 }
 
 async function movementSteps(paymentId: Uuid<'pay'>): Promise<string[]> {

@@ -1,7 +1,7 @@
 import type { Queryable } from '../shared/db.ts';
 import type { Iban } from '../shared/iban.ts';
 import type { Uuid } from '../shared/ids.ts';
-import { parseStatus, type PaymentStatus } from './status.ts';
+import { parseStatus, type BookedStatus } from './status.ts';
 
 // The payment entity and how it is read. Its lifecycle and the transitions that move it
 // along are in status.ts; recording a provider notification as a new payment is in
@@ -16,17 +16,33 @@ export type Payment = {
   readonly currency: 'EUR';
   readonly network: 'SEPA';
   readonly networkTransactionId: string;
-  readonly status: PaymentStatus;
+  readonly status: BookedStatus;
   readonly notificationCount: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
+};
+
+// A payment in suspense (status unmatched): it matches none of our accounts, so it has none.
+// Its own shape, so nothing that works with booked payments has to handle a missing account.
+export type UnmatchedPayment = {
+  readonly id: Uuid<'pay'>;
+  readonly status: 'unmatched';
+  readonly creditorIban: Iban;
+  readonly providerAccountId: string | null;
+  readonly amountMinor: bigint;
+  readonly currency: 'EUR';
+  readonly network: 'SEPA';
+  readonly networkTransactionId: string;
+  readonly notificationCount: number;
+  readonly createdAt: Date;
 };
 
 export type PaymentRow = {
   id: string;
   creditor_iban: string;
   provider_account_id: string | null;
-  account_id: string;
+  // NULL only for an unmatched payment (a CHECK on the table).
+  account_id: string | null;
   amount_minor: bigint;
   currency: string;
   network: string;
@@ -37,7 +53,12 @@ export type PaymentRow = {
   updated_at: Date;
 };
 
+// A matched payment's row. Throws for an unmatched one (use unmatchedPaymentFromRow).
 export function paymentFromRow(row: PaymentRow): Payment {
+  const status = parseStatus(row.status);
+  if (status === 'unmatched' || row.account_id === null) {
+    throw new Error(`payment ${row.id} is unmatched; it has no account`);
+  }
   return {
     id: row.id as Uuid<'pay'>,
     accountId: row.account_id as Uuid<'acct'>,
@@ -48,10 +69,29 @@ export function paymentFromRow(row: PaymentRow): Payment {
     currency: expectLiteral(row.currency, 'EUR', 'currency'),
     network: expectLiteral(row.network, 'SEPA', 'network'),
     networkTransactionId: row.network_transaction_id,
-    status: parseStatus(row.status),
+    status,
     notificationCount: row.notification_count,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+// An unmatched payment's row. Throws for any other status.
+export function unmatchedPaymentFromRow(row: PaymentRow): UnmatchedPayment {
+  if (row.status !== 'unmatched') {
+    throw new Error(`payment ${row.id} is ${row.status}, not unmatched`);
+  }
+  return {
+    id: row.id as Uuid<'pay'>,
+    status: 'unmatched',
+    creditorIban: row.creditor_iban as Iban,
+    providerAccountId: row.provider_account_id,
+    amountMinor: row.amount_minor,
+    currency: expectLiteral(row.currency, 'EUR', 'currency'),
+    network: expectLiteral(row.network, 'SEPA', 'network'),
+    networkTransactionId: row.network_transaction_id,
+    notificationCount: row.notification_count,
+    createdAt: row.created_at,
   };
 }
 

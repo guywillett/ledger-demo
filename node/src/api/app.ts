@@ -3,7 +3,7 @@ import Fastify, { LogController, type FastifyReply, type FastifyRequest } from '
 import type pg from 'pg';
 import type { Logger } from '../shared/logger.ts';
 import { registerAccountRoutes } from './accounts.ts';
-import { registerPaymentRoutes } from './payments.ts';
+import { registerIncomingPaymentRoutes } from './webhooks/incoming-payments.ts';
 import { registerTransferUpdateRoutes } from './webhooks/transfer-updates.ts';
 import { registerWithdrawalRoutes } from './withdrawals.ts';
 import { problems, sendProblem } from './problem.ts';
@@ -70,8 +70,12 @@ export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
       return sendProblem(reply, problems.http(500));
     }
     const message = error instanceof Error ? error.message : undefined;
-    request.log.warn({ status_code: status, reason: message }, 'request rejected');
-    return sendProblem(reply, problems.http(status, message));
+    // Provider webhooks (/provider/…) answer any problem with the request as 400: a malformed,
+    // oversized or non-JSON body (Fastify's 400, 413, 415) is a body that can't be used, the
+    // webhook contract's one 4xx (slice 2 decision 37). The client API keeps the exact code.
+    const answered = request.url.startsWith('/provider/') ? 400 : status;
+    request.log.warn({ status_code: answered, reason: message }, 'request rejected');
+    return sendProblem(reply, problems.http(answered, message));
   });
 
   // A fixed detail: echoing the requested URL would return caller input.
@@ -80,10 +84,11 @@ export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
   });
 
   // Fastify parses text/plain bodies by default, which would let a text/plain body reach
-  // validation (400). We accept JSON only, so every other content type gets 415.
+  // validation (400). We accept JSON only, so every other content type gets 415 (400 on the
+  // provider webhooks, see the error handler).
   app.removeContentTypeParser('text/plain');
 
-  registerPaymentRoutes(app, { pool: deps.pool });
+  registerIncomingPaymentRoutes(app, { pool: deps.pool });
   registerAccountRoutes(app, { db: deps.pool });
   registerWithdrawalRoutes(app, { pool: deps.pool });
   registerTransferUpdateRoutes(app, { pool: deps.pool });

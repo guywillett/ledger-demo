@@ -111,6 +111,20 @@ function toJson(report: ReconcileReport): string {
         withdrawalId: toTypeId('wd', s.withdrawalId),
         accountId: toTypeId('acct', s.accountId),
       })),
+      suspense:
+        report.suspense === null
+          ? null
+          : {
+              ...report.suspense,
+              payments: report.suspense.payments.map((p) => ({
+                ...p,
+                paymentId: toTypeId('pay', p.paymentId),
+              })),
+            },
+      paymentConflicts: report.paymentConflicts.map((c) => ({
+        ...c,
+        paymentId: toTypeId('pay', c.paymentId),
+      })),
       transferUpdateProblems: report.transferUpdateProblems.map((p) => ({
         ...p,
         withdrawalId: p.withdrawalId === null ? null : toTypeId('wd', p.withdrawalId),
@@ -215,6 +229,49 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
           toTypeId('wd', s.withdrawalId),
           s.status,
           `${Math.round(s.ageSeconds / 60)} min`,
+        ]),
+      ]),
+    );
+  }
+
+  const { suspense } = report;
+  if (suspense === null) {
+    lines.push(
+      '',
+      'Suspense: not checked (account-scoped run; unmatched payments have no account)',
+    );
+  } else {
+    lines.push(
+      '',
+      `Suspense (unmatched payments, all accounts): ${suspense.count}` +
+        (suspense.count === 0
+          ? ''
+          : `, total ${suspense.totalMinor} minor units, oldest ${suspense.oldestAgeSeconds} s`),
+    );
+    if (suspense.count > 0) {
+      lines.push(
+        table([
+          ['payment', 'network transaction', 'amount', 'age'],
+          ...suspense.payments.map((p) => [
+            toTypeId('pay', p.paymentId),
+            p.networkTransactionId,
+            p.amountMinor.toString(),
+            `${p.ageSeconds} s`,
+          ]),
+        ]),
+      );
+    }
+  }
+
+  lines.push('', `Payment notification conflicts: ${report.paymentConflicts.length}`);
+  if (report.paymentConflicts.length > 0) {
+    lines.push(
+      table([
+        ['payment', 'differing fields', 'received'],
+        ...report.paymentConflicts.map((c) => [
+          toTypeId('pay', c.paymentId),
+          c.differingFields.join(','),
+          c.receivedAt.toISOString(),
         ]),
       ]),
     );

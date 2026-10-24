@@ -47,7 +47,7 @@ export function newNetworkTransactionId(): string {
   return `test-${randomUUID()}`;
 }
 
-// A POST /payments body (the wire format), with a fresh network transaction ID.
+// An incoming-payment notification body (the wire format), with a fresh network transaction ID.
 export function notificationBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     network_transaction_id: newNetworkTransactionId(),
@@ -187,8 +187,10 @@ export type JsonResponse = {
   json: Record<string, unknown>;
 };
 
-// POSTs a notification and checks the response against contracts/openapi.yaml. A string
-// payload is sent as-is (e.g. malformed JSON); anything else is JSON-encoded.
+// POSTs a notification to the incoming-payment webhook and checks the response against
+// contracts/openapi.yaml. A string payload is sent as-is (e.g. malformed JSON); anything else is
+// JSON-encoded. A handled notification gets 204 with no body (json is then {}): read what it did
+// from the database (paymentByNetworkId) or the transactions endpoint.
 export async function postPayment(
   app: App,
   payload: unknown,
@@ -196,17 +198,42 @@ export async function postPayment(
 ): Promise<JsonResponse> {
   const response = await app.inject({
     method: 'POST',
-    url: '/payments',
+    url: '/provider/incoming-payments',
     headers: { 'content-type': 'application/json', ...headers },
     payload: typeof payload === 'string' ? payload : JSON.stringify(payload),
   });
-  expectMatchesContract('POST', '/payments', response);
+  expectMatchesContract('POST', '/provider/incoming-payments', response);
   return {
     statusCode: response.statusCode,
     headers: response.headers,
     body: response.body,
-    json: JSON.parse(response.body) as Record<string, unknown>,
+    json: response.body === '' ? {} : (JSON.parse(response.body) as Record<string, unknown>),
   };
+}
+
+export type StoredPayment = {
+  id: Uuid<'pay'>;
+  account_id: Uuid<'acct'> | null;
+  status: string;
+  creditor_iban: string;
+  provider_account_id: string | null;
+  amount_minor: bigint;
+  notification_count: number;
+  created_at: Date;
+};
+
+// The payment stored under a network transaction ID (SEPA), if any.
+export async function paymentByNetworkId(
+  pool: pg.Pool,
+  networkTransactionId: unknown,
+): Promise<StoredPayment | undefined> {
+  const result = await pool.query<StoredPayment>(
+    `SELECT id, account_id, status, creditor_iban, provider_account_id, amount_minor,
+            notification_count, created_at
+     FROM incoming_payments WHERE network = 'SEPA' AND network_transaction_id = $1`,
+    [networkTransactionId],
+  );
+  return result.rows[0];
 }
 
 // POSTs a withdrawal request for the account (an acct_ TypeID) with an Idempotency-Key (none if
@@ -287,7 +314,12 @@ export function refusingPool(stored: {
   amount_minor: bigint;
   currency: string;
 }): pg.Pool {
-  const responses = [{ rows: [] }, { rows: [{ id: newUuid('pay'), ...stored }] }];
+  // The refused upsert, the stored payment, then (for a conflict) the conflict record.
+  const responses = [
+    { rows: [] },
+    { rows: [{ id: newUuid('pay'), ...stored }] },
+    { rows: [], rowCount: 1 },
+  ];
   const client = {
     query: async (sql: string) => {
       if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)) return { rows: [] };

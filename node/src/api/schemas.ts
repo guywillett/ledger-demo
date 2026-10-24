@@ -16,7 +16,7 @@ import type { WithdrawalStatus, WithdrawalStatusChange } from '../withdrawals/st
 import type { NewWithdrawal, Withdrawal } from '../withdrawals/withdrawals.ts';
 import type { Uuid } from '../shared/ids.ts';
 
-// POST /payments body. z.object (not strictObject) drops unknown fields instead of rejecting
+// POST /provider/incoming-payments body. z.object (not strictObject) drops unknown fields instead of rejecting
 // them: providers add fields to webhooks over time ("tolerant reader"). Dropped fields are
 // neither stored nor logged. Client requests are the opposite (withdrawalBodySchema, slice 2
 // decision 33).
@@ -221,7 +221,7 @@ export function toWithdrawalStatusChangeResponse(
 }
 
 // POST /provider/transfer-updates body: the provider's result for one transfer. A tolerant
-// reader (z.object), like POST /payments: providers add fields to webhooks over time.
+// reader (z.object), like POST /provider/incoming-payments: providers add fields to webhooks over time.
 export const transferUpdateBodySchema = z
   .object({
     provider_event_id: z.string().min(1).max(255),

@@ -110,6 +110,30 @@ export type StuckWithdrawal = {
   readonly ageSeconds: number;
 };
 
+// Suspense: payments that arrived at the bank but match none of our accounts (status unmatched).
+// The money is in nobody's books: not inconsistent, but a finance person's job (in production, a
+// daily report). Whole-database runs only: an unmatched payment belongs to no account.
+export type SuspenseReport = {
+  readonly count: number;
+  readonly totalMinor: bigint;
+  readonly oldestAgeSeconds: number | null;
+  // Oldest first.
+  readonly payments: readonly {
+    readonly paymentId: Uuid<'pay'>;
+    readonly networkTransactionId: string;
+    readonly amountMinor: bigint;
+    readonly ageSeconds: number;
+  }[];
+};
+
+// A notification that conflicted with the stored payment (the same network transaction ID with
+// other details): recorded, nothing changed.
+export type PaymentConflictRecord = {
+  readonly paymentId: Uuid<'pay'>;
+  readonly differingFields: readonly string[];
+  readonly receivedAt: Date;
+};
+
 // A provider transfer update a person should look at: a contradiction (the other final status,
 // or another transfer ID) or one matching no withdrawal. Recorded and moving no money, so not
 // inconsistent books.
@@ -157,6 +181,10 @@ export type ReconcileReport = {
   // Conflicting and unmatched transfer updates, oldest first. With an account filter, only that
   // account's conflicts: an unmatched update belongs to no account.
   readonly transferUpdateProblems: readonly TransferUpdateProblem[];
+  // null in an account-scoped run (unmatched payments belong to no account).
+  readonly suspense: SuspenseReport | null;
+  // Oldest first; with an account filter, those for that account's payments.
+  readonly paymentConflicts: readonly PaymentConflictRecord[];
   readonly outbox: OutboxStats;
   readonly deliveries: DeliveryStats;
   // The books agree: no account differences and no payment or withdrawal mismatches. Stuck
@@ -178,6 +206,8 @@ const NON_FINAL: readonly PaymentStatus[] = [
 // (For payments the two orders happen to coincide.)
 function expectedSteps(status: PaymentStatus): readonly string[] {
   switch (status) {
+    // Unmatched (suspense) books nothing: a movement for one is a mismatch.
+    case 'unmatched':
     case 'created':
       return [];
     case 'received':
@@ -378,6 +408,22 @@ WHERE o.published_at IS NULL
        OR EXISTS (
          SELECT 1 FROM withdrawals w
          WHERE o.entity_type = 'withdrawal' AND w.id = o.entity_id AND w.account_id = ANY($1)))
+`;
+
+const SUSPENSE_SQL = `
+SELECT id, network_transaction_id, amount_minor,
+       floor(extract(epoch FROM now() - created_at))::int AS age_seconds
+FROM incoming_payments
+WHERE status = 'unmatched'
+ORDER BY created_at, id
+`;
+
+const PAYMENT_CONFLICTS_SQL = `
+SELECT c.payment_id, c.differing_fields, c.received_at
+FROM payment_notification_conflicts c
+JOIN incoming_payments p ON p.id = c.payment_id
+WHERE $1::uuid[] IS NULL OR p.account_id = ANY($1)
+ORDER BY c.received_at, c.id
 `;
 
 const TRANSFER_UPDATE_PROBLEMS_SQL = `
@@ -584,6 +630,38 @@ export async function reconcile(
     receivedAt: row.received_at,
   }));
 
+  let suspense: SuspenseReport | null = null;
+  if (accounts === null) {
+    const unmatched = await db.query<{
+      id: string;
+      network_transaction_id: string;
+      amount_minor: bigint;
+      age_seconds: number;
+    }>(SUSPENSE_SQL);
+    const payments = unmatched.rows.map((row) => ({
+      paymentId: row.id as Uuid<'pay'>,
+      networkTransactionId: row.network_transaction_id,
+      amountMinor: row.amount_minor,
+      ageSeconds: row.age_seconds,
+    }));
+    suspense = {
+      count: payments.length,
+      totalMinor: payments.reduce((sum, p) => sum + p.amountMinor, 0n),
+      oldestAgeSeconds: payments[0]?.ageSeconds ?? null,
+      payments,
+    };
+  }
+  const conflicts = await db.query<{
+    payment_id: string;
+    differing_fields: string[];
+    received_at: Date;
+  }>(PAYMENT_CONFLICTS_SQL, [accounts]);
+  const paymentConflicts: PaymentConflictRecord[] = conflicts.rows.map((row) => ({
+    paymentId: row.payment_id as Uuid<'pay'>,
+    differingFields: row.differing_fields,
+    receivedAt: row.received_at,
+  }));
+
   const outbox = await db.query<{
     stuck: number;
     oldest_age_seconds: number | null;
@@ -613,6 +691,8 @@ export async function reconcile(
     stuck,
     stuckWithdrawals,
     transferUpdateProblems,
+    suspense,
+    paymentConflicts,
     outbox: {
       stuckUnpublished: outboxRow?.stuck ?? 0,
       oldestUnpublishedAgeSeconds: outboxRow?.oldest_age_seconds ?? null,

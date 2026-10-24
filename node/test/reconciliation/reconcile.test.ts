@@ -18,6 +18,7 @@ import {
   createTestWithdrawal,
   fundTestAccount,
   newNetworkTransactionId,
+  newTestIban,
   outboxRowsFor,
   type TestAccount,
 } from '../helpers.ts';
@@ -353,6 +354,56 @@ describe('reconcile', () => {
       workerDuplicate: 1,
       staleSubmitter: 1,
     });
+  });
+
+  it('reports suspense in whole-database runs only, without counting it as a mismatch', async () => {
+    const notification = {
+      creditorIban: newTestIban(), // no account has it
+      providerAccountId: null,
+      amountMinor: 4321n,
+      currency: 'EUR' as const,
+      network: 'SEPA' as const,
+      networkTransactionId: newNetworkTransactionId(),
+    };
+    const result = await withTransaction(pool, (tx) => recordNotification(tx, notification));
+    expect(result.kind).toBe('unmatched');
+    const paymentId = result.kind === 'unmatched' ? result.payment.id : undefined;
+
+    const whole = await reconcile(pool, NEVER_STUCK);
+    expect(whole.suspense?.payments).toContainEqual(
+      expect.objectContaining({
+        paymentId,
+        networkTransactionId: notification.networkTransactionId,
+        amountMinor: 4321n,
+      }),
+    );
+    expect(whole.suspense?.count).toBe(whole.suspense?.payments.length);
+    expect(whole.mismatches.map((m) => m.paymentId)).not.toContain(paymentId);
+
+    // An account-scoped run doesn't look: an unmatched payment belongs to no account.
+    const account = await createTestAccount(pool);
+    expect((await check(pool, account)).suspense).toBeNull();
+  });
+
+  it('lists notification conflicts for the account, changing nothing in the books', async () => {
+    const account = await createTestAccount(pool);
+    const payment = await createTestPayment(pool, account, 500n);
+    const conflicting = {
+      creditorIban: account.iban,
+      providerAccountId: null,
+      amountMinor: 501n,
+      currency: 'EUR' as const,
+      network: 'SEPA' as const,
+      networkTransactionId: payment.networkTransactionId,
+    };
+    const result = await withTransaction(pool, (tx) => recordNotification(tx, conflicting));
+    expect(result.kind).toBe('conflict');
+
+    const report = await check(pool, account);
+    expect(report.paymentConflicts).toEqual([
+      expect.objectContaining({ paymentId: payment.id, differingFields: ['amount_minor'] }),
+    ]);
+    expect(report.consistent).toBe(true);
   });
 
   it('counts duplicate notifications', async () => {

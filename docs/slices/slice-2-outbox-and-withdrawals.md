@@ -211,7 +211,7 @@ One transaction (decision 29), `recordTransferUpdate()`:
 | The reference matches no withdrawal (or isn't a `wd_` TypeID) | `unmatched` | recorded with `withdrawal_id` `NULL`; alert. Not a timing race (a withdrawal exists before it is submitted) |
 | A ledger invariant violation | (rolled back) | `500`, `fatal` with `alert: true` |
 
-**Webhook semantics** (decision 37), the real contract, unlike `POST /payments` so far:
+**Webhook semantics** (decision 37), the real contract (`POST /provider/incoming-payments` follows it too since step 6b):
 
 | Answer | When |
 |---|---|
@@ -220,6 +220,28 @@ One transaction (decision 29), `recordTransferUpdate()`:
 | `500` | an invariant violation (rolled back, alerted) or a transient failure: a retry helps once fixed, and keeps it visible meanwhile |
 
 Compose sets provider-sim's `SIM_WEBHOOK_URL` to this endpoint, so a withdrawal completes end to end; since every handled case answers `204`, the sim stops resending after the first delivery, as a real provider would. Reconciliation lists `conflict` and `unmatched` updates for a person (not inconsistent books), and a withdrawal stuck in `submitted` now means a webhook that never came.
+
+### `POST /provider/incoming-payments` (step 6b)
+
+Slice 1's `POST /payments`, moved to the webhook contract (decisions 37–38, revising slice 1 decision 13) and under `/provider/` with the other provider webhook (`src/api/webhooks/incoming-payments.ts`). What it used to refuse is now recorded:
+
+| Notification | Recorded | Effect |
+|---|---|---|
+| New, IBAN of one of our accounts | payment `created` + its `payment.created` in the outbox | as before (the worker books it) |
+| The same network ID and details again (matched or unmatched) | `notification_count` + 1 | nothing else |
+| New, valid IBAN matching none of our accounts | payment `unmatched` (suspense): `account_id` `NULL`, a history row, **no event, no movement** | `error` log with `alert: true` (masked IBAN) |
+| The same network ID with other details | a `payment_notification_conflicts` row (the stored payment, the details received, `differing_fields`) | nothing else changed; `error` log with `alert: true` (field names, never values) |
+| Refused, yet no compared field differs (our bug) | nothing | `500` |
+
+**Suspense** is a status, `unmatched`, in `incoming_payments`: `account_id` is nullable (`CHECK (account_id IS NOT NULL OR status = 'unmatched')`), and the one idempotency key, `UNIQUE (network, network_transaction_id)`, keeps covering every notification. An unmatched payment has arrived at the bank but matches none of our accounts: recorded (money can't be refused over HTTP), booking nothing, publishing no event. Resolving it (matching it to an account, or returning it) is a manual process, out of scope; a provider retry with the same details is a duplicate of the suspense record even if the IBAN has gained an account since: resolution is never automatic. `unmatched` is outside the payment lifecycle (no transition into or out of it in this slice); in code a matched `Payment` keeps a non-null account and a `BookedStatus`, and an `UnmatchedPayment` is its own shape. Reconciliation reports suspense (count, total, oldest age, the payments) in whole-database runs, and payment notification conflicts (oldest first); neither makes the books inconsistent, and an unmatched payment with a movement would be a mismatch.
+
+**Webhook semantics:**
+
+| Answer | When |
+|---|---|
+| `204`, no body | created, duplicate, unmatched, conflict: the outcome is never echoed (no oracle for which accounts or payments exist) |
+| `400` (problem details, field paths only) | a body that can't be used: malformed, oversized, not JSON, or failing validation, an invalid IBAN included (if our validation is the problem, e.g. the unverified SEPA country list, the provider's retries deliver it once fixed). The provider webhooks answer no other 4xx: Fastify's own `413` and `415` become `400` under `/provider/` |
+| `500` | our inconsistency, or a transient failure: a retry helps once fixed |
 
 ### Fake provider (`provider-sim`)
 
@@ -272,6 +294,7 @@ Also reported:
 4. **Shared pull loop and provider-sim:** extract the worker's loop (no behaviour change, worker tests unchanged), then the fake provider.
 5. **Submitter:** stream and consumer definitions, the process, tests per provider response (including the unknown outcome).
 6. **Transfer updates:** the webhook, the ingestion split, the early-update race, duplicates and conflicts.
+6b. **Incoming payments on the webhook contract:** `POST /payments` moves to `POST /provider/incoming-payments` (`src/api/webhooks/`), answering `204` for everything handled; unknown-account payments recorded in suspense, conflicting notifications as records; reconciliation's suspense and conflict sections; the demo checks effects through the API.
 7. **Reconciliation, demo and docs:** withdrawal checks, demo script steps, e2e (kill the submitter mid-flight; provider-sim in each failure mode), README guarantees table.
 
 ## Done when
@@ -298,6 +321,7 @@ Also reported:
 Slice 1's gaps stand, except the commit-then-publish gap (closed by the outbox). New:
 - **Outbox growth:** published rows are kept; a pruning job (or partitioning by month) is the evolution.
 - **No backfill from slice 1:** the outbox migration creates no rows for existing payments. A slice 1 payment left in `created` (its publish failed) has no outbox row, and a duplicate notification no longer re-announces it, so it would stay there; reconciliation reports it as `missing`. A real upgrade from slice 1 would need a one-off backfill of `payment.created` rows for such payments, built by the application's event builder. Not done here: there is no slice 1 deployment, and the development database has none.
+- **Suspense is a status, not an account.** In production an unmatched payment is booked into a suspense ledger account (bank -> suspense), so the books explain the bank balance (cash = customer balances + suspense + treasury/internal), and resolving it posts suspense -> customer or suspense -> bank (returned). Flows are also kept apart: notifications for known treasury or internal accounts are routed (or excluded) by a configured list rather than alerted as unknown, and customer payments, treasury flows and suspense live in separate tables, which keeps their workflows apart and makes role-based access simple. Idempotency then can't live in any one of those tables: an intake table (an inbox: one row per notification, the idempotency key and the raw payload) decides duplicates before classification routes each notification to its flow. The demo keeps one table with an unmatched status, which preserves a single idempotency key without that layer.
 - **One provider's error contract:** the submitter maps provider-sim's answers to outcomes (`422` refused, `400` and `409` our bug, everything else unknown). Real providers differ: some answer `409` while a request with the same key is still in progress (which a retry right after a timeout can hit), and that is an unknown outcome to retry, not a bug. A real integration maps each provider's answers to these outcomes, typically by the error code in the response body rather than the status alone.
 - **Single scheme:** field validation (lengths, the SEPA basic character set) is SEPA-specific and partly enforced by database CHECKs. With several schemes (Faster Payments, SWIFT, …), the scheme becomes a routing decision and validation moves to per-scheme rules in code, with the database keeping only scheme-independent constraints.
 - **Relay latency:** idle polling adds up to the poll interval (≤ 1 s) per event; `LISTEN/NOTIFY` is the evolution.
@@ -326,7 +350,7 @@ Numbering continues from slice 1.
 30. **No compliance review of withdrawals** in this slice. In reality there would be one: outgoing payments are screened (sanctions, fraud, unusual activity) before they are sent, and it would sit between `held` and `submitted` (`held → under_review → approved → submitted`, the funds already reserved), with rejection releasing the hold. It would repeat slice 1's pseudo review without demonstrating anything new (scope principle).
 31. **The fake provider is test infrastructure in the Node codebase:** `node/src/provider-sim/`, run by compose as `provider-sim` from the same image, with failure modes switched on by environment variables. It belongs to neither implementation, so the Go stack reuses it unchanged, as it reuses `scripts/demo.sh` and the reconcile service.
 32. **Outgoing text fields use the SEPA basic character set** (the EPC's basic Latin set: `a-z A-Z 0-9 / - ? : ( ) . , ' +` and space; extended sets exist only by national agreement, so they are not assumed). Requests outside it are rejected (`400` from step 3), never transliterated, so what the client sees is exactly what is sent. Enforced by CHECKs on `withdrawals.creditor_name` and `remittance_info`, and by `sepaTextSchema` (`shared/schemas.ts`) at the API, which mirrors them. Leading and trailing whitespace is trimmed first (it is almost always a slip; inner whitespace is kept), and an optional field that is empty or blank means none (`null`, the one stored spelling of none): normalisations whose result the response shows, so the client still sees exactly what is stored and sent.
-33. **Client request bodies are strict; provider webhooks are tolerant readers.** `POST /accounts/:id/withdrawals` rejects unknown fields (`z.strictObject`): it is our own client asking to move money, so a misspelt optional field (`remitance_info`) must fail rather than be silently dropped. `POST /payments` ignores unknown fields, because providers add fields to webhooks over time and a new field must not break ingestion.
+33. **Client request bodies are strict; provider webhooks are tolerant readers.** `POST /accounts/:id/withdrawals` rejects unknown fields (`z.strictObject`): it is our own client asking to move money, so a misspelt optional field (`remitance_info`) must fail rather than be silently dropped. `POST /provider/incoming-payments` (formerly `POST /payments`) ignores unknown fields, because providers add fields to webhooks over time and a new field must not break ingestion.
 34. **provider-sim failures are chosen deterministically by triggers in the remittance text** (as provider sandboxes use magic amounts or names), with optional random rates for chaos runs. Probabilities alone would make tests and the demo flaky; a trigger makes each failure mode a test case that always happens.
 35. **A provider answer that signals our bug (a `400`, a `409`, a transfer-ID mismatch) moves no money:** the message is terminated with an alert and the withdrawal stays `held` for a person. Only a definitive refusal (`422`) releases funds automatically. Releasing on a bug would guess at an outcome the provider may not share. The meaning of each answer is provider-sim's contract (a `409` is only ever our key reused with another body); a real provider's answers are mapped to these outcomes by its integration (*Known gaps*).
 36. **One delivery log for every consumer**, `event_deliveries` with a `consumer` column (`worker`, `submitter`), rather than a table per consumer: the same columns and the same crash trace, and reconciliation reports duplicates and stale `in_progress` rows per consumer.

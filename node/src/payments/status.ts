@@ -16,8 +16,15 @@ export const PAYMENT_STATUSES = [
   'rejected',
   'credited',
   'returned',
+  // Suspense: the payment matches none of our accounts. Outside the lifecycle above: ingestion
+  // creates it directly, no transition leads into it, and none leads out of it in this slice. A
+  // terminal state until a resolution flow (match to an account, or return) exists.
+  'unmatched',
 ] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
+// The statuses of a payment matched to an account: everything that books or reviews payments
+// works with these, and never has to handle suspense.
+export type BookedStatus = Exclude<PaymentStatus, 'unmatched'>;
 
 export function parseStatus(value: string): PaymentStatus {
   const status = PAYMENT_STATUSES.find((s) => s === value);

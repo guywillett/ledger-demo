@@ -30,6 +30,7 @@ Portfolio project: a small payment event-processing system (incoming payments, p
 - **IDs:** UUIDv7 in `uuid` columns; TypeIDs (`typeid-js`, prefixes `acct`, `pay`, `wd`, `evt`, `mov`) outside the database. Convert only at boundaries. Never store IDs as text.
 - **Money:** integer minor units: `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON (`"amount_minor": "1250"`). Never floats. Cast counts to `::int` in SQL. Any division goes through one helper with an explicit rounding mode. See `docs/decisions/0001-money-representation.md`.
 - **Validation:** Zod at every boundary (HTTP bodies, NATS messages).
+- **Status codes follow the caller** (slice 2 decision 38): the client API (top of `src/api/`) uses conventional REST codes; provider webhooks live under `src/api/webhooks/` at `/provider/…` and follow the webhook contract (`204` for anything recorded or deliberately handled, `400` only for an unusable body, `500` when a retry can help).
 - **Migrations:** plain SQL in `db/migrations/`, run by dbmate. Language-neutral (shared with Go later).
 - **Versions:** pin Docker image tags and dependency versions; commit lockfiles.
 - **Logging:** structured JSON with `request_id`, `payment_id`, `event_id` where relevant.
