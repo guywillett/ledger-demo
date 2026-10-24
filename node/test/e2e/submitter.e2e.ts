@@ -136,6 +136,42 @@ describe('withdrawals end to end', () => {
     });
   });
 
+  it('fails a withdrawal the provider refuses at submission (SIM REFUSE), releasing its funds', async () => {
+    await startSubmitter();
+    const { id, accountId } = await requestWithdrawal('SIM REFUSE');
+
+    // No transfer and no webhook: the submitter's own refusal outcome releases the funds.
+    await waitFor(async () => (await statusOf(id)) === 'failed', 'failed');
+    expect((await getWithdrawal(pool, id))?.failureReason).toBe('creditor account closed');
+    expect(transfersCreated(id)).toBe(0);
+    expect(await stepsOf(id)).toEqual(['hold', 'release']);
+    expect(await balancesOf(pool, accountId)).toEqual({
+      pendingIn: 0n,
+      available: 1000n,
+      held: 0n,
+    });
+  });
+
+  it('retries a 503 with the same key and executes it (SIM ERROR)', async () => {
+    const submitter = await startSubmitter();
+    const { id } = await requestWithdrawal('SIM ERROR');
+
+    // The first submission is answered 503 (unknown outcome, nak); the retry, about 1 s later,
+    // is accepted, and the provider's result executes it.
+    await waitFor(async () => (await statusOf(id)) === 'executed', 'executed');
+    expect(transfersCreated(id)).toBe(1);
+    expect(await stepsOf(id)).toEqual(['hold', 'execute']);
+    expect(
+      submitter
+        .lines()
+        .some(
+          (l) =>
+            l.msg === 'provider outcome unknown; will retry' &&
+            l.withdrawal_id === toTypeId('wd', id),
+        ),
+    ).toBe(true);
+  });
+
   it('applies a result that arrives before the submission is answered (SIM EARLY)', async () => {
     await startSubmitter();
     const { id } = await requestWithdrawal('SIM EARLY');

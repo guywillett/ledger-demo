@@ -37,5 +37,5 @@ Portfolio project: a small payment event-processing system (incoming payments, p
 
 ## Running
 
-- `docker compose up` starts Postgres, NATS (JetStream), migrations, API, relay and worker.
+- `docker compose up` starts Postgres, NATS (JetStream), migrations and stream setup, the API, relay, worker, submitter and provider-sim (the fake BaaS); `reconcile` runs on demand (`docker compose run --rm reconcile`).
 - Integration tests (Vitest) run against the compose services.

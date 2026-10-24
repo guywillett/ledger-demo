@@ -11,8 +11,17 @@
 # 4. a valid IBAN that isn't ours           -> recorded in suspense, in no account's list
 # 5. a burst of payments, with the worker killed (SIGKILL) mid-review and restarted
 # 6. a burst of payments shared by two workers
-# then waits until every payment has finished and reconciles: exit 0 only if the books agree
-# and nothing is stuck.
+# then waits until every payment has finished, funds carol, and runs withdrawals through the
+# submitter and provider-sim (both in compose), checking each through the API and her balance:
+# 7. a withdrawal                              -> 201 with Location, ends executed
+# 8. the same request with the same key        -> 200, the same withdrawal, no second hold
+# 9. the same key with another amount          -> 409
+# 10. more than available                      -> 422, nothing stored
+# 11. SIM FAIL (the provider fails it)          -> ends failed, funds back in available
+# 12. SIM EARLY (the result overtakes us)       -> ends executed, applied once
+# 13. SIM SLOW with the submitter killed mid-call and restarted -> ends executed, applied once
+# and finally reconciles: exit 0 only if the books agree and nothing is stuck (payments,
+# withdrawals held or submitted, unpublished events).
 #
 # The final check covers the whole development database, not just this run: a payment left
 # unfinished earlier (an aborted run, a notification sent while the worker was down) fails it
@@ -23,7 +32,8 @@
 # Payments go to the demo accounts (alice, bob, carol) in the development database.
 #
 # Exit codes, as for reconciliation: 0 all good; 1 an expectation failed or the books disagree;
-# 2 payments still unfinished after the wait; 3 couldn't run (the API isn't up).
+# 2 payments still unfinished after the wait, or carol couldn't be funded; 3 couldn't run (the API
+# isn't up).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -57,6 +67,76 @@ post() {
 payment() {
   curl -s "$API/accounts/$1/transactions?limit=200" |
     grep -o "{[^{}]*\"network_transaction_id\":\"$2\"[^{}]*}" || true
+}
+
+# field <json> <name>: prints a field's value from flat JSON (strings and numbers; first match).
+field() {
+  printf '%s' "$1" | grep -o "\"$2\":\"\{0,1\}[^\",}]*" | head -1 | sed 's/.*:"\{0,1\}//' || true
+}
+
+# balance <account> <bucket>: prints the bucket (pending_in, available, held) in minor units.
+balance() {
+  field "$(curl -s "$API/accounts/$1/balance")" "$2"
+}
+
+# withdraw <account> <key> <amount_minor> <remittance_info>: requests a withdrawal (to a
+# foreign IBAN) and prints the response body, then the HTTP status code on a line of its own
+# (split with ${x%$'\n'*} and ${x##*$'\n'}). The response headers are left in $headers.
+headers=$(mktemp)
+withdraw() {
+  curl -s -D "$headers" -w '\n%{http_code}' -X POST "$API/accounts/$1/withdrawals" \
+    -H 'content-type: application/json' -H "Idempotency-Key: $2" \
+    -d "{\"amount_minor\":\"$3\",\"currency\":\"EUR\",\"creditor_iban\":\"$FOREIGN_IBAN\",\"creditor_name\":\"Demo Payee\",\"remittance_info\":\"$4\"}" ||
+    true
+}
+
+# wait_final <withdrawal id> [timeout s]: polls the withdrawal until it is executed or failed
+# (30 s by default) and prints its body.
+wait_final() {
+  local deadline=$((SECONDS + ${2:-30})) body=''
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    body=$(curl -s "$API/withdrawals/$1")
+    case "$(field "$body" status)" in executed | failed) break ;; esac
+    sleep 1
+  done
+  printf '%s' "$body"
+}
+
+# Relies on provider-sim's "transfer created" log line (msg and reference fields, src/provider-sim/app.ts).
+# wait_transfer_created <withdrawal id>: waits (20 s at most) until provider-sim has logged the
+# transfer for this withdrawal (its reference), i.e. the submitter's call has reached it.
+wait_transfer_created() {
+  local deadline=$((SECONDS + 20))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    docker compose logs provider-sim 2>/dev/null | grep "\"reference\":\"$1\"" |
+      grep -q '"msg":"transfer created"' && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+# fund <account> <iban> <minimum>: posts payments of 2000 to the account, each waited on until
+# the worker has settled it, until available reaches the minimum. The pseudo review rejects some
+# payments at random, so how many it takes varies; gives up (exit 2) after 20.
+fund() {
+  local i ntx deadline settled
+  for i in $(seq 1 20); do
+    [ "$(balance "$1" available)" -ge "$3" ] && return 0
+    ntx="$RUN-fund-$i"
+    post "$ntx" "$2" 2000 > /dev/null
+    deadline=$((SECONDS + 30))
+    settled=''
+    while [ "$SECONDS" -lt "$deadline" ]; do
+      case "$(field "$(payment "$1" "$ntx")" status)" in credited | returned)
+        settled=yes
+        break
+        ;;
+      esac
+      sleep 1
+    done
+    [ -n "$settled" ] || { echo "   payment $ntx did not settle within 30 s"; exit 2; }
+  done
+  [ "$(balance "$1" available)" -ge "$3" ] || { echo "   couldn't fund $1 to $3"; exit 2; }
 }
 
 # contains <what> <needle> <haystack>
@@ -154,22 +234,97 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   sleep 3
 done
 
+say "Funding carol for the withdrawals (payments of 2000 until available >= 10000)"
+fund "$CAROL" "$CAROL_IBAN" 10000
+echo "   carol's available: $(balance "$CAROL" available)"
+
+say "7. A withdrawal"
+before=$(balance "$CAROL" available)
+response=$(withdraw "$CAROL" "$RUN-wd-1" 700 "Rent October")
+expect "created" 201 "${response##*$'\n'}"
+withdrawal=$(field "${response%$'\n'*}" id)
+contains "with its Location" "location: /withdrawals/$withdrawal" "$(tr -d '\r' < "$headers")"
+expect "ends executed" executed "$(field "$(wait_final "$withdrawal")" status)"
+expect "available down by the amount" $((before - 700)) "$(balance "$CAROL" available)"
+expect "nothing left held" 0 "$(balance "$CAROL" held)"
+
+say "8. The same request again, with the same key"
+before=$(balance "$CAROL" available)
+response=$(withdraw "$CAROL" "$RUN-wd-1" 700 "Rent October")
+expect "a repeat" 200 "${response##*$'\n'}"
+expect "the same withdrawal" "$withdrawal" "$(field "${response%$'\n'*}" id)"
+expect "no second hold" "$before/0" "$(balance "$CAROL" available)/$(balance "$CAROL" held)"
+
+say "9. The same key with another amount"
+expect "key reused with other details" 409 "$(withdraw "$CAROL" "$RUN-wd-1" 701 "Rent October" | tail -1)"
+
+say "10. More than available"
+before=$(balance "$CAROL" available)
+expect "insufficient funds" 422 "$(withdraw "$CAROL" "$RUN-wd-2" $((before + 1)) "Too much" | tail -1)"
+expect "nothing stored or held" "$before/0" "$(balance "$CAROL" available)/$(balance "$CAROL" held)"
+
+say "11. The provider fails the transfer (SIM FAIL)"
+before=$(balance "$CAROL" available)
+response=$(withdraw "$CAROL" "$RUN-wd-3" 500 "SIM FAIL")
+expect "created" 201 "${response##*$'\n'}"
+expect "ends failed" failed "$(field "$(wait_final "$(field "${response%$'\n'*}" id)")" status)"
+expect "funds back in available" "$before/0" "$(balance "$CAROL" available)/$(balance "$CAROL" held)"
+
+say "12. The provider's result arrives before its answer to the submitter (SIM EARLY)"
+before=$(balance "$CAROL" available)
+response=$(withdraw "$CAROL" "$RUN-wd-4" 300 "SIM EARLY")
+expect "created" 201 "${response##*$'\n'}"
+expect "ends executed" executed "$(field "$(wait_final "$(field "${response%$'\n'*}" id)")" status)"
+expect "applied once" "$((before - 300))/0" "$(balance "$CAROL" available)/$(balance "$CAROL" held)"
+
+say "13. The submitter killed during a slow provider call (SIM SLOW), then restarted"
+# provider-sim creates the transfer but answers slowly, and the submitter is killed while it
+# waits: our side never learns the outcome. What this step shows: the provider's result reaches
+# the webhook (after SIM_EXECUTION_DELAY_MS, 2 s) before the killed submitter's message is
+# redelivered (after ack_wait, 30 s), so the withdrawal is executed while the submitter is down,
+# and the restarted submitter finds it executed and makes no call. Nothing is lost and nothing is
+# applied twice. The same-key retry of an unknown outcome is proven elsewhere:
+# test/submitter/provider.test.ts ("maps a timeout to unknown, and the next call with the same key
+# gets the same, single transfer") and test/e2e/submitter.e2e.ts ("retries a 503 with the same
+# key and executes it (SIM ERROR)").
+#
+# The kill waits for provider-sim to have created the transfer, rather than a fixed delay: on a
+# slow machine the submitter may not have made the call yet, and killing it before the call shows
+# something else (a redelivery after ack_wait). wait_final allows more than ack_wait anyway.
+before=$(balance "$CAROL" available)
+response=$(withdraw "$CAROL" "$RUN-wd-5" 400 "SIM SLOW")
+expect "created" 201 "${response##*$'\n'}"
+withdrawal=$(field "${response%$'\n'*}" id)
+if wait_transfer_created "$withdrawal"; then
+  echo "   the provider has created the transfer and is answering slowly"
+else
+  echo "   FAILED: the provider never received the transfer"
+  failures=$((failures + 1))
+fi
+docker compose kill -s SIGKILL submitter > /dev/null 2>&1
+echo "   submitter killed (SIGKILL) during the call"
+docker compose up -d submitter > /dev/null 2>&1
+echo "   submitter restarted"
+expect "ends executed" executed "$(field "$(wait_final "$withdrawal" 60)" status)"
+expect "applied once" "$((before - 400))/0" "$(balance "$CAROL" available)/$(balance "$CAROL" held)"
+
 say "Reconciliation"
-echo "   (deliveries left in_progress are the trace of the killed worker: each redelivery got its own row)"
+echo "   (deliveries left in_progress are the trace of the killed worker and submitter: each redelivery got its own row)"
 set +e
 reconcile --stuck-after 0 --fail-on-stuck
 status=$?
 set -e
 
-say "alice's balance"
-curl -s "$API/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance"
+say "carol's balance"
+curl -s "$API/accounts/$CAROL/balance"
 echo
+rm -f "$headers"
 
 if [ "$failures" -ne 0 ]; then
   echo; echo "$failures expectation(s) failed."; exit 1
 fi
 case "$status" in
-  0) echo; echo "Every payment finished and the books agree." ;;
-  2) echo; echo "Some payments did not finish within the wait."; exit 2 ;;
+  0) echo; echo "Every payment and withdrawal finished and the books agree." ;;
+  2) echo; echo "Some payments or withdrawals did not finish within the wait."; exit 2 ;;
   *) echo; echo "The books disagree."; exit 1 ;;
 esac

@@ -2,21 +2,21 @@
 
 [![CI](https://github.com/guywillett/ledger-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/guywillett/ledger-demo/actions/workflows/ci.yml)
 
-A small payment event-processing system (incoming payments, pseudo compliance review, ledger balances) built to demonstrate correctness under duplicates, retries, crashes and concurrency: **however often a notification or event is repeated, redelivered or processed concurrently, and wherever a process crashes, every balance changes exactly once.** Implemented in Node.js/TypeScript; a Go implementation against the same database schema and contracts comes later.
+A small payment system (incoming payments with a pseudo compliance review, client withdrawals sent to a provider, ledger balances) built to demonstrate correctness under duplicates, retries, crashes, concurrency and unknown outcomes: **however often a notification, request, event or provider result is repeated, redelivered, raced or interrupted, and wherever a process crashes, every balance changes exactly once, and no money is sent twice.** Implemented in Node.js/TypeScript; a Go implementation against the same database schema and contracts comes later.
 
-The specs and decisions are in [`docs/`](docs/): [slice 1](docs/slices/slice-1-incoming-payments.md) is built, and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) (transactional outbox, withdrawals) is in progress: the outbox and withdrawals end to end are done.
+The specs and decisions are in [`docs/`](docs/): [slice 1](docs/slices/slice-1-incoming-payments.md) (incoming payments) and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) (transactional outbox, withdrawals, provider webhooks) are built.
 
 ```text
+Incoming payments
 provider ──POST /provider/incoming-payments──► API ──► Postgres, one transaction:
 (webhook)                              payment `created` (no balance change)
                                        + payment.created in the outbox
                                        (unknown account: recorded in suspense, no event)
                                                │
-                                               ▼
-                                 relay (any number of instances): claim, publish, mark
+                                     relay (any number of instances): claim, publish, mark
                                                │
                                                ▼
-                                 JetStream: payment.created
+                                 JetStream PAYMENTS: payment.created
                                                │
                                                ▼
                                  worker (any number of instances)
@@ -24,11 +24,12 @@ provider ──POST /provider/incoming-payments──► API ──► Postgres,
                 (pending_in)                (approve/reject)   (available, or returned)
                           each step one transaction, through ledger/move()
 
+Withdrawals
 client ──POST /accounts/:id/withdrawals (Idempotency-Key)──► API ──► Postgres, one transaction:
                                        withdrawal `held` (available → held)
                                        + withdrawal.held in the outbox
                                                │
-                                     relay ──► JetStream: withdrawal.held
+                                     relay ──► JetStream WITHDRAWALS: withdrawal.held
                                                │
                                                ▼
                                  submitter ──POST /transfers (same key on every retry)──► provider
@@ -41,47 +42,68 @@ provider ──POST /provider/transfer-updates (webhook)──► API ──► 
   GET /accounts/:id/balance, /transactions, /withdrawals/:id        reconciliation: do the books agree?
 ```
 
-Status codes follow the caller: our client's API answers with conventional REST codes (`201`, `200`, `409`, `422`…); provider webhooks get the webhook contract, `204` for anything recorded or deliberately handled and non-2xx only when a retry could help (`POST /provider/incoming-payments`, `POST /provider/transfer-updates`; both live under `src/api/webhooks/`).
+Status codes follow the caller: our client's API answers with conventional REST codes (`201`, `200`, `409`, `422`…); provider webhooks get the webhook contract, `204` for anything recorded or deliberately handled and non-2xx only when a retry could help.
 
 ## What it demonstrates
 
 | Guarantee | How | Proved by |
 |---|---|---|
-| A repeated notification changes nothing | `UNIQUE (network, network_transaction_id)` and one upsert statement: same details → a duplicate, counted; different → recorded as a conflict, nothing changed; unknown account → recorded in suspense, booking nothing (every one answered `204`, the webhook contract) | `test/api/incoming-payments.test.ts` (5 repeats, 10 concurrent, conflicts, suspense) |
-| An event is never lost between commit and publish | the event is written to `outbox` in the same transaction as the payment; a relay publishes it at least once (claims leased with `FOR UPDATE SKIP LOCKED`, marked after the stream's acknowledgement); the stream drops a repeat by its `msg_id` | `test/api/payment-events.test.ts` (one outbox row, same transaction); `test/outbox/outbox.test.ts` (rollback, leases, disjoint concurrent claims); `test/relay/relay.test.ts` (failure and retry; a relay "crashing" after publishing, before marking: published again, dropped by the stream) |
-| A provider result is applied exactly once, even when it arrives first, twice, or contradicts itself | the update is recorded and the withdrawal settled in one transaction, by a conditional transition from `held` or `submitted`; a resend is counted, a second event for the same result skips, a contradiction (the other final status, another transfer ID) or an unmatched update is recorded and alerted, moving no money; every handled case answers `204` | `test/api/transfer-updates.test.ts`; `test/e2e/submitter.e2e.ts` (`SIM EARLY`, `SIM DUPLICATE`, `SIM FAIL`) |
-| A retried withdrawal request never pays twice | the client's `Idempotency-Key` is unique per account on the withdrawal itself, so only a request that commits takes it (a `422`, `404` or crash leaves it free); the funds are held in the request's own transaction, and the balance CHECK is the insufficient-funds check; a repeat returns the withdrawal's current state, a reused key with other details is a `409` | `test/api/withdrawals.test.ts` (5 repeats, 10 concurrent, conflicts, `422` then the same key succeeds, two concurrent withdrawals exceeding the balance) |
+| A repeated notification changes nothing | `UNIQUE (network, network_transaction_id)` and one upsert statement: same details → a duplicate, counted | `test/api/incoming-payments.test.ts` ("records the same notification sent 5 times once…", "records 10 concurrent identical notifications once"); `scripts/demo.sh` steps 1–2 |
+| A notification that can't be booked is recorded, never refused | an unknown account goes into suspense (status `unmatched`: no account, no event, no movement; a retry stays a duplicate of it, resolution is never automatic); the same network ID with other details becomes a conflict record, the payment unchanged; both alerted and reported by reconciliation | `test/api/incoming-payments.test.ts` ("records a valid IBAN that is not ours as unmatched…", "keeps it unmatched after an account with that IBAN is created…", "records a different amount as a conflict…"); `scripts/demo.sh` steps 3–4 |
+| An event is never lost between commit and publish | the event is written to `outbox` in the same transaction as the state change; a relay publishes it at least once (claims leased with `FOR UPDATE SKIP LOCKED`, marked after the stream's acknowledgement); the stream drops a repeat by its `msg_id` | `test/api/payment-events.test.ts` and `test/api/withdrawals.test.ts` (one outbox row, same transaction); `test/outbox/outbox.test.ts` (rollback, leases, disjoint concurrent claims); `test/relay/relay.test.ts` ("publishes again after a relay crashed between publishing and marking, and the stream drops the repeat") |
 | A repeated or concurrent event moves money once | every step is a conditional transition (`UPDATE … WHERE status = $expected`), never check-then-act | `test/worker/handler.test.ts` (same event twice, two consumers at once) |
-| The ledger protects itself | `move()` records each movement under `UNIQUE (reference_type, reference_id, reference_step)`; a reused reference with other details is refused; a reference's type and step are checked as a pair, in the database and in the `Movement` type. Withdrawals reserve funds with a `held` bucket, and the balance CHECK is the insufficient-funds check, so concurrent withdrawals can't overspend | `test/ledger/move.test.ts`, `test/ledger/withdrawals.test.ts` (two concurrent withdrawals exceeding the balance: exactly one commits) |
-| An unknown outcome is retried with the same key, never guessed | the submitter sends each withdrawal with its own TypeID as `Idempotency-Key`, built only from the stored withdrawal, so a retry is the identical request; a timeout or `5xx` leaves the withdrawal `held` and is retried later; only a definitive refusal releases funds, and an answer that signals our bug alerts and moves nothing | `test/submitter/provider.test.ts` (`SIM SLOW`: a timeout, then the same transfer on the retry); `test/submitter/handler.test.ts`; `test/e2e/submitter.e2e.ts` (the submitter killed mid-call: one transfer at the provider) |
-| Crash safety | each step commits on its own; a redelivery skips what's done, and a recorded decision is never re-made | `test/worker/handler.test.ts` (crash after booking, after deciding); `test/e2e/worker.e2e.ts` (real `kill -9` mid-review) |
-| Horizontal scaling | instances share one durable JetStream consumer; each fetches only as many messages as it has free slots | `test/e2e/worker.e2e.ts` (two workers; long reviews never redelivered) |
-| Audit trail | `balance_movements` and `payment_status_history` are append-only, enforced by triggers | `test/ledger/move.test.ts`, `test/ledger/lifecycle.test.ts` |
+| A retried withdrawal request never takes money twice | the client's `Idempotency-Key` is unique per account on the withdrawal itself, so only a request that commits takes it (a `422`, `404` or crash leaves it free); a repeat returns the withdrawal's current state, a reused key with other details is a `409` | `test/api/withdrawals.test.ts` ("answers a repeated request with the same withdrawal…", "creates one withdrawal for 10 concurrent requests with one key", "refuses insufficient funds with 422, storing nothing, and the key stays free"); `scripts/demo.sh` steps 8–9 |
+| Insufficient funds is decided atomically with the hold | the hold is a `move(available → held)` in the request's own transaction, and the balance CHECK is the insufficient-funds check (no check-then-act), so concurrent withdrawals can't overspend | `test/ledger/withdrawals.test.ts` and `test/api/withdrawals.test.ts` ("lets exactly one of two concurrent withdrawals that together exceed available…"); `scripts/demo.sh` step 10 |
+| An unknown outcome is retried with the same key, never guessed | the submitter sends each withdrawal with its TypeID as `Idempotency-Key`, built only from the stored withdrawal; a timeout or `5xx` leaves it `held` and asks again later; only a definitive refusal releases funds | `test/submitter/provider.test.ts` ("maps a timeout to unknown, and the next call with the same key gets the same, single transfer"); `test/submitter/handler.test.ts`; `test/e2e/submitter.e2e.ts` ("settles once after the submitter is killed mid-call…", `SIM ERROR`); `scripts/demo.sh` step 13 |
+| A provider result is applied exactly once, even when it arrives first, twice, or contradicts itself | the update is recorded and the withdrawal settled in one transaction, by a conditional transition from `held` or `submitted`; a resend is counted, a second event for the same result skips, a contradiction (the other final status, another transfer ID) or an unmatched update is recorded and alerted, moving no money | `test/api/transfer-updates.test.ts`; `test/e2e/submitter.e2e.ts` (`SIM EARLY`, `SIM DUPLICATE`, `SIM FAIL`, `SIM REFUSE`); `scripts/demo.sh` steps 11–12 |
+| Provider webhooks follow the webhook contract | `204` with no body for everything recorded or deliberately handled (so they are no oracle for what exists), `400` only for an unusable body, `500` when a retry helps | `test/api/incoming-payments.test.ts`, `test/api/transfer-updates.test.ts` (every outcome `204`; "answers 400 (not 415)…") |
+| An answer that signals our bug moves no money | a provider `400`/`409`, a transfer-ID mismatch or a ledger invariant violation terminates the message with an alert and leaves the withdrawal `held` for a person | `test/submitter/handler.test.ts` ("treats invalid (400) as our bug…", "terminates a ledger invariant violation with an alert…") |
+| Crash safety | each step commits on its own; a redelivery skips what's done, and a recorded decision is never re-made | `test/worker/handler.test.ts` (crash after booking, after deciding); `test/e2e/worker.e2e.ts` and `test/e2e/submitter.e2e.ts` (real `kill -9` mid-review, mid-call); `scripts/demo.sh` steps 5 and 13 |
+| Horizontal scaling | instances share one durable JetStream consumer; each fetches only as many messages as it has free slots; relays claim disjoint batches | `test/e2e/worker.e2e.ts` (two workers; long reviews never redelivered); `test/outbox/outbox.test.ts` ("gives two concurrent claims disjoint events (SKIP LOCKED)") |
+| The ledger protects itself | `move()` records each movement under `UNIQUE (reference_type, reference_id, reference_step)`; a reused reference with other details is refused; a reference's type and step are checked as a pair, in the database and in the `Movement` type | `test/ledger/move.test.ts`, `test/ledger/withdrawals.test.ts` |
+| Audit trail | `balance_movements`, `payment_status_history` and `withdrawal_status_history` are append-only, enforced by triggers | `test/ledger/move.test.ts`, `test/ledger/lifecycle.test.ts` |
 | Exact money | integer minor units as `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON ([decision 0001](docs/decisions/0001-money-representation.md)) | amounts above 2^53 in the API, ledger, database and logging tests |
-| The books agree | reconciliation checks balances against payment statuses and against the movement journal, per account and per payment | `test/reconciliation/reconcile.test.ts`; `scripts/demo.sh`; the last e2e test |
+| The books agree | reconciliation checks balances against payment and withdrawal statuses and against the movement journal; reports stuck payments, withdrawals and events, suspense and conflicts | `test/reconciliation/reconcile.test.ts`; the last test of each e2e file; `scripts/demo.sh` |
 | One contract for every implementation | hand-written `contracts/openapi.yaml` and `contracts/events/`; every test response and published event is checked against them | `test/contract.ts`, `test/shared/events.test.ts` |
+
+## Design principles
+
+The decisions a reviewer should see first; each is argued in the specs.
+
+- **Status codes follow the caller** ([slice 2 decision 38](docs/slices/slice-2-outbox-and-withdrawals.md)): the client API uses REST codes; provider webhooks use the webhook contract, because a provider retries anything but a 2xx.
+- **Events carry IDs, never personal data:** no IBANs, names or remittance text; consumers read details from the database. A stream keeps messages beyond the database's control.
+- **Only success consumes an idempotency key** ([slice 2 decision 24](docs/slices/slice-2-outbox-and-withdrawals.md)): failures store nothing, so a transient fault is never replayed as a permanent answer.
+- **Unknown outcomes are never guessed** ([slice 2 decision 26](docs/slices/slice-2-outbox-and-withdrawals.md)): a timeout leaves the withdrawal held and asks the provider again with the same key.
+- **A provider answer that signals our bug moves no money** ([slice 2 decision 35](docs/slices/slice-2-outbox-and-withdrawals.md)): alert, terminate, leave it for a person.
+- **Provider webhooks live under `src/api/webhooks/`** ([slice 2 decision 38](docs/slices/slice-2-outbox-and-withdrawals.md)): the seam where another provider's adapter would plug in, mapping its payloads onto the same provider-neutral ingestion functions.
 
 ## Quick start
 
 ```sh
-docker compose up -d --build     # Postgres, NATS, migrations, stream setup, API, relay and worker
-scripts/demo.sh                  # duplicates, conflicts, a killed worker, two workers; then reconciles
+docker compose up -d --build     # Postgres, NATS, migrations, stream setup, API, relay, worker, submitter, provider-sim
+scripts/demo.sh                  # payments: duplicates, conflicts, suspense, a killed worker, two workers;
+                                 # withdrawals: repeats, insufficient funds, provider failures, a killed submitter; then reconciles
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance    # alice
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) does the same from a clean checkout on every push: `npm run check`, the stack built from scratch, the integration and e2e tests, then `scripts/demo.sh`.
 
-`scripts/demo.sh` exits `0` only if every expectation holds and, once every payment has finished, the books agree and nothing is stuck. That last check covers the whole development database, so a payment left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so it will work unchanged against the Go implementation.
+`scripts/demo.sh` exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (payments, withdrawals held or submitted, unpublished events). That last check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so it will work unchanged against the Go implementation. It takes about a minute.
 
 ## Known gaps
 
 Deliberate, and described with their evolution path under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md) and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) specs:
 
-- **Outbox growth and relay latency:** published outbox rows are kept (pruning or partitioning is the evolution), and the relay polls, so an event can wait up to 1 s before it is published (`LISTEN/NOTIFY` is the evolution).
-- **No dead-letter handling:** a message that exhausts `max_deliver`, or that the worker terminates, is only logged; reconciliation shows the payment as stuck.
-- **Security:** no authentication on the API (including webhook signatures) or on NATS, and one database user for everything (append-only is enforced by triggers rather than per-service roles).
-- **One provider:** the provider webhooks live in `src/api/webhooks/` and speak provider-sim's format. With several providers, each gets an adapter, `src/api/webhooks/<provider>/transfer-updates.ts` and so on, that verifies its signature, parses its payload and maps its statuses and error codes onto the same provider-neutral ingestion functions (`recordTransferUpdate`, `recordNotification`); the submitter's provider client would be chosen per withdrawal the same way.
-- **Simplifications:** approve/reject is random; suspense is a status rather than a ledger account (see *Known gaps* in the slice 2 spec); one IBAN per account; no health endpoint; the SEPA country list in `node/src/shared/iban.ts` is not yet verified against the EPC's official list.
+- **Webhook authentication:** no HMAC signature check on the provider webhooks (nor authentication on the client API or NATS; one database user for everything, append-only enforced by triggers rather than per-service roles).
+- **No inbox:** webhooks are processed in the request; storing every raw payload first and processing separately would suit heavy processing and audit, but isn't needed for correctness.
+- **Webhooks are the fast path, not the guarantee:** a real integration also polls the provider (status checks for withdrawals still `submitted`, discovery of incoming payments) and reconciles against the daily statement.
+- **Suspense is a status, not a ledger account:** in production unmatched money is booked into a suspense account so the books explain the bank balance, and customer payments, treasury flows and suspense are kept in separate flows behind an intake table.
+- **A single scheme:** field validation (lengths, the SEPA basic character set) is SEPA-specific and partly in database CHECKs; the SEPA country list in `node/src/shared/iban.ts` is not yet verified against the EPC's official list.
+- **One provider:** the provider webhooks speak provider-sim's format. With several providers, each gets an adapter, `src/api/webhooks/<provider>/transfer-updates.ts` and so on, that verifies its signature, parses its payload and maps its statuses and error codes onto the same provider-neutral ingestion functions (`recordTransferUpdate`, `recordNotification`); the submitter's provider client would be chosen per withdrawal the same way.
+- **No dead-letter handling:** a message that exhausts `max_deliver`, or that a consumer terminates, is only logged; reconciliation shows the payment or withdrawal as stuck.
+- **Outbox growth and relay latency:** published outbox rows are kept (pruning or partitioning is the evolution), and the relay polls, so an event can wait up to 1 s (`LISTEN/NOTIFY` is the evolution).
+- **Idempotency keys never expire:** real APIs expire them (e.g. after 24 h).
+- **Simplifications:** approve/reject is random; one IBAN per account; no health endpoint.
 
 ## Local development
 
@@ -123,7 +145,7 @@ docker compose stop             # stop containers, keep them and their data
 docker compose down             # remove containers and network; data volumes are kept
 ```
 
-`migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits; `nats-setup` does the same for the JetStream streams once NATS is healthy. It's normal for both to show as exited. The `api` starts only after `migrate` has succeeded, the `relay` and `worker` after both.
+`migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits; `nats-setup` does the same for the JetStream streams once NATS is healthy. It's normal for both to show as exited. The `api` starts only after `migrate` has succeeded; the `relay`, `worker` and `submitter` after both (the `submitter` also after `provider-sim` has started).
 
 There's no health endpoint yet (see *Known gaps* in the slice spec); `docker compose logs api` shows "Server listening" once it's up.
 
@@ -244,16 +266,16 @@ Seeded by `db/migrations/20261018000002_seed_demo_accounts.sql`, with zero balan
 
 ### Reconciliation
 
-Checks that balances, movements and payment statuses agree (see *Reconciliation* in the slice spec):
+Checks that balances, movements and payment and withdrawal statuses agree, and reports what a person should look at: stuck payments and withdrawals, unpublished events, suspense (unmatched payments, whole-database runs only), notification conflicts and conflicting or unmatched transfer updates (see *Reconciliation* in the slice specs):
 
 ```sh
 cd node && npm run reconcile                                  # the development database (via .env)
 npm run reconcile -- --json --account acct_01m564xr00fx7rjvqryn5dzwxx   # one account, as JSON
-npm run reconcile -- --stuck-after 0 --fail-on-stuck          # also fail on any unfinished payment
+npm run reconcile -- --stuck-after 0 --fail-on-stuck          # also fail on anything unfinished
 docker compose run --rm reconcile --stuck-after 0                       # from compose, no local Node needed
 ```
 
-Exit code `0` means the books agree, `1` that they disagree, `2` stuck payments with `--fail-on-stuck`, `3` that it couldn't run. Run against `ledger_test` it reports differences by design: some tests leave deliberate inconsistencies behind.
+Exit code `0` means the books agree, `1` that they disagree, `2` stuck payments, withdrawals or events with `--fail-on-stuck`, `3` that it couldn't run. Suspense and conflicts never fail it: they are a person's job, not inconsistent books. Run against `ledger_test` it reports differences by design: some tests leave deliberate inconsistencies behind.
 
 ### Node
 
@@ -282,7 +304,7 @@ Tests default to the compose services on `localhost`: `ledger_test` and the test
 One exception to "tests don't depend on each other": the tests that claim from the outbox (`test/relay/`, `test/outbox/`, `test/api/payment-events.test.ts`). Claiming takes the oldest unpublished events in the whole table, and every test that creates a payment leaves one behind, so these files form a second Vitest project, `relay`, that runs after all the others and one file at a time; each of their tests first drains the backlog (see `vitest.config.ts`).
 
 ```sh
-npm run test:e2e                # process-level tests: the real relay, worker, submitter and provider-sim; kill -9 the worker and the submitter, restart them (~80 s)
+npm run test:e2e                # process-level tests: the real relay, worker, submitter and provider-sim; kill -9 the worker and the submitter, restart them (~2 min)
 ```
 
 The e2e tests drain the test outbox and purge the test stream first; don't run them at the same time as `npm test`.
