@@ -1,6 +1,6 @@
 # Slice 3 — Go implementation
 
-Status: draft
+Status: in progress
 Implementation: Go, against the tag `v0.2-node-reference` (schema, contracts, NATS definitions, demo)
 Builds on: [slice 1](slice-1-incoming-payments.md), [slice 2](slice-2-outbox-and-withdrawals.md) and [ADR 0002](../decisions/0002-deposits-and-withdrawals.md) (vocabulary). Their decisions hold for Go unless this spec says otherwise.
 
@@ -76,10 +76,10 @@ Vectors are extracted from the Node tests' existing cases; Node's tests then rea
 
 One commit per step on `slice-3`, reviewed before the next.
 
-1. **Scaffold:** the module with a pinned toolchain (`go`/`toolchain` directives), `gofmt`, `go vet` and `golangci-lint` (pinned), a multi-stage Dockerfile (one image, every binary), the `config`, `db` (pool, transaction helper), `ids`, `money` and logging packages, a Go test database `ledger_go_test` (migrated by compose like `ledger_test`), a Go CI job (format, vet, lint, test), and the Go section in CLAUDE.md.
+1. **Scaffold:** the module with a pinned toolchain (`go`/`toolchain` directives), `gofmt`, `go vet` and `golangci-lint` (pinned), the `config`, `db` (pool, transaction helper), `ids`, `money` and logging packages, a Go test database `ledger_go_test` (migrated by compose like `ledger_test`), a Go CI job (format, vet, lint, vulnerability scan with `govulncheck`, test), and the Go section in CLAUDE.md.
 2. **Shared test vectors:** `contracts/vectors/` extracted from the Node tests; Node's tests read them; Go's `ids`, `money`, IBAN and SEPA-text code passes them.
 3. **Ledger:** `move()`, the deposit and withdrawal postings, invariants, and their tests (the cases of `node/test/ledger/`).
-4. **Read API and the deposit webhook:** the HTTP server (request IDs, access log, problem details, the webhook error contract), `GET /accounts/:id/balance` and `/transactions`, `POST /provider/incoming-payments` (deposit and outbox row in one transaction; suspense; conflicts). Contract-checked tests.
+4. **Read API and the deposit webhook:** a multi-stage Dockerfile (one image, every binary; the first binary is the API), the HTTP server (request IDs, access log, problem details, the webhook error contract), `GET /accounts/:id/balance` and `/transactions`, `POST /provider/incoming-payments` (deposit and outbox row in one transaction; suspense; conflicts). Contract-checked tests.
 5. **Relay:** claim, publish, mark; leases; the lease and batch checks against the stream's duplicate window.
 6. **Consumer layer and the deposit-worker:** the pull loop (fetch only free slots), the delivery log (record then ack; the settle-once guard), `working()` during reviews, graceful shutdown; the deposit lifecycle.
 7. **Withdrawals:** `POST /accounts/:id/withdrawals` (`Idempotency-Key`, strict body), `GET /withdrawals/:id`, the submitter (provider client, timeout checked against `ack_wait`, outcomes), `POST /provider/transfer-updates`.

@@ -12,6 +12,7 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `nats` | NATS with JetStream | `4222` (clients), `8222` (monitoring) |
 | `migrate` | dbmate: applies `db/migrations/` and exits | — |
 | `migrate-test` | the same migrations against the test database `ledger_test` | — |
+| `migrate-go-test` | the same migrations against the Go tests' database `ledger_go_test` | — |
 | `nats-setup` | nats-box: applies the stream and consumer definitions in `nats/` and exits | — |
 | `api` | the Node API (`node/`, image `ledger-demo-node`); Postgres only, no NATS | `3000` |
 | `relay` | the Node relay (same image): publishes the outbox to JetStream (`DEPOSITS`, `WITHDRAWALS`) | — |
@@ -278,6 +279,32 @@ npm run lint                    # oxlint, including type-aware rules
 - Exported functions must declare parameter and return types (`explicit-module-boundary-types`; not enforced in tests).
 - A `switch` over a union type must list every member (`switch-exhaustiveness-check`); a `default:` alone doesn't count, so adding a new status flags every switch that misses it.
 - Editor: install the Prettier and oxc extensions; `.editorconfig` at the repo root covers indentation and line endings for all languages.
+
+## Go
+
+The Go implementation lives in `go/` (slice 3; the conventions are in `CLAUDE.md`). Install any Go 1.21 or later: `go.mod` pins the toolchain (`toolchain go1.27.3`), and with `GOTOOLCHAIN=auto`, the default, `go` downloads and uses that version by itself. Check with `go env GOTOOLCHAIN` (it should print `auto`) and, in `go/`, `go version` (it should print go1.27.3).
+
+golangci-lint is installed as a release binary, at the version pinned in `go/.golangci-lint-version` (the same file CI reads); golangci-lint's docs advise against `go install` and the `tool` directive (see `go/.golangci.yml`):
+
+```sh
+cd go
+curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b "$(go env GOPATH)/bin" "$(cat .golangci-lint-version)"
+```
+
+The install script itself is fetched unpinned (golangci-lint's documented method), but the version it installs is pinned; CI uses the SHA-pinned golangci-lint action instead.
+
+```sh
+cd go
+gofmt -l .                      # list files gofmt would change (gofmt -w . rewrites them)
+go vet ./...                    # the compiler's own static checks
+golangci-lint run               # the linters in .golangci.yml
+go test -race ./...             # every package's tests, with the race detector (needs `docker compose up -d`)
+go test -run TestCommits ./internal/db/   # one test
+```
+
+govulncheck reports known vulnerabilities that the code can actually reach (in the toolchain or a dependency), and CI fails on any. It has no release binaries; `go install` builds it at the version in `go/.govulncheck-version`, outside this module (it doesn't touch `go.mod`): `go install "golang.org/x/vuln/cmd/govulncheck@$(cat .govulncheck-version)"`, then `govulncheck ./...` in `go/`.
+
+The tests run against their own database, `ledger_go_test` (migrated by `migrate-go-test`), never `ledger` or Node's `ledger_test`. `TEST_DATABASE_URL` points them elsewhere; as in Node, the database name must end in `_test`. The Node and Go suites share the test NATS, so don't run them at the same time.
 
 ## Troubleshooting
 
