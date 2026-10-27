@@ -81,11 +81,11 @@ async function relayEvent(deps: RelayDeps, event: OutboxEvent): Promise<boolean>
 }
 
 // The ID of what the event is about, as its TypeID, so a relay line can be found from the
-// entity (a stuck pay_…) as well as from the event.
+// entity (a stuck dep_…) as well as from the event.
 function entityLogFields(event: OutboxEvent): Record<string, string> {
   switch (event.entityType) {
-    case 'payment':
-      return { payment_id: toTypeId('pay', event.entityId) };
+    case 'deposit':
+      return { deposit_id: toTypeId('dep', event.entityId) };
     case 'withdrawal':
       return { withdrawal_id: toTypeId('wd', event.entityId) };
   }

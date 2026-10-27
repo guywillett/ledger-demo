@@ -10,7 +10,7 @@ const databaseUrl =
   process.env.TEST_DATABASE_URL ??
   'postgres://ledger:ledger@localhost:5432/ledger_test?sslmode=disable';
 
-// Guard: tests create accounts and payments, so refuse anything but a *_test database.
+// Guard: tests create accounts and deposits, so refuse anything but a *_test database.
 const databaseName = new URL(databaseUrl).pathname.slice(1);
 if (!databaseName.endsWith('_test')) {
   throw new Error(
@@ -28,16 +28,16 @@ export const testEnv = {
 };
 
 // The tests that claim from the outbox (the relay's tests, and the outbox's own). Every other
-// test is independent of the rest: it creates its own accounts and payments and asserts only on
+// test is independent of the rest: it creates its own accounts and deposits and asserts only on
 // them, so files run in parallel. Claiming can't be scoped like that: it takes the oldest
-// unpublished events in the whole outbox, and every test that creates a payment leaves one
+// unpublished events in the whole outbox, and every test that creates a deposit leaves one
 // behind. These files therefore run last (groupOrder 1: after the "main" project has finished)
 // and one at a time, and their tests first drain the backlog (drainOutbox in test/helpers.ts),
 // so the events a test then creates are the only ones it can claim.
 const relayTests = [
   'test/relay/**/*.test.ts',
   'test/outbox/**/*.test.ts',
-  'test/api/payment-events.test.ts',
+  'test/api/deposit-events.test.ts',
 ];
 
 export default defineConfig({

@@ -1,14 +1,14 @@
 import type { Queryable, Tx } from '../shared/db.ts';
 import type { Uuid } from '../shared/ids.ts';
 
-// The payment lifecycle, shared by the modules that own its transitions:
+// The deposit lifecycle, shared by the modules that own its transitions:
 //   created -> received -> under_review -> approved -> credited
 //                                       \-> rejected -> returned
 // ingestion sets `created`; posting (ledger/) owns created -> received and the moves out of
 // approved / rejected; compliance (compliance/) owns received -> under_review -> decision.
-// Status names are part of the event contract (payment.<status>).
+// Status names are part of the event contract (deposit.<status>).
 
-export const PAYMENT_STATUSES = [
+export const DEPOSIT_STATUSES = [
   'created',
   'received',
   'under_review',
@@ -16,26 +16,26 @@ export const PAYMENT_STATUSES = [
   'rejected',
   'credited',
   'returned',
-  // Suspense: the payment matches none of our accounts. Outside the lifecycle above: ingestion
+  // Suspense: the deposit matches none of our accounts. Outside the lifecycle above: ingestion
   // creates it directly, no transition leads into it, and none leads out of it in this slice. A
   // terminal state until a resolution flow (match to an account, or return) exists.
   'unmatched',
 ] as const;
-export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
-// The statuses of a payment matched to an account: everything that books or reviews payments
+export type DepositStatus = (typeof DEPOSIT_STATUSES)[number];
+// The statuses of a deposit matched to an account: everything that books or reviews deposits
 // works with these, and never has to handle suspense.
-export type BookedStatus = Exclude<PaymentStatus, 'unmatched'>;
+export type BookedStatus = Exclude<DepositStatus, 'unmatched'>;
 
-export function parseStatus(value: string): PaymentStatus {
-  const status = PAYMENT_STATUSES.find((s) => s === value);
+export function parseStatus(value: string): DepositStatus {
+  const status = DEPOSIT_STATUSES.find((s) => s === value);
   if (status === undefined) {
-    throw new Error(`unknown payment status in database: ${value}`);
+    throw new Error(`unknown deposit status in database: ${value}`);
   }
   return status;
 }
 
 // 'applied' if this call made the transition; 'skipped' if it had already happened or the
-// payment is in another state.
+// deposit is in another state.
 export type TransitionResult = 'applied' | 'skipped';
 
 // The legal transitions, grouped by the module that owns them. transitionStatus accepts only
@@ -52,78 +52,78 @@ export type ComplianceTransition =
 
 export type Transition = PostingTransition | ComplianceTransition;
 
-// What a transition needs to know about the payment it moved, e.g. to post its movement.
-export type TransitionedPayment = {
+// What a transition needs to know about the deposit it moved, e.g. to post its movement.
+export type TransitionedDeposit = {
   readonly accountId: Uuid<'acct'>;
   readonly amountMinor: bigint;
 };
 
 const TRANSITION_SQL = `
-UPDATE incoming_payments
+UPDATE deposits
 SET status = $3, updated_at = now()
 WHERE id = $1 AND status = $2
 RETURNING account_id, amount_minor
 `;
 
 const HISTORY_SQL = `
-INSERT INTO payment_status_history (payment_id, from_status, to_status, reason)
+INSERT INTO deposit_status_history (deposit_id, from_status, to_status, reason)
 VALUES ($1, $2, $3, $4)
 `;
 
-// Moves a payment from `from` to `to` if, and only if, it is currently in `from`, and records
+// Moves a deposit from `from` to `to` if, and only if, it is currently in `from`, and records
 // the history row in the same transaction. Returns undefined when no row changed: the
-// transition already happened, or the payment is in another state (or doesn't exist). That
+// transition already happened, or the deposit is in another state (or doesn't exist). That
 // ambiguity is deliberate: it is what makes repeating a transition safe (no check-then-act).
 //
 // Postgres re-evaluates the WHERE after waiting for a concurrent transaction's row lock, so of
 // two concurrent callers exactly one sees its row change.
 export async function transitionStatus(
   tx: Tx,
-  t: { readonly paymentId: Uuid<'pay'>; readonly reason?: string } & Transition,
-): Promise<TransitionedPayment | undefined> {
+  t: { readonly depositId: Uuid<'dep'>; readonly reason?: string } & Transition,
+): Promise<TransitionedDeposit | undefined> {
   const result = await tx.query<{ account_id: string; amount_minor: bigint }>(TRANSITION_SQL, [
-    t.paymentId,
+    t.depositId,
     t.from,
     t.to,
   ]);
   const row = result.rows[0];
   if (row === undefined) return undefined;
-  await tx.query(HISTORY_SQL, [t.paymentId, t.from, t.to, t.reason ?? null]);
+  await tx.query(HISTORY_SQL, [t.depositId, t.from, t.to, t.reason ?? null]);
   return { accountId: row.account_id as Uuid<'acct'>, amountMinor: row.amount_minor };
 }
 
-// One row of a payment's status history.
+// One row of a deposit's status history.
 export type StatusChange = {
-  readonly from: PaymentStatus | null;
-  readonly to: PaymentStatus;
+  readonly from: DepositStatus | null;
+  readonly to: DepositStatus;
   readonly reason: string | null;
   readonly at: Date;
 };
 
 const HISTORY_OF_SQL = `
-SELECT payment_id, from_status, to_status, reason, at
-FROM payment_status_history
-WHERE payment_id = ANY($1)
-ORDER BY payment_id, id
+SELECT deposit_id, from_status, to_status, reason, at
+FROM deposit_status_history
+WHERE deposit_id = ANY($1)
+ORDER BY deposit_id, id
 `;
 
-// The status history of several payments in one query (not one query per payment), oldest
-// change first. Payments without history rows are absent from the map.
+// The status history of several deposits in one query (not one query per deposit), oldest
+// change first. Deposits without history rows are absent from the map.
 export async function statusHistories(
   db: Queryable,
-  paymentIds: readonly Uuid<'pay'>[],
-): Promise<Map<Uuid<'pay'>, StatusChange[]>> {
-  const histories = new Map<Uuid<'pay'>, StatusChange[]>();
-  if (paymentIds.length === 0) return histories;
+  depositIds: readonly Uuid<'dep'>[],
+): Promise<Map<Uuid<'dep'>, StatusChange[]>> {
+  const histories = new Map<Uuid<'dep'>, StatusChange[]>();
+  if (depositIds.length === 0) return histories;
   const result = await db.query<{
-    payment_id: string;
+    deposit_id: string;
     from_status: string | null;
     to_status: string;
     reason: string | null;
     at: Date;
-  }>(HISTORY_OF_SQL, [paymentIds]);
+  }>(HISTORY_OF_SQL, [depositIds]);
   for (const row of result.rows) {
-    const id = row.payment_id as Uuid<'pay'>;
+    const id = row.deposit_id as Uuid<'dep'>;
     const change: StatusChange = {
       from: row.from_status === null ? null : parseStatus(row.from_status),
       to: parseStatus(row.to_status),

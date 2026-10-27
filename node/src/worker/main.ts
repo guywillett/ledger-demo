@@ -5,7 +5,7 @@ import { CONSUMERS, STREAMS } from '../shared/nats.ts';
 import { loadWorkerConfig } from './config.ts';
 import { handleDelivery, type HandlerDeps } from './handler.ts';
 
-// Entry point: node src/worker/main.ts. Pulls payment.created messages from the durable
+// Entry point: node src/worker/main.ts. Pulls deposit.created messages from the durable
 // `worker` consumer (created by nats-setup from nats/consumers/) and handles up to
 // WORKER_CONCURRENCY of them at once. The process lifecycle (connect, pull loop, signals,
 // graceful shutdown, exit codes) is shared with the submitter: src/consumer/process.ts. Several
@@ -22,7 +22,7 @@ await runConsumerProcess({
   logLevel: config.logLevel,
   natsUrl: config.natsUrl,
   databaseUrl: config.databaseUrl,
-  stream: STREAMS.payments,
+  stream: STREAMS.deposits,
   consumer: CONSUMERS.worker,
   concurrency: config.concurrency,
   makeHandler: ({ pool, logger }) => {

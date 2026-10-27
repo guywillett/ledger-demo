@@ -52,7 +52,7 @@ CREATE TABLE withdrawals (
     UNIQUE (account_id, idempotency_key)
 );
 
--- For listing an account's withdrawals newest first (seek pagination on the ID, as payments).
+-- For listing an account's withdrawals newest first (seek pagination on the ID, as deposits).
 CREATE INDEX withdrawals_account_id_idx
     ON withdrawals (account_id, id DESC);
 
@@ -70,7 +70,7 @@ CREATE TABLE withdrawal_status_history (
 CREATE INDEX withdrawal_status_history_withdrawal_idx
     ON withdrawal_status_history (withdrawal_id);
 
--- Append-only, like payment_status_history (reject_audit_log_change() is in the schema
+-- Append-only, like deposit_status_history (reject_audit_log_change() is in the schema
 -- migration).
 CREATE TRIGGER withdrawal_status_history_append_only
     BEFORE UPDATE OR DELETE ON withdrawal_status_history
@@ -86,7 +86,7 @@ CREATE TRIGGER withdrawal_status_history_no_truncate
 -- existing rows under a SHARE UPDATE EXCLUSIVE lock that lets writes carry on.
 --
 -- balance_movements: the held bucket, and withdrawal references. The reference type and step
--- are checked as a pair (one CHECK instead of one per column), so a payment can't have a hold
+-- are checked as a pair (one CHECK instead of one per column), so a deposit can't have a hold
 -- step or a withdrawal a credit step. move()'s Movement type mirrors this pairing.
 ALTER TABLE balance_movements
     DROP CONSTRAINT balance_movements_from_bucket_check,
@@ -98,14 +98,14 @@ ALTER TABLE balance_movements
     ADD CONSTRAINT balance_movements_to_bucket_check
         CHECK (to_bucket IN ('external', 'pending_in', 'available', 'held')),
     ADD CONSTRAINT balance_movements_reference_check
-        CHECK ((reference_type = 'payment' AND reference_step IN ('book', 'credit', 'return'))
+        CHECK ((reference_type = 'deposit' AND reference_step IN ('book', 'credit', 'return'))
             OR (reference_type = 'withdrawal' AND reference_step IN ('hold', 'execute', 'release')));
 
 -- withdrawal.held goes through the outbox (enqueued from step 3 on).
 ALTER TABLE outbox
     DROP CONSTRAINT outbox_entity_type_check,
     ADD CONSTRAINT outbox_entity_type_check
-        CHECK (entity_type IN ('payment', 'withdrawal'));
+        CHECK (entity_type IN ('deposit', 'withdrawal'));
 
 -- migrate:down
 
@@ -115,7 +115,7 @@ ALTER TABLE outbox
 ALTER TABLE outbox
     DROP CONSTRAINT outbox_entity_type_check,
     ADD CONSTRAINT outbox_entity_type_check
-        CHECK (entity_type IN ('payment'));
+        CHECK (entity_type IN ('deposit'));
 
 ALTER TABLE balance_movements
     DROP CONSTRAINT balance_movements_from_bucket_check,
@@ -126,7 +126,7 @@ ALTER TABLE balance_movements
     ADD CONSTRAINT balance_movements_to_bucket_check
         CHECK (to_bucket IN ('external', 'pending_in', 'available')),
     ADD CONSTRAINT balance_movements_reference_type_check
-        CHECK (reference_type IN ('payment')),
+        CHECK (reference_type IN ('deposit')),
     ADD CONSTRAINT balance_movements_reference_step_check
         CHECK (reference_step IN ('book', 'credit', 'return'));
 

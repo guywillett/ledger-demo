@@ -27,7 +27,7 @@ import {
 } from '../helpers.ts';
 
 // The withdrawal lifecycle against the test database: hold, submit, execute, release. Each test
-// uses its own account, funded through a real payment (fundTestAccount).
+// uses its own account, funded through a real deposit (fundTestAccount).
 
 const pool = createTestPool();
 afterAll(() => pool.end());
@@ -468,12 +468,12 @@ describe('types', () => {
       providerTransferId: 'x',
     };
 
-    const payment = newUuid('pay');
+    const deposit = newUuid('dep');
     const withdrawal = newUuid('wd');
-    // @ts-expect-error a payment has no hold step
-    const paymentHold: MovementReference = {
-      referenceType: 'payment',
-      referenceId: payment,
+    // @ts-expect-error a deposit has no hold step
+    const depositHold: MovementReference = {
+      referenceType: 'deposit',
+      referenceId: deposit,
       referenceStep: 'hold',
     };
     // @ts-expect-error a withdrawal has no credit step
@@ -485,7 +485,7 @@ describe('types', () => {
     // @ts-expect-error a withdrawal reference needs a withdrawal's UUID
     const wrongId: MovementReference = {
       referenceType: 'withdrawal',
-      referenceId: payment,
+      referenceId: deposit,
       referenceStep: 'hold',
     };
 
@@ -495,7 +495,7 @@ describe('types', () => {
       backwards,
       noReason,
       resubmit,
-      paymentHold,
+      depositHold,
       withdrawalCredit,
       wrongId,
     ]).toHaveLength(7);

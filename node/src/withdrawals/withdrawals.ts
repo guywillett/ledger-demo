@@ -95,7 +95,7 @@ export type NewWithdrawal = {
 
 // One statement inserts the withdrawal in `held` and its first history row, or nothing when the
 // account already has a withdrawal with this idempotency key. Data-modifying CTEs always run to
-// completion, so `history` runs although nothing reads it (as for payments).
+// completion, so `history` runs although nothing reads it (as for deposits).
 const INSERT_SQL = `
 WITH inserted AS (
   INSERT INTO withdrawals (id, account_id, idempotency_key, amount_minor, currency,

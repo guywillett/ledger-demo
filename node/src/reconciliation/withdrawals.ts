@@ -13,7 +13,7 @@ import { sameSteps } from './steps.ts';
 // look at.
 
 // A withdrawal whose movements don't match its status (or movements for no withdrawal), as for
-// payments.
+// deposits.
 export type WithdrawalMismatch = {
   readonly withdrawalId: Uuid<'wd'>;
   readonly accountId: Uuid<'acct'>;
@@ -62,7 +62,7 @@ function expectedWithdrawalSteps(status: WithdrawalStatus): readonly string[] {
   }
 }
 
-// The same per withdrawal (the same memory shape as PAYMENT_STEPS_SQL: a row per withdrawal).
+// The same per withdrawal (the same memory shape as DEPOSIT_STEPS_SQL: a row per withdrawal).
 const WITHDRAWAL_STEPS_SQL = `
 SELECT w.id, w.account_id, w.status,
        COALESCE(array_agg(m.reference_step ORDER BY m.reference_step)
@@ -117,7 +117,7 @@ export async function checkWithdrawals(
   readonly stuckWithdrawals: StuckWithdrawal[];
   readonly transferUpdateProblems: TransferUpdateProblem[];
 }> {
-  // Scale: as for payments, every withdrawal at once; only mismatches are kept.
+  // Scale: as for deposits, every withdrawal at once; only mismatches are kept.
   const withdrawalSteps = await db.query<{
     id: string;
     account_id: string;

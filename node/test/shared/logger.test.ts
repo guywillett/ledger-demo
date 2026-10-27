@@ -7,12 +7,12 @@ describe('stringifyBigInts', () => {
     expect(
       stringifyBigInts({
         amount_minor: 9007199254740993n,
-        payment: { amount_minor: -5n, items: [1n, 'x', { n: 2n }] },
+        deposit: { amount_minor: -5n, items: [1n, 'x', { n: 2n }] },
         count: 3,
       }),
     ).toEqual({
       amount_minor: '9007199254740993',
-      payment: { amount_minor: '-5', items: ['1', 'x', { n: '2' }] },
+      deposit: { amount_minor: '-5', items: ['1', 'x', { n: '2' }] },
       count: 3,
     });
   });
@@ -85,13 +85,13 @@ describe('createLogger', () => {
     const { destination, lines } = capture();
     const logger = createLogger({ service: 'test', level: 'info' }, destination);
 
-    logger.child({ payment_id: 'pay_x' }).info({ amount_minor: 9007199254740993n }, 'probe');
+    logger.child({ deposit_id: 'dep_x' }).info({ amount_minor: 9007199254740993n }, 'probe');
 
     expect(lines()).toEqual([
       expect.objectContaining({
         level: 'info',
         service: 'test',
-        payment_id: 'pay_x',
+        deposit_id: 'dep_x',
         amount_minor: '9007199254740993',
         msg: 'probe',
       }),

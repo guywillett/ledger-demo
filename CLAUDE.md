@@ -1,6 +1,6 @@
 # ledger-demo
 
-Portfolio project: a small payment event-processing system (incoming payments, pseudo compliance review, ledger balances) built to demonstrate correctness under duplicates, retries, crashes and concurrency. Implemented first in Node.js/TypeScript, later in Go against the same database schema and contracts.
+Portfolio project: a small payment event-processing system (deposits with a pseudo compliance review, withdrawals sent to a provider, ledger balances) built to demonstrate correctness under duplicates, retries, crashes and concurrency. Implemented first in Node.js/TypeScript, later in Go against the same database schema and contracts.
 
 ## Specs
 
@@ -27,13 +27,13 @@ Portfolio project: a small payment event-processing system (incoming payments, p
 - **Result vocabularies:** conditional transitions return `'applied' | 'skipped'` (skipped: not in the expected state); idempotent inserts return `'applied' | 'duplicate'` (duplicate: already recorded). Name new results the same way.
 - **Balances** change only through `ledger/move()`, called by the ledger's posting functions. The API calls a posting function only inside its own request transaction, and only when the response depends on the outcome (slice 2 decision 25: holding a withdrawal's funds); everything else is posted asynchronously (the worker).
 - **Transactions:** callers own transaction boundaries via `withTransaction`; data-access functions never `BEGIN`/`COMMIT`. A function whose statements must be atomic together takes a `Tx` (branded: only `withTransaction` creates one); a single-statement function takes a `Queryable` (pool or `Tx`). Never call `withTransaction` inside another (that opens a second, independent transaction), and never wait on the network (NATS, HTTP) inside one.
-- **IDs:** UUIDv7 in `uuid` columns; TypeIDs (`typeid-js`, prefixes `acct`, `pay`, `wd`, `evt`, `mov`) outside the database. Convert only at boundaries. Never store IDs as text.
+- **IDs:** UUIDv7 in `uuid` columns; TypeIDs (`typeid-js`, prefixes `acct`, `dep`, `wd`, `evt`, `mov`) outside the database. Convert only at boundaries. Never store IDs as text.
 - **Money:** integer minor units: `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON (`"amount_minor": "1250"`). Never floats. Cast counts to `::int` in SQL. Any division goes through one helper with an explicit rounding mode. See `docs/decisions/0001-money-representation.md`.
 - **Validation:** Zod at every boundary (HTTP bodies, NATS messages).
 - **Status codes follow the caller** (slice 2 decision 38): the client API (top of `src/api/`) uses conventional REST codes; provider webhooks live under `src/api/webhooks/` at `/provider/…` and follow the webhook contract (`204` for anything recorded or deliberately handled, `400` only for an unusable body, `500` when a retry can help).
 - **Migrations:** plain SQL in `db/migrations/`, run by dbmate. Language-neutral (shared with Go later).
 - **Versions:** pin Docker image tags and dependency versions; commit lockfiles.
-- **Logging:** structured JSON with `request_id`, `payment_id`, `event_id` where relevant.
+- **Logging:** structured JSON with `request_id`, `deposit_id`, `event_id` where relevant.
 
 ## Running
 

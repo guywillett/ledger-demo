@@ -3,8 +3,8 @@
 [![CI](https://github.com/guywillett/ledger-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/guywillett/ledger-demo/actions/workflows/ci.yml)
 
 A small, simplified payment ledger built to show one thing: **money moves exactly once,
-whatever goes wrong.** Incoming payments are booked through a (pseudo) compliance review;
-client withdrawals are held, sent to a (fake) payment provider and settled from its webhooks.
+whatever goes wrong.** Deposits are booked through a (pseudo) compliance review; client
+withdrawals are held, sent to a (fake) payment provider and settled from its webhooks.
 Implemented in Node.js/TypeScript; a Go implementation against the same schema, contracts and
 demo is next.
 
@@ -30,16 +30,16 @@ conflicts, a worker killed mid-review, the submitter killed mid-transfer), then 
 books and fails if they don't agree. CI runs it on every push.
 
 ```text
-Incoming payments
+Deposits
 provider ──POST /provider/incoming-payments──► API ──► Postgres, one transaction:
-(webhook)                              payment `created` (no balance change)
-                                       + payment.created in the outbox
+(webhook)                              deposit `created` (no balance change)
+                                       + deposit.created in the outbox
                                        (unknown account: recorded in suspense, no event)
                                                │
                                      relay (any number of instances): claim, publish, mark
                                                │
                                                ▼
-                                 JetStream PAYMENTS: payment.created
+                                 JetStream DEPOSITS: deposit.created
                                                │
                                                ▼
                                  worker (any number of instances)
@@ -70,8 +70,8 @@ provider ──POST /provider/transfer-updates (webhook)──► API ──► 
 | Guarantee | How | Proved by |
 |---|---|---|
 | A repeated incoming payment notification changes nothing | `UNIQUE (network, network_transaction_id)` and one upsert statement: same details → a duplicate, counted | `test/api/incoming-payments.test.ts` ("records the same notification sent 5 times once…", "records 10 concurrent identical notifications once"); `scripts/demo.sh` steps 1–2 |
-| An incoming payment notification that can't be booked is recorded, never ignored | an unknown account goes into suspense (status `unmatched`: no account, no event, no movement; a retry stays a duplicate of it, resolution is never automatic); the same network ID with other details becomes a conflict record, the payment unchanged; both alerted and reported by reconciliation | `test/api/incoming-payments.test.ts` ("records a valid IBAN that is not ours as unmatched…", "keeps it unmatched after an account with that IBAN is created…", "records a different amount as a conflict…"); `scripts/demo.sh` steps 3–4 |
-| An event is never lost between commit and publish | the event is written to `outbox` in the same transaction as the state change; a relay publishes it at least once (claims leased with `FOR UPDATE SKIP LOCKED`, marked after the stream's acknowledgement); the stream drops a repeat by its `msg_id` | `test/api/payment-events.test.ts` and `test/api/withdrawals.test.ts` (one outbox row, same transaction); `test/outbox/outbox.test.ts` (rollback, leases, disjoint concurrent claims); `test/relay/relay.test.ts` ("publishes again after a relay crashed between publishing and marking, and the stream drops the repeat") |
+| An incoming payment notification that can't be booked is recorded, never ignored | an unknown account goes into suspense (status `unmatched`: no account, no event, no movement; a retry stays a duplicate of it, resolution is never automatic); the same network ID with other details becomes a conflict record, the deposit unchanged; both alerted and reported by reconciliation | `test/api/incoming-payments.test.ts` ("records a valid IBAN that is not ours as unmatched…", "keeps it unmatched after an account with that IBAN is created…", "records a different amount as a conflict…"); `scripts/demo.sh` steps 3–4 |
+| An event is never lost between commit and publish | the event is written to `outbox` in the same transaction as the state change; a relay publishes it at least once (claims leased with `FOR UPDATE SKIP LOCKED`, marked after the stream's acknowledgement); the stream drops a repeat by its `msg_id` | `test/api/deposit-events.test.ts` and `test/api/withdrawals.test.ts` (one outbox row, same transaction); `test/outbox/outbox.test.ts` (rollback, leases, disjoint concurrent claims); `test/relay/relay.test.ts` ("publishes again after a relay crashed between publishing and marking, and the stream drops the repeat") |
 | A repeated or concurrent event moves money once | every step is a conditional transition (`UPDATE … WHERE status = $expected`), never check-then-act | `test/worker/handler.test.ts` (same event twice, two consumers at once) |
 | A retried withdrawal request never takes money twice | the client's `Idempotency-Key` is unique per account on the withdrawal itself, so only a request that commits takes it (a `422`, `404` or crash leaves it free); a repeat returns the withdrawal's current state, a reused key with other details is a `409` | `test/api/withdrawals.test.ts` ("answers a repeated request with the same withdrawal…", "creates one withdrawal for 10 concurrent requests with one key", "refuses insufficient funds with 422, storing nothing, and the key stays free"); `scripts/demo.sh` steps 8–9 |
 | Insufficient funds is decided atomically with the hold | the hold is a `move(available → held)` in the request's own transaction, and the balance CHECK is the insufficient-funds check (no check-then-act), so concurrent withdrawals can't overspend | `test/ledger/withdrawals.test.ts` and `test/api/withdrawals.test.ts` ("lets exactly one of two concurrent withdrawals that together exceed available…"); `scripts/demo.sh` step 10 |
@@ -82,9 +82,9 @@ provider ──POST /provider/transfer-updates (webhook)──► API ──► 
 | Crash safety | each step commits on its own; a redelivery skips what's done, and a recorded decision is never re-made | `test/worker/handler.test.ts` (crash after booking, after deciding); `test/e2e/worker.e2e.ts` and `test/e2e/submitter.e2e.ts` (real `kill -9` mid-review, mid-call); `scripts/demo.sh` steps 5 and 13 |
 | Horizontal scaling | instances share one durable JetStream consumer; each fetches only as many messages as it has free slots; relays claim disjoint batches | `test/e2e/worker.e2e.ts` (two workers; long reviews never redelivered); `test/outbox/outbox.test.ts` ("gives two concurrent claims disjoint events (SKIP LOCKED)") |
 | The ledger protects itself | `move()` records each movement under `UNIQUE (reference_type, reference_id, reference_step)`; a reused reference with other details is refused; a reference's type and step are checked as a pair, in the database and in the `Movement` type | `test/ledger/move.test.ts`, `test/ledger/withdrawals.test.ts` |
-| Audit trail | `balance_movements`, `payment_status_history` and `withdrawal_status_history` are append-only, enforced by triggers | `test/ledger/move.test.ts`, `test/ledger/lifecycle.test.ts` |
+| Audit trail | `balance_movements`, `deposit_status_history` and `withdrawal_status_history` are append-only, enforced by triggers | `test/ledger/move.test.ts`, `test/ledger/lifecycle.test.ts` |
 | Exact money | integer minor units as `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON ([decision 0001](docs/decisions/0001-money-representation.md)) | amounts above 2^53 in the API, ledger, database and logging tests |
-| The books agree | reconciliation checks balances against payment and withdrawal statuses and against the movement journal; reports stuck payments, withdrawals and events, suspense and conflicts | `test/reconciliation/reconcile.test.ts`; the last test of each e2e file; `scripts/demo.sh` |
+| The books agree | reconciliation checks balances against deposit and withdrawal statuses and against the movement journal; reports stuck deposits, withdrawals and events, suspense and conflicts | `test/reconciliation/reconcile.test.ts`; the last test of each e2e file; `scripts/demo.sh` |
 | One contract for every implementation | hand-written `contracts/openapi.yaml` and `contracts/events/`; every test response and published event is checked against them | `test/contract.ts`, `test/shared/events.test.ts` |
 
 ## Design principles
@@ -113,7 +113,7 @@ With ten minutes to spare:
 | [`node/src/consumer/delivery-log.ts`](node/src/consumer/delivery-log.ts) | Redelivery for every consumer: record, then acknowledge; a message can't be settled twice. |
 | [`node/src/submitter/handler.ts`](node/src/submitter/handler.ts) | Calling a provider when the outcome can be unknown: the same key on every retry, never a guess. |
 | [`node/src/ingestion/transfer-updates.ts`](node/src/ingestion/transfer-updates.ts) | A provider result applied exactly once, even early, repeated or contradictory. |
-| [`node/src/reconciliation/`](node/src/reconciliation/) | Do the books agree? Balances against the movement journal against payment and withdrawal statuses. |
+| [`node/src/reconciliation/`](node/src/reconciliation/) | Do the books agree? Balances against the movement journal against deposit and withdrawal statuses. |
 | [`docs/slices/`](docs/slices/) | The specs: what each slice builds, its numbered decisions and why, and the known gaps. |
 
 ## Repository layout
@@ -133,24 +133,24 @@ docs/             slice specs with their decisions; decisions/ for cross-cutting
 
 ```sh
 docker compose up -d --build     # Postgres, NATS, migrations, stream setup, API, relay, worker, submitter, provider-sim
-scripts/demo.sh                  # payments: duplicates, conflicts, suspense, a killed worker, two workers;
+scripts/demo.sh                  # deposits: duplicates, conflicts, suspense, a killed worker, two workers;
                                  # withdrawals: repeats, insufficient funds, provider failures, a killed submitter; then reconciles
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance    # alice
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) does the same from a clean checkout on every push: `npm run check`, the stack built from scratch, the integration and e2e tests, then `scripts/demo.sh`.
 
-`scripts/demo.sh` exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (payments, withdrawals held or submitted, unpublished events). That last check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so it will work unchanged against the Go implementation. It takes about a minute.
+`scripts/demo.sh` exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (deposits, withdrawals held or submitted, unpublished events). That last check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so it will work unchanged against the Go implementation. It takes about a minute.
 
 ## Known gaps
 
 Deliberate, and described with their evolution path under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md) and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) specs. The most important:
 
-- **Security:** no HMAC signature check on the provider webhooks, no authentication on the client API, no rate limiting (beyond Fastify's 1 MiB body limit), NATS without credentials, and one database user for everything (append-only enforced by triggers rather than per-service roles). Nothing is encrypted in transit (Postgres with `sslmode=disable`, NATS without TLS) or at rest (the JetStream file store, the Postgres volume). Mitigated by design: events carry no personal data, and consumers act only on rows already in the database, through conditional transitions, so a forged event can't create a payment or move money; at most it starts idempotent processing that would happen anyway.
-- **A customer ledger, not a general ledger:** each movement moves an amount between buckets of one customer account (`external` for money entering or leaving), so the books explain customer balances but not the bank balance. There are no company-side accounts (bank, suspense, fees, treasury), and unmatched money is a payment status rather than a booking into a suspense account. In production: cash at the bank = customer balances + suspense + treasury, with each flow kept separate behind an intake table.
+- **Security:** no HMAC signature check on the provider webhooks, no authentication on the client API, no rate limiting (beyond Fastify's 1 MiB body limit), NATS without credentials, and one database user for everything (append-only enforced by triggers rather than per-service roles). Nothing is encrypted in transit (Postgres with `sslmode=disable`, NATS without TLS) or at rest (the JetStream file store, the Postgres volume). Mitigated by design: events carry no personal data, and consumers act only on rows already in the database, through conditional transitions, so a forged event can't create a deposit or move money; at most it starts idempotent processing that would happen anyway.
+- **A customer ledger, not a general ledger:** each movement moves an amount between buckets of one customer account (`external` for money entering or leaving), so the books explain customer balances but not the bank balance. There are no company-side accounts (bank, suspense, fees, treasury), and unmatched money is a deposit status rather than a booking into a suspense account. In production: cash at the bank = customer balances + suspense + treasury, with each flow kept separate behind an intake table.
 - **Webhooks are the fast path, not the guarantee:** a real integration also polls the provider (status checks for withdrawals still `submitted`, discovery of incoming payments) and reconciles against the daily statement. Webhooks are processed in the request; an inbox (store the raw payload, process separately) would suit heavy processing and audit, but isn't needed for correctness.
-- **No dead-letter handling:** a message that exhausts `max_deliver`, or that a consumer terminates, is only logged; reconciliation shows the payment or withdrawal as stuck.
-- **Observability:** structured JSON logs only (with `request_id`, `payment_id`, `event_id`); no metrics, tracing or alerting. Lines that need a person carry `alert: true`, where alerting would hook in.
+- **No dead-letter handling:** a message that exhausts `max_deliver`, or that a consumer terminates, is only logged; reconciliation shows the deposit or withdrawal as stuck.
+- **Observability:** structured JSON logs only (with `request_id`, `deposit_id`, `event_id`); no metrics, tracing or alerting. Lines that need a person carry `alert: true`, where alerting would hook in.
 - **One provider, one scheme, one currency:** the webhooks speak provider-sim's format; with several providers each gets an adapter under `src/api/webhooks/<provider>/` mapping onto the same provider-neutral ingestion functions. Validation is SEPA-specific (lengths, the basic character set, partly in database CHECKs; the SEPA country list in `node/src/shared/iban.ts` is not yet verified against the EPC's), and every amount is EUR.
 - **Housekeeping:** published outbox rows are kept (pruning or partitioning is the evolution); the relay polls, so an event can wait up to 1 s (`LISTEN/NOTIFY`); idempotency keys never expire (real APIs often expire them after 24 h).
 - **Simplifications:** approve/reject is random; one IBAN per account; no compliance checks on withdrawals; no health endpoint.

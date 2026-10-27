@@ -5,29 +5,29 @@ import {
   type ComplianceTransition,
   type TransitionResult,
   transitionStatus,
-} from '../payments/status.ts';
+} from '../deposits/status.ts';
 
 // Compliance: the transitions it owns. They record the review and its decision and never move
 // money; posting the decision (crediting or returning the funds) is the ledger's job
 // (ledger/posting.ts). How a decision is reached lives elsewhere in this module.
 
-// received -> under_review: compliance has picked the payment up.
-export function startReview(tx: Tx, paymentId: Uuid<'pay'>): Promise<TransitionResult> {
+// received -> under_review: compliance has picked the deposit up.
+export function startReview(tx: Tx, depositId: Uuid<'dep'>): Promise<TransitionResult> {
   const review: ComplianceTransition = { from: 'received', to: 'under_review' };
-  return applied(transitionStatus(tx, { paymentId, ...review }));
+  return applied(transitionStatus(tx, { depositId, ...review }));
 }
 
-// under_review -> approved | rejected. 'skipped' if the payment isn't under review, in
+// under_review -> approved | rejected. 'skipped' if the deposit isn't under review, in
 // particular if it has already been decided: a recorded decision is never re-made.
 export function decide(
   tx: Tx,
-  paymentId: Uuid<'pay'>,
+  depositId: Uuid<'dep'>,
   decision: Decision,
 ): Promise<TransitionResult> {
   const decided: ComplianceTransition = { from: 'under_review', to: decision.outcome };
   return applied(
     transitionStatus(tx, {
-      paymentId,
+      depositId,
       ...decided,
       ...(decision.reason === undefined ? {} : { reason: decision.reason }),
     }),

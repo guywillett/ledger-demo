@@ -3,7 +3,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { decide, startReview } from '../../src/compliance/transitions.ts';
 import type { Decision } from '../../src/compliance/decision.ts';
 import { recordNotification } from '../../src/ingestion/incoming-payments.ts';
-import { type Payment } from '../../src/payments/payments.ts';
+import { type Deposit } from '../../src/deposits/deposits.ts';
 import { move } from '../../src/ledger/move.ts';
 import { book, postDecision } from '../../src/ledger/posting.ts';
 import { execute, markSubmitted, release } from '../../src/ledger/withdrawals.ts';
@@ -13,7 +13,7 @@ import { withTransaction, type Tx } from '../../src/shared/db.ts';
 import { newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import {
   createTestAccount,
-  createTestPayment,
+  createTestDeposit,
   createTestPool,
   createTestWithdrawal,
   fundTestAccount,
@@ -54,24 +54,24 @@ async function inRolledBackTransaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T
   throw new Error('unreachable');
 }
 
-async function processPayment(payment: Payment, decision: Decision): Promise<void> {
-  await withTransaction(pool, (tx) => book(tx, payment.id));
-  await withTransaction(pool, (tx) => startReview(tx, payment.id));
-  await withTransaction(pool, (tx) => decide(tx, payment.id, decision));
-  await withTransaction(pool, (tx) => postDecision(tx, payment.id));
+async function processDeposit(deposit: Deposit, decision: Decision): Promise<void> {
+  await withTransaction(pool, (tx) => book(tx, deposit.id));
+  await withTransaction(pool, (tx) => startReview(tx, deposit.id));
+  await withTransaction(pool, (tx) => decide(tx, deposit.id, decision));
+  await withTransaction(pool, (tx) => postDecision(tx, deposit.id));
 }
 
-// An account with one payment in each kind of final and non-final state.
-async function busyAccount(): Promise<{ account: TestAccount; booked: Payment }> {
+// An account with one deposit in each kind of final and non-final state.
+async function busyAccount(): Promise<{ account: TestAccount; booked: Deposit }> {
   const account = await createTestAccount(pool);
-  await processPayment(await createTestPayment(pool, account, 100n), { outcome: 'approved' });
-  await processPayment(await createTestPayment(pool, account, 200n), {
+  await processDeposit(await createTestDeposit(pool, account, 100n), { outcome: 'approved' });
+  await processDeposit(await createTestDeposit(pool, account, 200n), {
     outcome: 'rejected',
     reason: 'test',
   });
-  const booked = await createTestPayment(pool, account, 300n);
+  const booked = await createTestDeposit(pool, account, 300n);
   await withTransaction(pool, (tx) => book(tx, booked.id));
-  await createTestPayment(pool, account, 400n); // still created
+  await createTestDeposit(pool, account, 400n); // still created
   return { account, booked };
 }
 
@@ -85,9 +85,9 @@ describe('reconcile', () => {
     const report = await check(pool, account);
     expect(report).toMatchObject({
       accountsChecked: 1,
-      paymentsChecked: 4,
+      depositsChecked: 4,
       differences: [],
-      mismatches: [],
+      depositMismatches: [],
       consistent: true,
     });
   });
@@ -110,7 +110,7 @@ describe('reconcile', () => {
         fromMovements: { pendingIn: 300n, available: 100n, held: 0n },
       },
     ]);
-    expect(report.mismatches).toEqual([]);
+    expect(report.depositMismatches).toEqual([]);
   });
 
   it('detects an account without a balance row', async () => {
@@ -134,19 +134,19 @@ describe('reconcile', () => {
   it('detects a status changed without its movement', async () => {
     const { account, booked } = await busyAccount();
     const report = await inRolledBackTransaction(async (tx) => {
-      await tx.query("UPDATE incoming_payments SET status = 'credited' WHERE id = $1", [booked.id]);
+      await tx.query("UPDATE deposits SET status = 'credited' WHERE id = $1", [booked.id]);
       return check(tx, account);
     });
     expect(report.consistent).toBe(false);
-    // Payments now say 300 is available; balance and movements still have it pending.
+    // Deposits now say 300 is available; balance and movements still have it pending.
     expect(report.differences[0]?.fromStatuses).toEqual({
       pendingIn: 0n,
       available: 400n,
       held: 0n,
     });
-    expect(report.mismatches).toEqual([
+    expect(report.depositMismatches).toEqual([
       expect.objectContaining({
-        paymentId: booked.id,
+        depositId: booked.id,
         status: 'credited',
         steps: ['book'],
         expectedSteps: ['book', 'credit'],
@@ -154,15 +154,15 @@ describe('reconcile', () => {
     ]);
   });
 
-  it('detects a movement for a payment that does not exist', async () => {
+  it('detects a movement for a deposit that does not exist', async () => {
     const { account } = await busyAccount();
-    const ghost = newUuid('pay');
+    const ghost = newUuid('dep');
     const report = await inRolledBackTransaction(async (tx) => {
-      // As a buggy writer would: a movement and its balance change, for no payment.
+      // As a buggy writer would: a movement and its balance change, for no deposit.
       await tx.query(
         `INSERT INTO balance_movements (id, account_id, from_bucket, to_bucket, amount_minor,
                                         reference_type, reference_id, reference_step)
-         VALUES ($1, $2, 'external', 'pending_in', 50, 'payment', $3, 'book')`,
+         VALUES ($1, $2, 'external', 'pending_in', 50, 'deposit', $3, 'book')`,
         [newUuid('mov'), account.id, ghost],
       );
       await tx.query(
@@ -172,14 +172,14 @@ describe('reconcile', () => {
       return check(tx, account);
     });
     expect(report.consistent).toBe(false);
-    // Balance and movements agree; only the payments disagree.
+    // Balance and movements agree; only the deposits disagree.
     expect(report.differences[0]).toMatchObject({
       balance: { pendingIn: 350n },
       fromMovements: { pendingIn: 350n },
       fromStatuses: { pendingIn: 300n },
     });
-    expect(report.mismatches).toEqual([
-      expect.objectContaining({ paymentId: ghost, status: null, steps: ['book'] }),
+    expect(report.depositMismatches).toEqual([
+      expect.objectContaining({ depositId: ghost, status: null, steps: ['book'] }),
     ]);
   });
 
@@ -190,36 +190,34 @@ describe('reconcile', () => {
       await tx.query(
         `INSERT INTO balance_movements (id, account_id, from_bucket, to_bucket, amount_minor,
                                         reference_type, reference_id, reference_step)
-         VALUES ($1, $2, 'pending_in', 'available', 300, 'payment', $3, 'credit')`,
+         VALUES ($1, $2, 'pending_in', 'available', 300, 'deposit', $3, 'credit')`,
         [newUuid('mov'), other.id, booked.id],
       );
       return check(tx, account);
     });
-    expect(report.mismatches).toEqual([
-      expect.objectContaining({ paymentId: booked.id, otherAccount: true }),
+    expect(report.depositMismatches).toEqual([
+      expect.objectContaining({ depositId: booked.id, otherAccount: true }),
     ]);
   });
 
   it('detects movements for the wrong amount, even when the account sums agree', async () => {
     const account = await createTestAccount(pool);
-    const first = await createTestPayment(pool, account, 100n);
-    const second = await createTestPayment(pool, account, 200n);
+    const first = await createTestDeposit(pool, account, 100n);
+    const second = await createTestDeposit(pool, account, 200n);
     const report = await inRolledBackTransaction(async (tx) => {
       // As a buggy writer would: each booked 10 off, in opposite directions, so the account's
-      // pending_in (300) agrees with its payments and its movements.
-      for (const [payment, amount] of [
+      // pending_in (300) agrees with its deposits and its movements.
+      for (const [deposit, amount] of [
         [first, 110],
         [second, 190],
       ] as const) {
         await tx.query(
           `INSERT INTO balance_movements (id, account_id, from_bucket, to_bucket, amount_minor,
                                           reference_type, reference_id, reference_step)
-           VALUES ($1, $2, 'external', 'pending_in', $3, 'payment', $4, 'book')`,
-          [newUuid('mov'), account.id, amount, payment.id],
+           VALUES ($1, $2, 'external', 'pending_in', $3, 'deposit', $4, 'book')`,
+          [newUuid('mov'), account.id, amount, deposit.id],
         );
-        await tx.query("UPDATE incoming_payments SET status = 'received' WHERE id = $1", [
-          payment.id,
-        ]);
+        await tx.query("UPDATE deposits SET status = 'received' WHERE id = $1", [deposit.id]);
       }
       await tx.query('UPDATE account_balances SET pending_in = 300 WHERE account_id = $1', [
         account.id,
@@ -229,11 +227,11 @@ describe('reconcile', () => {
     expect(report.differences).toEqual([]);
     expect(report.consistent).toBe(false);
     // In any order: the query doesn't sort.
-    expect(report.mismatches).toHaveLength(2);
-    expect(report.mismatches).toEqual(
+    expect(report.depositMismatches).toHaveLength(2);
+    expect(report.depositMismatches).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ paymentId: first.id, steps: ['book'], wrongAmount: true }),
-        expect.objectContaining({ paymentId: second.id, steps: ['book'], wrongAmount: true }),
+        expect.objectContaining({ depositId: first.id, steps: ['book'], wrongAmount: true }),
+        expect.objectContaining({ depositId: second.id, steps: ['book'], wrongAmount: true }),
       ]),
     );
   });
@@ -241,26 +239,26 @@ describe('reconcile', () => {
   // balance_movements can't be corrupted after the fact: its triggers reject UPDATE and DELETE
   // (test/ledger/move.test.ts), so the journal check needs no "edited movement" test.
 
-  it('reports payments stuck in a non-final status, and never final ones', async () => {
+  it('reports deposits stuck in a non-final status, and never final ones', async () => {
     const { account, booked } = await busyAccount();
     const report = await reconcile(pool, { accountIds: [account.id], stuckAfterMs: 0 });
-    const stuck = new Map(report.stuck.map((s) => [s.paymentId, s.status]));
+    const stuck = new Map(report.stuckDeposits.map((s) => [s.depositId, s.status]));
     expect(stuck.get(booked.id)).toBe('received');
     expect([...stuck.values()].sort()).toEqual(['created', 'received']);
-    // Stuck payments don't make the books inconsistent.
+    // Stuck deposits don't make the books inconsistent.
     expect(report.consistent).toBe(true);
 
-    expect((await check(pool, account)).stuck).toEqual([]);
+    expect((await check(pool, account)).stuckDeposits).toEqual([]);
   });
 
-  // Nothing relays in these tests, so every payment's event is still unpublished unless a test
+  // Nothing relays in these tests, so every deposit's event is still unpublished unless a test
   // changes that.
-  it('says which side stalled for a payment stuck in created', async () => {
+  it('says which side stalled for a deposit stuck in created', async () => {
     const account = await createTestAccount(pool);
-    const unpublished = await createTestPayment(pool, account, 100n);
-    const published = await createTestPayment(pool, account, 200n);
-    const missing = await createTestPayment(pool, account, 300n);
-    const booked = await createTestPayment(pool, account, 400n);
+    const unpublished = await createTestDeposit(pool, account, 100n);
+    const published = await createTestDeposit(pool, account, 200n);
+    const missing = await createTestDeposit(pool, account, 300n);
+    const booked = await createTestDeposit(pool, account, 400n);
     await withTransaction(pool, (tx) => book(tx, booked.id));
 
     const report = await inRolledBackTransaction(async (tx) => {
@@ -271,13 +269,13 @@ describe('reconcile', () => {
       return reconcile(tx, { accountIds: [account.id], stuckAfterMs: 0 });
     });
 
-    const events = new Map(report.stuck.map((s) => [s.paymentId, s.event]));
+    const events = new Map(report.stuckDeposits.map((s) => [s.depositId, s.event]));
     expect(events).toEqual(
       new Map([
         [unpublished.id, 'unpublished'],
         [published.id, 'published'],
         [missing.id, 'missing'],
-        // Only for created: a booked payment's event has evidently been delivered.
+        // Only for created: a booked deposit's event has evidently been delivered.
         [booked.id, null],
       ]),
     );
@@ -287,8 +285,8 @@ describe('reconcile', () => {
 
   it('reports unpublished events, counting only those older than the threshold as stuck', async () => {
     const account = await createTestAccount(pool);
-    const first = await createTestPayment(pool, account);
-    const second = await createTestPayment(pool, account);
+    const first = await createTestDeposit(pool, account);
+    const second = await createTestDeposit(pool, account);
 
     const stuck = await reconcile(pool, { accountIds: [account.id], stuckAfterMs: 0 });
     expect(stuck.outbox).toMatchObject({ stuckUnpublished: 2, maxUnpublishedAttempts: 0 });
@@ -367,41 +365,41 @@ describe('reconcile', () => {
     };
     const result = await withTransaction(pool, (tx) => recordNotification(tx, notification));
     expect(result.kind).toBe('unmatched');
-    const paymentId = result.kind === 'unmatched' ? result.payment.id : undefined;
+    const depositId = result.kind === 'unmatched' ? result.deposit.id : undefined;
 
     const whole = await reconcile(pool, NEVER_STUCK);
-    expect(whole.suspense?.payments).toContainEqual(
+    expect(whole.suspense?.deposits).toContainEqual(
       expect.objectContaining({
-        paymentId,
+        depositId,
         networkTransactionId: notification.networkTransactionId,
         amountMinor: 4321n,
       }),
     );
-    expect(whole.suspense?.count).toBe(whole.suspense?.payments.length);
-    expect(whole.mismatches.map((m) => m.paymentId)).not.toContain(paymentId);
+    expect(whole.suspense?.count).toBe(whole.suspense?.deposits.length);
+    expect(whole.depositMismatches.map((m) => m.depositId)).not.toContain(depositId);
 
-    // An account-scoped run doesn't look: an unmatched payment belongs to no account.
+    // An account-scoped run doesn't look: an unmatched deposit belongs to no account.
     const account = await createTestAccount(pool);
     expect((await check(pool, account)).suspense).toBeNull();
   });
 
   it('lists notification conflicts for the account, changing nothing in the books', async () => {
     const account = await createTestAccount(pool);
-    const payment = await createTestPayment(pool, account, 500n);
+    const deposit = await createTestDeposit(pool, account, 500n);
     const conflicting = {
       creditorIban: account.iban,
       providerAccountId: null,
       amountMinor: 501n,
       currency: 'EUR' as const,
       network: 'SEPA' as const,
-      networkTransactionId: payment.networkTransactionId,
+      networkTransactionId: deposit.networkTransactionId,
     };
     const result = await withTransaction(pool, (tx) => recordNotification(tx, conflicting));
     expect(result.kind).toBe('conflict');
 
     const report = await check(pool, account);
-    expect(report.paymentConflicts).toEqual([
-      expect.objectContaining({ paymentId: payment.id, differingFields: ['amount_minor'] }),
+    expect(report.depositConflicts).toEqual([
+      expect.objectContaining({ depositId: deposit.id, differingFields: ['amount_minor'] }),
     ]);
     expect(report.consistent).toBe(true);
   });
@@ -451,10 +449,10 @@ describe('reconcile: withdrawals', () => {
     const report = await check(pool, account);
     expect(report).toMatchObject({
       accountsChecked: 1,
-      paymentsChecked: 1,
+      depositsChecked: 1,
       withdrawalsChecked: 4,
       differences: [],
-      mismatches: [],
+      depositMismatches: [],
       withdrawalMismatches: [],
       consistent: true,
     });
@@ -570,7 +568,7 @@ describe('scripts/reconcile.ts', () => {
     const result = run(['--json', '--account', account.typeId]);
     exitCode(result).toBe(0);
     const report = JSON.parse(result.stdout) as Record<string, unknown>;
-    expect(report).toMatchObject({ consistent: true, accountsChecked: 1, paymentsChecked: 4 });
+    expect(report).toMatchObject({ consistent: true, accountsChecked: 1, depositsChecked: 4 });
   });
 
   it('exits 1 when the books disagree, naming the account', async () => {
@@ -585,7 +583,7 @@ describe('scripts/reconcile.ts', () => {
     expect(result.stdout).toContain(account.typeId);
   });
 
-  it('exits 2 for stuck payments only with --fail-on-stuck', async () => {
+  it('exits 2 for stuck deposits only with --fail-on-stuck', async () => {
     const { account } = await busyAccount();
     exitCode(run(['--account', account.typeId, '--stuck-after', '0'])).toBe(0);
     exitCode(run(['--account', account.typeId, '--stuck-after', '0', '--fail-on-stuck'])).toBe(2);
@@ -597,31 +595,31 @@ describe('scripts/reconcile.ts', () => {
     const withdrawal = await createTestWithdrawal(pool, account, 100n);
     const result = run(['--account', account.typeId, '--stuck-after', '0', '--fail-on-stuck']);
     exitCode(result).toBe(2);
-    expect(result.stdout).toContain('1 payments, 1 withdrawals: the books agree.');
+    expect(result.stdout).toContain('1 deposits, 1 withdrawals: the books agree.');
     expect(result.stdout).toContain('Stuck withdrawals (held or submitted for more than 0 min): 1');
     expect(result.stdout).toContain(toTypeId('wd', withdrawal.id));
   });
 
   it('exits 2 with --fail-on-stuck for an unpublished event alone, saying which side stalled', async () => {
-    // Every payment final, but their events never published (nothing relays in these tests).
+    // Every deposit final, but their events never published (nothing relays in these tests).
     const account = await createTestAccount(pool);
-    await processPayment(await createTestPayment(pool, account), { outcome: 'approved' });
+    await processDeposit(await createTestDeposit(pool, account), { outcome: 'approved' });
     const done = run(['--account', account.typeId, '--stuck-after', '0', '--fail-on-stuck']);
     exitCode(done).toBe(2);
     expect(done.stdout).toContain('Stuck (non-final for more than 0 min): 0');
     expect(done.stdout).toContain('Outbox: unpublished for more than 0 min: 1');
 
-    const waiting = await createTestPayment(pool, account);
+    const waiting = await createTestDeposit(pool, account);
     const result = run(['--account', account.typeId, '--stuck-after', '0']);
     exitCode(result).toBe(0);
     expect(result.stdout).toMatch(
       new RegExp(
-        `${toTypeId('pay', waiting.id)}\\s+created\\s+\\d+ min\\s+unpublished \\(relay\\)`,
+        `${toTypeId('dep', waiting.id)}\\s+created\\s+\\d+ min\\s+unpublished \\(relay\\)`,
       ),
     );
   });
 
-  it.each([[['--account', 'pay_bad']], [['--stuck-after', 'soon']], [['--unknown']]])(
+  it.each([[['--account', 'dep_bad']], [['--stuck-after', 'soon']], [['--unknown']]])(
     'exits 3 for bad arguments: %j',
     (args) => {
       const result = run(args);

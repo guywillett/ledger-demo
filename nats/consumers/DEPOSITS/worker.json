@@ -1,0 +1,10 @@
+{
+  "durable_name": "worker",
+  "description": "The worker: books, reviews and posts each deposit.created. Every worker instance reads from this one consumer; each message goes to one of them.",
+  "filter_subject": "deposit.created",
+  "ack_policy": "explicit",
+  "deliver_policy": "all",
+  "ack_wait": 10000000000,
+  "max_deliver": 100,
+  "max_ack_pending": 1000
+}

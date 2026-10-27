@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ledger-demo:event:payment.created:v1",
-  "title": "payment.created v1",
-  "description": "Published on subject payment.created when a payment enters status created: the provider's notification is recorded, nothing is booked yet. Nats-Msg-Id is <payment_id>.created (one per payment), so the stream drops repeated announcements within its duplicate window. Carries our IDs (TypeIDs) only, never provider identifiers. Consumers ignore unknown fields. Hand-written; shared by the Node and Go implementations.",
+  "$id": "urn:ledger-demo:event:deposit.created:v1",
+  "title": "deposit.created v1",
+  "description": "Published on subject deposit.created when a deposit enters status created: the provider's notification is recorded, nothing is booked yet. Nats-Msg-Id is <deposit_id>.created (one per deposit), so the stream drops repeated announcements within its duplicate window. Carries our IDs (TypeIDs) only, never provider identifiers. Consumers ignore unknown fields. Hand-written; shared by the Node and Go implementations.",
   "type": "object",
   "required": [
     "event_id",
     "event_type",
     "schema_version",
-    "payment_id",
+    "deposit_id",
     "network",
     "network_transaction_id",
     "account_id",
@@ -18,13 +18,13 @@
   ],
   "properties": {
     "event_id": {
-      "description": "Identifies this business event. A payment can be announced more than once (a re-announcement after a failed publish gets a new event_id); consumers are idempotent on the payment's state.",
+      "description": "Identifies this business event. A deposit can be announced more than once (a re-announcement after a failed publish gets a new event_id); consumers are idempotent on the deposit's state.",
       "type": "string",
       "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
     },
-    "event_type": { "const": "payment.created" },
+    "event_type": { "const": "deposit.created" },
     "schema_version": { "const": 1 },
-    "payment_id": { "type": "string", "pattern": "^pay_[0-7][0-9a-hjkmnp-tv-z]{25}$" },
+    "deposit_id": { "type": "string", "pattern": "^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$" },
     "network": { "const": "SEPA" },
     "network_transaction_id": { "type": "string", "minLength": 1, "maxLength": 255 },
     "account_id": { "type": "string", "pattern": "^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$" },
@@ -36,7 +36,7 @@
     },
     "currency": { "const": "EUR" },
     "occurred_at": {
-      "description": "When the payment entered status created.",
+      "description": "When the deposit entered status created.",
       "type": "string",
       "format": "date-time"
     }

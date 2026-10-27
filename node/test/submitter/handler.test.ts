@@ -351,7 +351,7 @@ describe('handleSubmission', () => {
 
   it.each([
     ['not JSON', 'not json'],
-    ['not a withdrawal.held event', JSON.stringify({ event_type: 'payment.created' })],
+    ['not a withdrawal.held event', JSON.stringify({ event_type: 'deposit.created' })],
   ])('terminates an invalid event (%s)', async (_case, body) => {
     const msg = message(body);
     expect(await handleSubmission(deps(fakeProvider(ACCEPTED)), msg)).toBe('invalid');

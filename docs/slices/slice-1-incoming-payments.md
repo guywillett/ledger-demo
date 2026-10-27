@@ -1,5 +1,7 @@
 # Slice 1 — Incoming payments with pseudo approval
 
+Since ADR 0002, payments are called deposits (and the worker the deposit-worker); this spec keeps the names it was written with.
+
 Status: done (Node.js / TypeScript); every item under *Done when* is met
 Implementation: Node.js / TypeScript (Go to follow in a later slice)
 

@@ -14,13 +14,13 @@ import { createLogger } from '../src/shared/logger.ts';
 // Reconciles the ledger: node scripts/reconcile.ts [options] (npm run reconcile).
 //
 //   --account acct_…     only this account (repeatable); default all accounts
-//   --stuck-after <min>  report payments and withdrawals in a non-final status, and events
+//   --stuck-after <min>  report deposits and withdrawals in a non-final status, and events
 //                        unpublished, for longer (default 10)
-//   --fail-on-stuck      exit 2 if any payment, withdrawal or event is stuck
+//   --fail-on-stuck      exit 2 if any deposit, withdrawal or event is stuck
 //   --json               print the report as JSON instead of a table
 //
 // Exit codes: 0 consistent; 1 the books disagree (any difference or mismatch); 2 consistent
-// but stuck payments, withdrawals or events and --fail-on-stuck; 3 couldn't run (bad arguments, database down).
+// but stuck deposits, withdrawals or events and --fail-on-stuck; 3 couldn't run (bad arguments, database down).
 // Reads DATABASE_URL (and LOG_LEVEL) like the services; no NATS needed.
 
 const EXIT = { consistent: 0, inconsistent: 1, stuck: 2, error: 3 } as const;
@@ -62,7 +62,7 @@ async function main(): Promise<number> {
     console.log(values.json ? toJson(report) : toText(report, stuckAfterMinutes));
     if (!report.consistent) return EXIT.inconsistent;
     const stuck =
-      report.stuck.length > 0 ||
+      report.stuckDeposits.length > 0 ||
       report.stuckWithdrawals.length > 0 ||
       report.outbox.stuckUnpublished > 0;
     if (values['fail-on-stuck'] && stuck) return EXIT.stuck;
@@ -91,14 +91,14 @@ function toJson(report: ReconcileReport): string {
         ...d,
         accountId: toTypeId('acct', d.accountId),
       })),
-      mismatches: report.mismatches.map((m) => ({
+      depositMismatches: report.depositMismatches.map((m) => ({
         ...m,
-        paymentId: toTypeId('pay', m.paymentId),
+        depositId: toTypeId('dep', m.depositId),
         accountId: toTypeId('acct', m.accountId),
       })),
-      stuck: report.stuck.map((s) => ({
+      stuckDeposits: report.stuckDeposits.map((s) => ({
         ...s,
-        paymentId: toTypeId('pay', s.paymentId),
+        depositId: toTypeId('dep', s.depositId),
         accountId: toTypeId('acct', s.accountId),
       })),
       withdrawalMismatches: report.withdrawalMismatches.map((m) => ({
@@ -116,14 +116,14 @@ function toJson(report: ReconcileReport): string {
           ? null
           : {
               ...report.suspense,
-              payments: report.suspense.payments.map((p) => ({
+              deposits: report.suspense.deposits.map((p) => ({
                 ...p,
-                paymentId: toTypeId('pay', p.paymentId),
+                depositId: toTypeId('dep', p.depositId),
               })),
             },
-      paymentConflicts: report.paymentConflicts.map((c) => ({
+      depositConflicts: report.depositConflicts.map((c) => ({
         ...c,
-        paymentId: toTypeId('pay', c.paymentId),
+        depositId: toTypeId('dep', c.depositId),
       })),
       transferUpdateProblems: report.transferUpdateProblems.map((p) => ({
         ...p,
@@ -138,7 +138,7 @@ function toJson(report: ReconcileReport): string {
 function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
   const lines: string[] = [];
   lines.push(
-    `Checked ${report.accountsChecked} accounts, ${report.paymentsChecked} payments, ` +
+    `Checked ${report.accountsChecked} accounts, ${report.depositsChecked} deposits, ` +
       `${report.withdrawalsChecked} withdrawals: ` +
       (report.consistent ? 'the books agree.' : 'THE BOOKS DISAGREE.'),
   );
@@ -162,14 +162,14 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
       ]),
     );
   }
-  if (report.mismatches.length > 0) {
-    lines.push('', 'Payments whose movements don’t match their status:');
+  if (report.depositMismatches.length > 0) {
+    lines.push('', 'Deposits whose movements don’t match their status:');
     lines.push(
       table([
-        ['payment', 'status', 'movements', 'expected', ''],
-        ...report.mismatches.map((m) => [
-          toTypeId('pay', m.paymentId),
-          m.status ?? '(no such payment)',
+        ['deposit', 'status', 'movements', 'expected', ''],
+        ...report.depositMismatches.map((m) => [
+          toTypeId('dep', m.depositId),
+          m.status ?? '(no such deposit)',
           m.steps.join(',') || '-',
           m.expectedSteps.join(',') || '-',
           [m.otherAccount ? 'posted to another account' : '', m.wrongAmount ? 'wrong amount' : '']
@@ -200,14 +200,14 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
 
   lines.push(
     '',
-    `Stuck (non-final for more than ${stuckAfterMinutes} min): ${report.stuck.length}`,
+    `Stuck (non-final for more than ${stuckAfterMinutes} min): ${report.stuckDeposits.length}`,
   );
-  if (report.stuck.length > 0) {
+  if (report.stuckDeposits.length > 0) {
     lines.push(
       table([
-        ['payment', 'status', 'for', 'payment.created'],
-        ...report.stuck.map((s) => [
-          toTypeId('pay', s.paymentId),
+        ['deposit', 'status', 'for', 'deposit.created'],
+        ...report.stuckDeposits.map((s) => [
+          toTypeId('dep', s.depositId),
           s.status,
           `${Math.round(s.ageSeconds / 60)} min`,
           s.event === null ? '' : EVENT_STATE[s.event],
@@ -238,12 +238,12 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
   if (suspense === null) {
     lines.push(
       '',
-      'Suspense: not checked (account-scoped run; unmatched payments have no account)',
+      'Suspense: not checked (account-scoped run; unmatched deposits have no account)',
     );
   } else {
     lines.push(
       '',
-      `Suspense (unmatched payments, all accounts): ${suspense.count}` +
+      `Suspense (unmatched deposits, all accounts): ${suspense.count}` +
         (suspense.count === 0
           ? ''
           : `, total ${suspense.totalMinor} minor units, oldest ${suspense.oldestAgeSeconds} s`),
@@ -251,9 +251,9 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
     if (suspense.count > 0) {
       lines.push(
         table([
-          ['payment', 'network transaction', 'amount', 'age'],
-          ...suspense.payments.map((p) => [
-            toTypeId('pay', p.paymentId),
+          ['deposit', 'network transaction', 'amount', 'age'],
+          ...suspense.deposits.map((p) => [
+            toTypeId('dep', p.depositId),
             p.networkTransactionId,
             p.amountMinor.toString(),
             `${p.ageSeconds} s`,
@@ -263,13 +263,13 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
     }
   }
 
-  lines.push('', `Payment notification conflicts: ${report.paymentConflicts.length}`);
-  if (report.paymentConflicts.length > 0) {
+  lines.push('', `Deposit notification conflicts: ${report.depositConflicts.length}`);
+  if (report.depositConflicts.length > 0) {
     lines.push(
       table([
-        ['payment', 'differing fields', 'received'],
-        ...report.paymentConflicts.map((c) => [
-          toTypeId('pay', c.paymentId),
+        ['deposit', 'differing fields', 'received'],
+        ...report.depositConflicts.map((c) => [
+          toTypeId('dep', c.depositId),
           c.differingFields.join(','),
           c.receivedAt.toISOString(),
         ]),
@@ -323,7 +323,7 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
   return lines.join('\n');
 }
 
-// Which side stalled, for a payment stuck in `created`.
+// Which side stalled, for a deposit stuck in `created`.
 const EVENT_STATE: Record<CreatedEventState, string> = {
   unpublished: 'unpublished (relay)',
   published: 'published (worker)',

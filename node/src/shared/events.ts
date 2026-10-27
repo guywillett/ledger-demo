@@ -7,7 +7,7 @@ import { amountMinorSchema, typeIdSchema } from './schemas.ts';
 // Events carry our IDs only (TypeIDs), never provider identifiers such as IBANs.
 
 export const SUBJECTS = {
-  paymentCreated: 'payment.created',
+  depositCreated: 'deposit.created',
   withdrawalHeld: 'withdrawal.held',
 } as const;
 
@@ -16,11 +16,11 @@ export const SUBJECTS = {
 //
 // z.object (not strictObject): consumers ignore unknown fields, so a producer can add optional
 // fields within a version.
-export const paymentCreatedV1Schema = z.object({
+export const depositCreatedV1Schema = z.object({
   event_id: typeIdSchema('evt'),
-  event_type: z.literal('payment.created'),
+  event_type: z.literal('deposit.created'),
   schema_version: z.literal(1),
-  payment_id: typeIdSchema('pay'),
+  deposit_id: typeIdSchema('dep'),
   network: z.literal('SEPA'),
   network_transaction_id: z.string().min(1).max(255),
   account_id: typeIdSchema('acct'),
@@ -30,9 +30,9 @@ export const paymentCreatedV1Schema = z.object({
 });
 
 // What goes on the wire (producers build this).
-export type PaymentCreatedV1Wire = z.input<typeof paymentCreatedV1Schema>;
+export type DepositCreatedV1Wire = z.input<typeof depositCreatedV1Schema>;
 // What a consumer works with after parsing.
-export type PaymentCreatedV1 = z.output<typeof paymentCreatedV1Schema>;
+export type DepositCreatedV1 = z.output<typeof depositCreatedV1Schema>;
 
 // withdrawal.held: a withdrawal was created and its funds held. Deliberately without the
 // destination IBAN, the creditor name or the remittance text: those are personal data, and a

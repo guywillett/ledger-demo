@@ -6,9 +6,9 @@ import type { Uuid } from '../shared/ids.ts';
 // publishes them. Nothing else publishes events.
 
 // What an event is about. A discriminated union, like move()'s MovementReference: entityType
-// decides which entity's UUID entityId is, so a payment event can't carry a withdrawal's ID.
+// decides which entity's UUID entityId is, so a deposit event can't carry a withdrawal's ID.
 export type OutboxEntity =
-  | { readonly entityType: 'payment'; readonly entityId: Uuid<'pay'> }
+  | { readonly entityType: 'deposit'; readonly entityId: Uuid<'dep'> }
   | { readonly entityType: 'withdrawal'; readonly entityId: Uuid<'wd'> };
 export type EntityType = OutboxEntity['entityType'];
 
@@ -120,8 +120,8 @@ export async function claim(
 // The column's CHECK allows only these.
 function entityFromRow(type: string, id: string): OutboxEntity {
   switch (type) {
-    case 'payment':
-      return { entityType: 'payment', entityId: id as Uuid<'pay'> };
+    case 'deposit':
+      return { entityType: 'deposit', entityId: id as Uuid<'dep'> };
     case 'withdrawal':
       return { entityType: 'withdrawal', entityId: id as Uuid<'wd'> };
     default:

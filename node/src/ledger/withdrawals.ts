@@ -15,7 +15,7 @@ import { moveOnce, OverdraftError, type Bucket, type WithdrawalStep } from './mo
 
 // Withdrawal postings: creating a withdrawal with its funds held, then executing or releasing
 // them when it settles. Each one changes the withdrawal and posts its movement in the caller's
-// transaction, so both happen or neither does. The payments' postings are in posting.ts.
+// transaction, so both happen or neither does. The deposits' postings are in posting.ts.
 
 // Not enough available funds for the withdrawal: a business outcome (the client asked for more
 // than the account holds), not a bug. Deliberately not an OverdraftError, which the worker

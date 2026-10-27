@@ -1,5 +1,7 @@
 # Slice 2 — Transactional outbox and withdrawals
 
+Since ADR 0002, payments are called deposits (and the worker the deposit-worker); this spec keeps the names it was written with.
+
 Status: done (Node.js / TypeScript); every item under *Done when* is met, except the tag, which follows the review and merge
 Implementation: Node.js / TypeScript (Go to follow in a later slice)
 Builds on: [slice 1](slice-1-incoming-payments.md). Its conventions, decisions and vocabulary hold unless this spec says otherwise.

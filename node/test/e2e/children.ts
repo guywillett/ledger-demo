@@ -64,7 +64,7 @@ export async function waitFor(
 const TEST_NATS_SERVER_NAME = 'ledger-demo-test';
 
 // Starts from an empty outbox backlog and empty test streams: the integration tests leave
-// unpublished events (every payment and withdrawal they create has one) and published ones,
+// unpublished events (every deposit and withdrawal they create has one) and published ones,
 // which would otherwise be the consumers' first backlog. The backlog is published, then purged
 // with the rest. Only the test NATS is touched.
 export async function cleanStart(pool: pg.Pool, nc: NatsConnection): Promise<void> {

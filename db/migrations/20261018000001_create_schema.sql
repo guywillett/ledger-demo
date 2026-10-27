@@ -5,11 +5,11 @@
 -- CHECK (uuid_extract_version(...) = 7) rejects any non-v7 UUID, whoever supplies it.
 --
 -- Primary key rule:
---   UUIDv7   for entities that may be referenced or exposed (accounts, payments, movements).
+--   UUIDv7   for entities that may be referenced or exposed (accounts, deposits, movements).
 --   bigserial for internal append-only logs that are never referenced or exposed
---             (payment_status_history, event_deliveries).
+--             (deposit_status_history, event_deliveries).
 -- updated_at is set explicitly by the application in each UPDATE (no triggers for it).
--- The audit logs (balance_movements, payment_status_history) are append-only, enforced by
+-- The audit logs (balance_movements, deposit_status_history) are append-only, enforced by
 -- triggers at the end of this file.
 
 CREATE TABLE accounts (
@@ -51,7 +51,7 @@ CREATE TRIGGER accounts_create_balance
     AFTER INSERT ON accounts
     FOR EACH ROW EXECUTE FUNCTION create_account_balance();
 
-CREATE TABLE incoming_payments (
+CREATE TABLE deposits (
     id                      uuid        PRIMARY KEY DEFAULT uuidv7()
         CHECK (uuid_extract_version(id) = 7),
     -- The IBAN credited, exactly as the provider sent it (normalised): the audit trail of
@@ -78,14 +78,14 @@ CREATE TABLE incoming_payments (
 );
 
 -- GET /accounts/:id/transactions: newest first, paginated by seeking on the ID. UUIDv7 IDs
--- sort by creation time, so the payment ID is both the order and the cursor
+-- sort by creation time, so the deposit ID is both the order and the cursor
 -- (WHERE account_id = $1 AND id < $before ORDER BY id DESC).
-CREATE INDEX incoming_payments_account_id_idx
-    ON incoming_payments (account_id, id DESC);
+CREATE INDEX deposits_account_id_idx
+    ON deposits (account_id, id DESC);
 
-CREATE TABLE payment_status_history (
+CREATE TABLE deposit_status_history (
     id           bigserial   PRIMARY KEY,
-    payment_id   uuid        NOT NULL REFERENCES incoming_payments (id),
+    deposit_id   uuid        NOT NULL REFERENCES deposits (id),
     from_status  text
         CHECK (from_status IN ('created', 'received', 'under_review', 'approved', 'rejected', 'credited', 'returned')),
     to_status    text        NOT NULL
@@ -94,11 +94,11 @@ CREATE TABLE payment_status_history (
     at           timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX payment_status_history_payment_idx
-    ON payment_status_history (payment_id);
+CREATE INDEX deposit_status_history_deposit_idx
+    ON deposit_status_history (deposit_id);
 
 -- Written only by ledger move(). reference_id is deliberately not a foreign key:
--- it is a generic business reference, so the ledger does not depend on payments.
+-- it is a generic business reference, so the ledger does not depend on deposits.
 -- reference_type says what kind of object reference_id is (and so its TypeID prefix).
 -- UUIDv7 PK (not bigserial): this becomes the double-entry transactions table, referenced
 -- by entries and exposed as an audit trail, so it is an entity rather than a log.
@@ -112,7 +112,7 @@ CREATE TABLE balance_movements (
         CHECK (to_bucket IN ('external', 'pending_in', 'available')),
     amount_minor    bigint      NOT NULL CHECK (amount_minor > 0),
     reference_type  text        NOT NULL
-        CHECK (reference_type IN ('payment')),
+        CHECK (reference_type IN ('deposit')),
     reference_id    uuid        NOT NULL
         CHECK (uuid_extract_version(reference_id) = 7),
     reference_step  text        NOT NULL
@@ -170,19 +170,19 @@ CREATE TRIGGER balance_movements_no_truncate
     BEFORE TRUNCATE ON balance_movements
     FOR EACH STATEMENT EXECUTE FUNCTION reject_audit_log_change();
 
-CREATE TRIGGER payment_status_history_append_only
-    BEFORE UPDATE OR DELETE ON payment_status_history
+CREATE TRIGGER deposit_status_history_append_only
+    BEFORE UPDATE OR DELETE ON deposit_status_history
     FOR EACH ROW EXECUTE FUNCTION reject_audit_log_change();
-CREATE TRIGGER payment_status_history_no_truncate
-    BEFORE TRUNCATE ON payment_status_history
+CREATE TRIGGER deposit_status_history_no_truncate
+    BEFORE TRUNCATE ON deposit_status_history
     FOR EACH STATEMENT EXECUTE FUNCTION reject_audit_log_change();
 
 -- migrate:down
 
 DROP TABLE event_deliveries;
 DROP TABLE balance_movements;
-DROP TABLE payment_status_history;
-DROP TABLE incoming_payments;
+DROP TABLE deposit_status_history;
+DROP TABLE deposits;
 DROP TABLE account_balances;
 DROP TABLE accounts;
 DROP FUNCTION create_account_balance();

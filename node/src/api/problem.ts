@@ -26,7 +26,7 @@ export type ValidationError = { readonly path: string; readonly message: string 
 export const problems = {
   invalidNotification: (errors: readonly ValidationError[]) => ({
     type: 'urn:ledger-demo:problem:invalid-notification',
-    title: 'Invalid payment notification',
+    title: 'Invalid deposit notification',
     status: 400,
     errors,
   }),

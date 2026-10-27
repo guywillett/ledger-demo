@@ -5,7 +5,7 @@ import { loadSharedConfig, natsEnvSchema, parseEnv, type SharedConfig } from '..
 const workerEnvSchema = natsEnvSchema.extend({
   // How long the pseudo compliance review takes.
   REVIEW_DELAY_MS: z.coerce.number().int().min(0).max(60_000).default(2000),
-  // Probability of approving a payment (the rest are rejected).
+  // Probability of approving a deposit (the rest are rejected).
   APPROVE_RATE: z.coerce.number().min(0).max(1).default(0.8),
   // How many messages one worker instance handles at once.
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(1000).default(10),

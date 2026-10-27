@@ -35,7 +35,7 @@ export type DeliveryContext = {
   readonly log: Logger;
   // The message, for working() during long steps.
   readonly message: DeliveredMessage;
-  // Adds fields (e.g. payment_id) to every later log line, the wrapper's own included.
+  // Adds fields (e.g. deposit_id) to every later log line, the wrapper's own included.
   bind(fields: Record<string, unknown>): void;
   // Done: record the outcome, then ack. If recording fails, the error propagates and the
   // wrapper retries the message, whose redelivery finds the work done.
@@ -49,7 +49,7 @@ export type DeliveryContext = {
 
 export type DeliveryLogOptions<S extends z.ZodType> = {
   readonly consumer: ConsumerName;
-  // For log lines and term reasons, e.g. 'payment.created'.
+  // For log lines and term reasons, e.g. 'deposit.created'.
   readonly eventType: string;
   readonly schema: S;
   readonly pool: pg.Pool;

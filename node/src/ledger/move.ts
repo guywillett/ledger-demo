@@ -6,18 +6,18 @@ import { newUuid, type Uuid } from '../shared/ids.ts';
 // caller's transaction. `external` is outside our books: money arriving or leaving.
 
 export type Bucket = 'external' | 'pending_in' | 'available' | 'held';
-export type PaymentStep = 'book' | 'credit' | 'return';
+export type DepositStep = 'book' | 'credit' | 'return';
 export type WithdrawalStep = 'hold' | 'execute' | 'release';
 
 // The business object causing a movement, and the step within it. A discriminated union that
 // mirrors the database's paired CHECK on (reference_type, reference_step): referenceType decides
-// which ID and which steps are allowed, so a payment reference with a withdrawal step (or a
+// which ID and which steps are allowed, so a deposit reference with a withdrawal step (or a
 // withdrawal's UUID) is a compile error.
 export type MovementReference =
   | {
-      readonly referenceType: 'payment';
-      readonly referenceId: Uuid<'pay'>;
-      readonly referenceStep: PaymentStep;
+      readonly referenceType: 'deposit';
+      readonly referenceId: Uuid<'dep'>;
+      readonly referenceStep: DepositStep;
     }
   | {
       readonly referenceType: 'withdrawal';

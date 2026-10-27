@@ -5,13 +5,13 @@
 #
 # The provider webhook answers 204 for every notification it handles (the webhook contract), so
 # steps 1-4 check the effect through the API's transactions list, not the status code:
-# 1. the same notification 5 times          -> one payment, notification_count 5
-# 2. 10 concurrent identical notifications  -> one payment
-# 3. the same network ID, another amount    -> recorded as a conflict, the payment unchanged
+# 1. the same notification 5 times          -> one deposit, notification_count 5
+# 2. 10 concurrent identical notifications  -> one deposit
+# 3. the same network ID, another amount    -> recorded as a conflict, the deposit unchanged
 # 4. a valid IBAN that isn't ours           -> recorded in suspense, in no account's list
-# 5. a burst of payments, with the worker killed (SIGKILL) mid-review and restarted
-# 6. a burst of payments shared by two workers
-# then waits until every payment has finished, funds carol, and runs withdrawals through the
+# 5. a burst of deposits, with the worker killed (SIGKILL) mid-review and restarted
+# 6. a burst of deposits shared by two workers
+# then waits until every deposit has finished, funds carol, and runs withdrawals through the
 # submitter and provider-sim (both in compose), checking each through the API and her balance:
 # 7. a withdrawal                              -> 201 with Location, ends executed
 # 8. the same request with the same key        -> 200, the same withdrawal, no second hold
@@ -20,19 +20,19 @@
 # 11. SIM FAIL (the provider fails it)          -> ends failed, funds back in available
 # 12. SIM EARLY (the result overtakes us)       -> ends executed, applied once
 # 13. SIM SLOW with the submitter killed mid-call and restarted -> ends executed, applied once
-# and finally reconciles: exit 0 only if the books agree and nothing is stuck (payments,
+# and finally reconciles: exit 0 only if the books agree and nothing is stuck (deposits,
 # withdrawals held or submitted, unpublished events).
 #
-# The final check covers the whole development database, not just this run: a payment left
+# The final check covers the whole development database, not just this run: a deposit left
 # unfinished earlier (an aborted run, a notification sent while the worker was down) fails it
 # too, and the reconciliation report lists it. For a clean slate: docker compose down -v.
 #
 # Uses only the HTTP API and docker compose (reconciliation runs in its own compose service,
 # which reads the shared database), so it works against any implementation of the contract.
-# Payments go to the demo accounts (alice, bob, carol) in the development database.
+# Deposits go to the demo accounts (alice, bob, carol) in the development database.
 #
 # Exit codes, as for reconciliation: 0 all good; 1 an expectation failed or the books disagree;
-# 2 payments still unfinished after the wait, or carol couldn't be funded; 3 couldn't run (the API
+# 2 deposits still unfinished after the wait, or carol couldn't be funded; 3 couldn't run (the API
 # isn't up).
 set -euo pipefail
 
@@ -61,10 +61,10 @@ post() {
     -H 'content-type: application/json' -d "$(body "$1" "$2" "$3")" || true
 }
 
-# payment <account> <network_transaction_id>: prints the payment's JSON from the account's
-# transactions list (the newest 200; a demo payment is always among them), or nothing. The API's
-# JSON has no spaces and a payment object no nested braces, so grep finds it (no jq needed).
-payment() {
+# deposit <account> <network_transaction_id>: prints the deposit's JSON from the account's
+# transactions list (the newest 200; a demo deposit is always among them), or nothing. The API's
+# JSON has no spaces and a deposit object no nested braces, so grep finds it (no jq needed).
+deposit() {
   curl -s "$API/accounts/$1/transactions?limit=200" |
     grep -o "{[^{}]*\"network_transaction_id\":\"$2\"[^{}]*}" || true
 }
@@ -115,9 +115,9 @@ wait_transfer_created() {
   return 1
 }
 
-# fund <account> <iban> <minimum>: posts payments of 2000 to the account, each waited on until
+# fund <account> <iban> <minimum>: posts deposits of 2000 to the account, each waited on until
 # the worker has settled it, until available reaches the minimum. The pseudo review rejects some
-# payments at random, so how many it takes varies; gives up (exit 2) after 20.
+# deposits at random, so how many it takes varies; gives up (exit 2) after 20.
 fund() {
   local i ntx deadline settled
   for i in $(seq 1 20); do
@@ -127,14 +127,14 @@ fund() {
     deadline=$((SECONDS + 30))
     settled=''
     while [ "$SECONDS" -lt "$deadline" ]; do
-      case "$(field "$(payment "$1" "$ntx")" status)" in credited | returned)
+      case "$(field "$(deposit "$1" "$ntx")" status)" in credited | returned)
         settled=yes
         break
         ;;
       esac
       sleep 1
     done
-    [ -n "$settled" ] || { echo "   payment $ntx did not settle within 30 s"; exit 2; }
+    [ -n "$settled" ] || { echo "   deposit $ntx did not settle within 30 s"; exit 2; }
   done
   [ "$(balance "$1" available)" -ge "$3" ] || { echo "   couldn't fund $1 to $3"; exit 2; }
 }
@@ -171,8 +171,8 @@ say "1. The same notification 5 times"
 codes=""
 for _ in 1 2 3 4 5; do codes="$codes $(post "$RUN-repeat" "$ALICE_IBAN" 1000)"; done
 expect "five 204s" " 204 204 204 204 204" "$codes"
-contains "all five counted on the one payment" '"notification_count":5' \
-  "$(payment "$ALICE" "$RUN-repeat")"
+contains "all five counted on the one deposit" '"notification_count":5' \
+  "$(deposit "$ALICE" "$RUN-repeat")"
 
 say "2. 10 concurrent identical notifications"
 tmp=$(mktemp -d)
@@ -182,30 +182,30 @@ wait
 handled=$(cat "$tmp"/* | grep -c '^204$' || true)
 rm -rf "$tmp"
 expect "ten 204s" 10 "$handled"
-concurrent=$(payment "$BOB" "$RUN-concurrent")
-expect "exactly one payment" 1 "$(printf '%s' "$concurrent" | grep -c 'network_transaction_id' || true)"
+concurrent=$(deposit "$BOB" "$RUN-concurrent")
+expect "exactly one deposit" 1 "$(printf '%s' "$concurrent" | grep -c 'network_transaction_id' || true)"
 contains "all ten counted on it" '"notification_count":10' "$concurrent"
 
 say "3. The same network ID with another amount"
 expect "recorded, not refused" 204 "$(post "$RUN-repeat" "$ALICE_IBAN" 9999)"
-# The conflict changed nothing: the payment keeps its amount and its count.
-after=$(payment "$ALICE" "$RUN-repeat")
+# The conflict changed nothing: the deposit keeps its amount and its count.
+after=$(deposit "$ALICE" "$RUN-repeat")
 contains "the stored amount is unchanged" '"amount_minor":"1000"' "$after"
 contains "the conflicting notification wasn't counted" '"notification_count":5' "$after"
 
 say "4. A valid IBAN that isn't one of our accounts"
 expect "recorded, not refused" 204 "$(post "$RUN-unknown" "$FOREIGN_IBAN" 500)"
 for account in "$ALICE" "$BOB" "$CAROL"; do
-  expect "not in $account's transactions" "" "$(payment "$account" "$RUN-unknown")"
+  expect "not in $account's transactions" "" "$(deposit "$account" "$RUN-unknown")"
 done
 # Recorded in suspense instead: the whole-database reconciliation report lists it.
 contains "listed in the reconciliation report's suspense section" "$RUN-unknown" \
   "$(reconcile --stuck-after 10 2>/dev/null || true)"
 
-say "5. A burst of payments while the worker is killed mid-review"
+say "5. A burst of deposits while the worker is killed mid-review"
 for i in $(seq 1 10); do post "$RUN-crash-$i" "$CAROL_IBAN" $((100 * i)) > /dev/null; done
 # Let the worker book them and start reviewing. The kill lands mid-review only because the
-# review takes REVIEW_DELAY_MS (2000 in compose): with a much shorter delay the payments would
+# review takes REVIEW_DELAY_MS (2000 in compose): with a much shorter delay the deposits would
 # finish first and this step would test nothing (the run would still pass).
 sleep 1
 docker compose kill -s SIGKILL worker > /dev/null 2>&1
@@ -214,18 +214,18 @@ sleep 2
 docker compose up -d worker > /dev/null 2>&1
 echo "   worker restarted"
 
-say "6. A burst of payments shared by two workers"
+say "6. A burst of deposits shared by two workers"
 # Back to one worker however the script ends (set -e can stop it anywhere from here).
 trap 'docker compose up -d --scale worker=1 worker > /dev/null 2>&1' EXIT
 docker compose up -d --scale worker=2 --no-recreate worker > /dev/null 2>&1
 for i in $(seq 1 20); do post "$RUN-scaled-$i" "$BOB_IBAN" $((10 * i)) > /dev/null; done
-echo "   20 payments posted to two workers"
+echo "   20 deposits posted to two workers"
 
-say "Waiting for every payment to finish (up to 120 s)"
+say "Waiting for every deposit to finish (up to 120 s)"
 deadline=$((SECONDS + 120))
 status=2
 while [ "$SECONDS" -lt "$deadline" ]; do
-  # 0: consistent and nothing stuck; 2: consistent but payments still in progress; 1: books disagree
+  # 0: consistent and nothing stuck; 2: consistent but deposits still in progress; 1: books disagree
   set +e
   reconcile --stuck-after 0 --fail-on-stuck > /dev/null 2>&1
   status=$?
@@ -234,7 +234,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   sleep 3
 done
 
-say "Funding carol for the withdrawals (payments of 2000 until available >= 10000)"
+say "Funding carol for the withdrawals (deposits of 2000 until available >= 10000)"
 fund "$CAROL" "$CAROL_IBAN" 10000
 echo "   carol's available: $(balance "$CAROL" available)"
 
@@ -324,7 +324,7 @@ if [ "$failures" -ne 0 ]; then
   echo; echo "$failures expectation(s) failed."; exit 1
 fi
 case "$status" in
-  0) echo; echo "Every payment and withdrawal finished and the books agree." ;;
-  2) echo; echo "Some payments or withdrawals did not finish within the wait."; exit 2 ;;
+  0) echo; echo "Every deposit and withdrawal finished and the books agree." ;;
+  2) echo; echo "Some deposits or withdrawals did not finish within the wait."; exit 2 ;;
   *) echo; echo "The books disagree."; exit 1 ;;
 esac

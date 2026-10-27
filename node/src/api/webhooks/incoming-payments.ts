@@ -8,14 +8,14 @@ import { notificationBodySchema, toNotification } from './schemas.ts';
 import type { App } from '../types.ts';
 
 // POST /provider/incoming-payments: the provider's notification of an incoming payment (its
-// webhook). A new payment and its payment.created event are stored in one transaction (the event
+// webhook). A new deposit and its deposit.created event are stored in one transaction (the event
 // in the outbox, published by the relay); this request never talks to NATS.
 //
 // The real webhook contract (slice 2 decisions 37-38, revising slice 1 decision 13): a provider
 // retries anything but a 2xx, so
 // - 204, no body, for everything recorded or deliberately handled: created, duplicate, unmatched
 //   (recorded in suspense: money can't be refused over HTTP) and conflict (recorded). No outcome
-//   in the response: the endpoint is no oracle for which accounts or payments exist.
+//   in the response: the endpoint is no oracle for which accounts or deposits exist.
 // - 400 only for a body that doesn't parse, an invalid IBAN included: if our validation is the
 //   problem (the SEPA country list isn't verified yet), the provider's retries deliver the
 //   notification once it's fixed.
@@ -27,7 +27,7 @@ export function registerIncomingPaymentRoutes(app: App, deps: { pool: pg.Pool })
     const parsed = notificationBodySchema.safeParse(request.body);
     if (!parsed.success) {
       const errors = validationErrors(parsed.error);
-      request.log.warn({ errors }, 'invalid payment notification');
+      request.log.warn({ errors }, 'invalid deposit notification');
       return sendProblem(reply, problems.invalidNotification(errors));
     }
 
@@ -42,54 +42,54 @@ export function registerIncomingPaymentRoutes(app: App, deps: { pool: pg.Pool })
 
     switch (result.kind) {
       case 'created': {
-        const log = request.log.child({ payment_id: toTypeId('pay', result.payment.id) });
+        const log = request.log.child({ deposit_id: toTypeId('dep', result.deposit.id) });
         log.info(
           {
             ...context,
             amount_minor: notification.amountMinor,
             event_id: toTypeId('evt', result.eventId),
           },
-          'payment created',
+          'deposit created',
         );
         break;
       }
       case 'duplicate': {
-        const log = request.log.child({ payment_id: toTypeId('pay', result.payment.id) });
+        const log = request.log.child({ deposit_id: toTypeId('dep', result.deposit.id) });
         log.info(
           {
             ...context,
             duplicate: true,
-            status: result.payment.status,
-            notification_count: result.payment.notificationCount,
+            status: result.deposit.status,
+            notification_count: result.deposit.notificationCount,
           },
-          'duplicate payment notification',
+          'duplicate deposit notification',
         );
         break;
       }
       case 'unmatched': {
-        const log = request.log.child({ payment_id: toTypeId('pay', result.payment.id) });
+        const log = request.log.child({ deposit_id: toTypeId('dep', result.deposit.id) });
         log.error(
           { ...context, alert: true, amount_minor: notification.amountMinor },
-          'payment notification matches none of our accounts; recorded in suspense',
+          'deposit notification matches none of our accounts; recorded in suspense',
         );
         break;
       }
       case 'conflict': {
-        const log = request.log.child({ payment_id: toTypeId('pay', result.stored.paymentId) });
+        const log = request.log.child({ deposit_id: toTypeId('dep', result.stored.depositId) });
         // Field names only, never the values (received or stored).
         log.error(
           { ...context, alert: true, differing_fields: result.differingFields },
-          'payment notification conflicts with the stored payment; recorded, nothing changed',
+          'deposit notification conflicts with the stored deposit; recorded, nothing changed',
         );
         break;
       }
       case 'inconsistent': {
         // Our bug or our data, not the provider's: 500, which also makes the provider retry, so
         // the problem keeps surfacing until someone looks.
-        const log = request.log.child({ payment_id: toTypeId('pay', result.stored.paymentId) });
+        const log = request.log.child({ deposit_id: toTypeId('dep', result.stored.depositId) });
         log.error(
           { ...context, alert: true },
-          'notification refused but no field differs from the stored payment: ' +
+          'notification refused but no field differs from the stored deposit: ' +
             'duplicate rule drift or a changed account IBAN',
         );
         return sendProblem(reply, problems.http(500));

@@ -23,8 +23,8 @@ FROM outbox o
 WHERE o.published_at IS NULL
   AND ($1::uuid[] IS NULL
        OR EXISTS (
-         SELECT 1 FROM incoming_payments p
-         WHERE o.entity_type = 'payment' AND p.id = o.entity_id AND p.account_id = ANY($1))
+         SELECT 1 FROM deposits p
+         WHERE o.entity_type = 'deposit' AND p.id = o.entity_id AND p.account_id = ANY($1))
        OR EXISTS (
          SELECT 1 FROM withdrawals w
          WHERE o.entity_type = 'withdrawal' AND w.id = o.entity_id AND w.account_id = ANY($1)))

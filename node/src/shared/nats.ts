@@ -7,14 +7,14 @@ export type { NatsConnection };
 
 // Streams are created by the nats-setup compose service from nats/streams/*.json, not by the
 // apps; see nats/setup.sh.
-export const STREAMS = { payments: 'PAYMENTS', withdrawals: 'WITHDRAWALS' } as const;
+export const STREAMS = { deposits: 'DEPOSITS', withdrawals: 'WITHDRAWALS' } as const;
 export type StreamName = (typeof STREAMS)[keyof typeof STREAMS];
 
 // The stream each subject is published to: one stream per entity, subjects <entity>.<status>.
 // An unknown subject is a bug (an event nobody routed); it throws, which the relay records as a
 // publish failure for that event.
 export function streamForSubject(subject: string): StreamName {
-  if (subject.startsWith('payment.')) return STREAMS.payments;
+  if (subject.startsWith('deposit.')) return STREAMS.deposits;
   if (subject.startsWith('withdrawal.')) return STREAMS.withdrawals;
   throw new Error(`no stream for subject ${subject}`);
 }

@@ -7,7 +7,7 @@ import { loadSharedConfig, natsEnvSchema, parseEnv } from '../src/shared/config.
 import { decide, startReview } from '../src/compliance/transitions.ts';
 import { recordNotification } from '../src/ingestion/incoming-payments.ts';
 import { book, postDecision } from '../src/ledger/posting.ts';
-import { type Payment } from '../src/payments/payments.ts';
+import { type Deposit } from '../src/deposits/deposits.ts';
 import { relayBatch, type RelayDeps } from '../src/relay/relay.ts';
 import { createPool, withTransaction } from '../src/shared/db.ts';
 import { parseIban, type Iban } from '../src/shared/iban.ts';
@@ -142,7 +142,7 @@ export function testRelayDeps(
 }
 
 // Publishes the outbox's backlog until a batch claims nothing: the unpublished events other test
-// files left behind (every created payment has one). Only for the tests that run last and one
+// files left behind (every created deposit has one). Only for the tests that run last and one
 // file at a time (the "relay" project in vitest.config.ts), so nothing else adds to the backlog
 // meanwhile. Events whose lease hasn't expired (e.g. backed off after a simulated failure) can't
 // be claimed and stay unpublished: tests assert only on their own events.
@@ -166,10 +166,10 @@ export type OutboxRow = {
   published_at: Date | null;
 };
 
-// The outbox rows for one payment or withdrawal.
+// The outbox rows for one deposit or withdrawal.
 export async function outboxRowsFor(
   pool: pg.Pool,
-  entityId: Uuid<'pay'> | Uuid<'wd'>,
+  entityId: Uuid<'dep'> | Uuid<'wd'>,
 ): Promise<OutboxRow[]> {
   const result = await pool.query<OutboxRow>(
     `SELECT id, entity_type, entity_id, subject, msg_id, payload, attempts, claimed_until,
@@ -190,8 +190,8 @@ export type JsonResponse = {
 // POSTs a notification to the incoming-payment webhook and checks the response against
 // contracts/openapi.yaml. A string payload is sent as-is (e.g. malformed JSON); anything else is
 // JSON-encoded. A handled notification gets 204 with no body (json is then {}): read what it did
-// from the database (paymentByNetworkId) or the transactions endpoint.
-export async function postPayment(
+// from the database (depositByNetworkId) or the transactions endpoint.
+export async function postIncomingPayment(
   app: App,
   payload: unknown,
   headers: Record<string, string> = {},
@@ -211,8 +211,8 @@ export async function postPayment(
   };
 }
 
-export type StoredPayment = {
-  id: Uuid<'pay'>;
+export type StoredDeposit = {
+  id: Uuid<'dep'>;
   account_id: Uuid<'acct'> | null;
   status: string;
   creditor_iban: string;
@@ -222,15 +222,15 @@ export type StoredPayment = {
   created_at: Date;
 };
 
-// The payment stored under a network transaction ID (SEPA), if any.
-export async function paymentByNetworkId(
+// The deposit stored under a network transaction ID (SEPA), if any.
+export async function depositByNetworkId(
   pool: pg.Pool,
   networkTransactionId: unknown,
-): Promise<StoredPayment | undefined> {
-  const result = await pool.query<StoredPayment>(
+): Promise<StoredDeposit | undefined> {
+  const result = await pool.query<StoredDeposit>(
     `SELECT id, account_id, status, creditor_iban, provider_account_id, amount_minor,
             notification_count, created_at
-     FROM incoming_payments WHERE network = 'SEPA' AND network_transaction_id = $1`,
+     FROM deposits WHERE network = 'SEPA' AND network_transaction_id = $1`,
     [networkTransactionId],
   );
   return result.rows[0];
@@ -314,10 +314,10 @@ export function refusingPool(stored: {
   amount_minor: bigint;
   currency: string;
 }): pg.Pool {
-  // The refused upsert, the stored payment, then (for a conflict) the conflict record.
+  // The refused upsert, the stored deposit, then (for a conflict) the conflict record.
   const responses = [
     { rows: [] },
-    { rows: [{ id: newUuid('pay'), ...stored }] },
+    { rows: [{ id: newUuid('dep'), ...stored }] },
     { rows: [], rowCount: 1 },
   ];
   const client = {
@@ -399,12 +399,12 @@ export async function createTestAccount(pool: pg.Pool): Promise<TestAccount> {
   return { id, typeId: toTypeId('acct', id), iban };
 }
 
-// A payment in status `created` for the account, recorded through ingestion (the real path).
-export async function createTestPayment(
+// A deposit in status `created` for the account, recorded through ingestion (the real path).
+export async function createTestDeposit(
   pool: pg.Pool,
   account: TestAccount,
   amountMinor = 1250n,
-): Promise<Payment> {
+): Promise<Deposit> {
   const notification = {
     creditorIban: account.iban,
     providerAccountId: null,
@@ -414,23 +414,23 @@ export async function createTestPayment(
     networkTransactionId: newNetworkTransactionId(),
   } as const;
   const result = await withTransaction(pool, (tx) => recordNotification(tx, notification));
-  if (result.kind !== 'created') throw new Error(`test payment not created: ${result.kind}`);
-  return result.payment;
+  if (result.kind !== 'created') throw new Error(`test deposit not created: ${result.kind}`);
+  return result.deposit;
 }
 
-// Puts `amountMinor` into the account's available balance the real way: a payment booked,
+// Puts `amountMinor` into the account's available balance the real way: a deposit booked,
 // reviewed, approved and credited. So the account stays consistent for reconciliation.
 export async function fundTestAccount(
   pool: pg.Pool,
   account: TestAccount,
   amountMinor: bigint,
-): Promise<Payment> {
-  const payment = await createTestPayment(pool, account, amountMinor);
-  await withTransaction(pool, (tx) => book(tx, payment.id));
-  await withTransaction(pool, (tx) => startReview(tx, payment.id));
-  await withTransaction(pool, (tx) => decide(tx, payment.id, { outcome: 'approved' }));
-  await withTransaction(pool, (tx) => postDecision(tx, payment.id));
-  return payment;
+): Promise<Deposit> {
+  const deposit = await createTestDeposit(pool, account, amountMinor);
+  await withTransaction(pool, (tx) => book(tx, deposit.id));
+  await withTransaction(pool, (tx) => startReview(tx, deposit.id));
+  await withTransaction(pool, (tx) => decide(tx, deposit.id, { outcome: 'approved' }));
+  await withTransaction(pool, (tx) => postDecision(tx, deposit.id));
+  return deposit;
 }
 
 // A withdrawal in `held` with its funds reserved and its withdrawal.held event in the outbox, as
@@ -470,10 +470,9 @@ export async function balancesOf(
   return { pendingIn: row.pending_in, available: row.available, held: row.held };
 }
 
-export async function statusOf(pool: pg.Pool, paymentId: Uuid<'pay'>): Promise<string> {
-  const result = await pool.query<{ status: string }>(
-    'SELECT status FROM incoming_payments WHERE id = $1',
-    [paymentId],
-  );
+export async function statusOf(pool: pg.Pool, depositId: Uuid<'dep'>): Promise<string> {
+  const result = await pool.query<{ status: string }>('SELECT status FROM deposits WHERE id = $1', [
+    depositId,
+  ]);
   return result.rows[0]?.status ?? 'missing';
 }

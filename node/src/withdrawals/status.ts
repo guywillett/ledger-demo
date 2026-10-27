@@ -10,7 +10,7 @@ import type { Uuid } from '../shared/ids.ts';
 // settlement postings (ledger/withdrawals.ts) own the moves to executed and failed, which are
 // final. Status names are part of the event contract (withdrawal.<status>).
 //
-// This mirrors payments/status.ts rather than sharing a generic transition function with it:
+// This mirrors deposits/status.ts rather than sharing a generic transition function with it:
 // one parameterised by table and column names would have to build its SQL from strings. Each
 // entity keeps its own fixed statements instead.
 
@@ -114,7 +114,7 @@ VALUES ($1, $2, $3, $4)
 // Moves a withdrawal to `to` if, and only if, it is currently in one of `from`, and records the
 // history row in the same transaction. undefined when no row changed: the transition already
 // happened, the withdrawal is in another state (e.g. already final), or it doesn't exist. As for
-// payments, that ambiguity is what makes repeating a transition safe, and of two concurrent
+// deposits, that ambiguity is what makes repeating a transition safe, and of two concurrent
 // callers exactly one sees its row change (Postgres re-checks the WHERE after the row lock).
 //
 // Throws TransferIdMismatchError, with nothing changed, if the transition reports a provider

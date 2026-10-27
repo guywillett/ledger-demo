@@ -33,7 +33,7 @@ ORDER BY consumer
 
 const DUPLICATE_NOTIFICATIONS_SQL = `
 SELECT COALESCE(sum(notification_count - 1), 0)::text AS n
-FROM incoming_payments
+FROM deposits
 WHERE $1::uuid[] IS NULL OR account_id = ANY($1)
 `;
 

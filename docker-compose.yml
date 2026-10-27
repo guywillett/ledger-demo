@@ -148,7 +148,7 @@ services:
       nats-setup:
         condition: service_completed_successfully
 
-  # Books, reviews and posts payments (src/worker/). Several instances can run at once
+  # Books, reviews and posts deposits (src/worker/). Several instances can run at once
   # (docker compose up -d --scale worker=3): they share the durable consumer, and each
   # message goes to one of them.
   worker:
