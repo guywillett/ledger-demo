@@ -111,7 +111,7 @@ ALTER TABLE outbox
 
 -- Restoring the old CHECKs fails if withdrawal rows remain in outbox or balance_movements, and
 -- balance_movements is append-only (its rows can't be deleted). On such a database, reset it
--- instead (see the README).
+-- instead (see docs/development.md, Reset).
 ALTER TABLE outbox
     DROP CONSTRAINT outbox_entity_type_check,
     ADD CONSTRAINT outbox_entity_type_check

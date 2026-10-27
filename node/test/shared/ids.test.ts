@@ -36,7 +36,7 @@ describe('ids', () => {
     toTypeId('pay', accountId);
   });
 
-  // The seed migration and README hard-code these pairs.
+  // The seed migration and docs/development.md, Demo accounts, hard-code these pairs.
   it.each([
     ['01a14c4e-e000-7f4f-896e-f8f54adff3bd', 'acct_01m564xr00fx7rjvqryn5dzwxx'],
     ['01a14c4e-e001-7331-bab2-75411dbbe55d', 'acct_01m564xr01ecrvnckn84evqsax'],

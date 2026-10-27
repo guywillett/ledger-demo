@@ -53,7 +53,7 @@ CREATE INDEX payment_notification_conflicts_payment_idx
 -- migrate:down
 
 -- Fails while unmatched payments exist: their history rows are append-only and can't be removed.
--- Reset the database instead (see the README).
+-- Reset the database instead (see docs/development.md, Reset).
 DROP TABLE payment_notification_conflicts;
 
 ALTER TABLE payment_status_history
