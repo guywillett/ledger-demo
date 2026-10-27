@@ -79,6 +79,21 @@ services:
       postgres:
         condition: service_healthy
 
+  # The same again for the Go tests' own database (ledger_go_test), so the Node and Go suites
+  # never share rows, e.g. unpublished outbox events (slice 3 decision 52).
+  migrate-go-test:
+    image: ghcr.io/amacneil/dbmate:2.36.0
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger_go_test?sslmode=disable
+      DBMATE_WAIT: "true"
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes:
+      - ./db:/db
+    command: ["up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # Applies the JetStream definitions in nats/ (streams and consumers) and exits, like migrate
   # does for the schema (see nats/setup.sh).
   nats-setup:

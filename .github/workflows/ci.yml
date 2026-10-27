@@ -76,3 +76,71 @@ jobs:
         if: failure()
         working-directory: .
         run: docker compose logs --no-color --timestamps
+
+  # The Go implementation (slice 3): format, vet, lint and its tests against its own test database
+  # (ledger_go_test). A separate job, so it runs alongside the Node job without sharing the test
+  # NATS with it (decision 52).
+  go:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # go.mod's go and toolchain lines pick the Go version, as .nvmrc does for Node.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      # gofmt -l lists the files it would change; any at all fails the job.
+      - name: Format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Not formatted with gofmt (run gofmt -w .):"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # The release binary of the version in .golangci-lint-version (the same file the local
+      # install reads).
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          working-directory: go
+          version-file: .golangci-lint-version
+
+      # Known vulnerabilities in the Go toolchain and the dependencies, reported only when our code
+      # can reach the vulnerable function (its default, symbol-level scan): then it exits non-zero
+      # and fails the job. It has no release binaries, so it is built with go install at the
+      # version in .govulncheck-version (the same file the local command reads).
+      - name: Vulnerabilities
+        run: |
+          go install "golang.org/x/vuln/cmd/govulncheck@$(cat .govulncheck-version)"
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+      # Only what the tests need so far: Postgres and the Go test database's migrations.
+      - name: Start the test database
+        working-directory: .
+        run: |
+          docker compose up -d postgres migrate-go-test
+          code=$(docker wait "$(docker compose ps -a -q migrate-go-test)")
+          if [ "$code" != "0" ]; then
+            echo "migrate-go-test exited with $code"
+            exit 1
+          fi
+
+      # -race: the race detector, which fails a test when two goroutines touch the same memory
+      # without synchronisation.
+      - name: Test
+        run: go test -race ./...
+
+      - name: Service logs
+        if: failure()
+        working-directory: .
+        run: docker compose logs --no-color --timestamps

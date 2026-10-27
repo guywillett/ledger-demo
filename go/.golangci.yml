@@ -1,0 +1,33 @@
+# golangci-lint v2 configuration. The version is pinned in .golangci-lint-version, read by both
+# CI (golangci-lint-action's version-file) and the local install command (docs/development.md),
+# so they can't drift apart.
+#
+# Installed as a release binary, the way golangci-lint's docs recommend, not with `go install`
+# or Go 1.24's `tool` directive in go.mod: both compile the linter with this module's Go version
+# and let its dependencies and ours change each other's versions, which its docs say "aren't
+# guaranteed to work". A binary is the exact build its authors tested.
+version: "2"
+
+linters:
+  # standard: errcheck (an unchecked error), govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    # An HTTP response body never closed leaks the connection (the provider client, step 7).
+    - bodyclose
+    # Errors compared with == or type-asserted instead of errors.Is / errors.As, which miss
+    # wrapped errors (fmt.Errorf with %w).
+    - errorlint
+    # A switch over an enum-like type must handle every value, as Node's
+    # switch-exhaustiveness-check requires: a new status flags every switch that misses it.
+    - exhaustive
+    # Returning nil after checking err != nil (or the reverse): an error silently dropped.
+    - nilerr
+    # An HTTP request or database call made without a context.Context, so it can't be
+    # cancelled at shutdown.
+    - noctx
+
+# gofmt only: the formatter `go fmt` runs, so the linter, CI and editors agree. No style
+# linters that would fight it.
+formatters:
+  enable:
+    - gofmt
