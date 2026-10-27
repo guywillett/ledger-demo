@@ -4,10 +4,10 @@ import {
   type PostingTransition,
   type TransitionResult,
   transitionStatus,
-} from '../payments/status.ts';
-import { moveOnce, type Bucket, type PaymentStep } from './move.ts';
+} from '../deposits/status.ts';
+import { moveOnce, type Bucket, type DepositStep } from './move.ts';
 
-// Posting: the transitions that move money. Each one changes the payment's status and posts
+// Posting: the transitions that move money. Each one changes the deposit's status and posts
 // its movement in the caller's transaction, so both happen or neither does. The compliance
 // transitions in between (review, decision) move no money and live in compliance/.
 
@@ -17,7 +17,7 @@ import { moveOnce, type Bucket, type PaymentStep } from './move.ts';
 // A posting step: one of posting's own status transitions, and the movement it posts.
 type PostingStep = {
   readonly status: PostingTransition;
-  readonly movement: { readonly from: Bucket; readonly to: Bucket; readonly step: PaymentStep };
+  readonly movement: { readonly from: Bucket; readonly to: Bucket; readonly step: DepositStep };
 };
 
 const BOOK: PostingStep = {
@@ -34,43 +34,43 @@ const RETURN: PostingStep = {
 };
 
 // created -> received: the funds are booked into pending_in.
-export function book(tx: Tx, paymentId: Uuid<'pay'>): Promise<TransitionResult> {
-  return post(tx, paymentId, BOOK);
+export function book(tx: Tx, depositId: Uuid<'dep'>): Promise<TransitionResult> {
+  return post(tx, depositId, BOOK);
 }
 
 // approved -> credited: pending_in -> available.
-export function credit(tx: Tx, paymentId: Uuid<'pay'>): Promise<TransitionResult> {
-  return post(tx, paymentId, CREDIT);
+export function credit(tx: Tx, depositId: Uuid<'dep'>): Promise<TransitionResult> {
+  return post(tx, depositId, CREDIT);
 }
 
 // rejected -> returned: pending_in -> external (returned to sender).
-export function returnToSender(tx: Tx, paymentId: Uuid<'pay'>): Promise<TransitionResult> {
-  return post(tx, paymentId, RETURN);
+export function returnToSender(tx: Tx, depositId: Uuid<'dep'>): Promise<TransitionResult> {
+  return post(tx, depositId, RETURN);
 }
 
-// Posts whatever compliance decided, reading the decision from the payment's recorded state:
+// Posts whatever compliance decided, reading the decision from the deposit's recorded state:
 // tries both conditional transitions, and at most one can match. 'skipped' if neither does
 // (not decided yet, or already posted).
 export async function postDecision(
   tx: Tx,
-  paymentId: Uuid<'pay'>,
+  depositId: Uuid<'dep'>,
 ): Promise<'credited' | 'returned' | 'skipped'> {
-  if ((await credit(tx, paymentId)) === 'applied') return 'credited';
-  if ((await returnToSender(tx, paymentId)) === 'applied') return 'returned';
+  if ((await credit(tx, depositId)) === 'applied') return 'credited';
+  if ((await returnToSender(tx, depositId)) === 'applied') return 'returned';
   return 'skipped';
 }
 
-async function post(tx: Tx, paymentId: Uuid<'pay'>, t: PostingStep): Promise<TransitionResult> {
-  const payment = await transitionStatus(tx, { paymentId, ...t.status });
-  if (payment === undefined) return 'skipped';
+async function post(tx: Tx, depositId: Uuid<'dep'>, t: PostingStep): Promise<TransitionResult> {
+  const deposit = await transitionStatus(tx, { depositId, ...t.status });
+  if (deposit === undefined) return 'skipped';
 
   await moveOnce(tx, {
-    accountId: payment.accountId,
+    accountId: deposit.accountId,
     from: t.movement.from,
     to: t.movement.to,
-    amountMinor: payment.amountMinor,
-    referenceType: 'payment',
-    referenceId: paymentId,
+    amountMinor: deposit.amountMinor,
+    referenceType: 'deposit',
+    referenceId: depositId,
     referenceStep: t.movement.step,
   });
   return 'applied';

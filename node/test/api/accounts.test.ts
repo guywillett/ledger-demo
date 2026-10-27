@@ -1,21 +1,21 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { decide, startReview } from '../../src/compliance/transitions.ts';
 import type { Decision } from '../../src/compliance/decision.ts';
-import type { Payment } from '../../src/payments/payments.ts';
+import type { Deposit } from '../../src/deposits/deposits.ts';
 import { book, postDecision } from '../../src/ledger/posting.ts';
 import { withTransaction } from '../../src/shared/db.ts';
 import { newUuid, toTypeId } from '../../src/shared/ids.ts';
 import {
   createTestAccount,
   createTestApp,
-  createTestPayment,
+  createTestDeposit,
   getJson,
   type TestAccount,
 } from '../helpers.ts';
 
-// GET /accounts/:id/balance and /transactions against the test database. Payments are put
-// through the lifecycle with the ledger and compliance functions directly (no worker needed).
-// Every response is checked against contracts/openapi.yaml by getJson.
+// GET /accounts/:id/balance and /transactions against the test database. Deposits are put through
+// the lifecycle with the ledger and compliance functions directly (no deposit-worker needed). Every
+// response is checked against contracts/openapi.yaml by getJson.
 
 const testApp = await createTestApp();
 const { app, pool } = testApp;
@@ -24,11 +24,11 @@ afterAll(testApp.close);
 const BALANCE = '/accounts/{account_id}/balance';
 const TRANSACTIONS = '/accounts/{account_id}/transactions';
 
-async function processPayment(payment: Payment, decision: Decision): Promise<void> {
-  await withTransaction(pool, (tx) => book(tx, payment.id));
-  await withTransaction(pool, (tx) => startReview(tx, payment.id));
-  await withTransaction(pool, (tx) => decide(tx, payment.id, decision));
-  await withTransaction(pool, (tx) => postDecision(tx, payment.id));
+async function processDeposit(deposit: Deposit, decision: Decision): Promise<void> {
+  await withTransaction(pool, (tx) => book(tx, deposit.id));
+  await withTransaction(pool, (tx) => startReview(tx, deposit.id));
+  await withTransaction(pool, (tx) => decide(tx, deposit.id, decision));
+  await withTransaction(pool, (tx) => postDecision(tx, deposit.id));
 }
 
 function balanceOf(account: TestAccount): Promise<Awaited<ReturnType<typeof getJson>>> {
@@ -50,21 +50,21 @@ describe('GET /accounts/:id/balance', () => {
 
   it('shows funds in pending_in once booked, then in available once credited', async () => {
     const account = await createTestAccount(pool);
-    const payment = await createTestPayment(pool, account);
+    const deposit = await createTestDeposit(pool, account);
 
-    await withTransaction(pool, (tx) => book(tx, payment.id));
+    await withTransaction(pool, (tx) => book(tx, deposit.id));
     expect((await balanceOf(account)).json).toMatchObject({ pending_in: '1250', available: '0' });
 
-    await withTransaction(pool, (tx) => startReview(tx, payment.id));
-    await withTransaction(pool, (tx) => decide(tx, payment.id, { outcome: 'approved' }));
-    await withTransaction(pool, (tx) => postDecision(tx, payment.id));
+    await withTransaction(pool, (tx) => startReview(tx, deposit.id));
+    await withTransaction(pool, (tx) => decide(tx, deposit.id, { outcome: 'approved' }));
+    await withTransaction(pool, (tx) => postDecision(tx, deposit.id));
     expect((await balanceOf(account)).json).toMatchObject({ pending_in: '0', available: '1250' });
   });
 
   it('keeps amounts beyond 2^53 exact', async () => {
     const account = await createTestAccount(pool);
-    const payment = await createTestPayment(pool, account, 9007199254740993n);
-    await withTransaction(pool, (tx) => book(tx, payment.id));
+    const deposit = await createTestDeposit(pool, account, 9007199254740993n);
+    await withTransaction(pool, (tx) => book(tx, deposit.id));
     expect((await balanceOf(account)).json.pending_in).toBe('9007199254740993');
   });
 
@@ -78,7 +78,7 @@ describe('GET /accounts/:id/balance', () => {
     expect(response.json.type).toBe('urn:ledger-demo:problem:account-not-found');
   });
 
-  it.each(['acct_garbage', toTypeId('pay', newUuid('pay')), 'alice'])(
+  it.each(['acct_garbage', toTypeId('dep', newUuid('dep')), 'alice'])(
     'answers 400 for account_id %s',
     async (id) => {
       const response = await getJson(app, `/accounts/${id}/balance`, BALANCE);
@@ -94,29 +94,29 @@ describe('GET /accounts/:id/balance', () => {
 });
 
 describe('GET /accounts/:id/transactions', () => {
-  it('lists only this account’s payments, newest first, with their current status', async () => {
+  it('lists only this account’s deposits, newest first, with their current status', async () => {
     const account = await createTestAccount(pool);
     const other = await createTestAccount(pool);
-    const first = await createTestPayment(pool, account, 100n);
-    await createTestPayment(pool, other, 999n);
-    const second = await createTestPayment(pool, account, 200n);
-    await processPayment(first, { outcome: 'approved' });
+    const first = await createTestDeposit(pool, account, 100n);
+    await createTestDeposit(pool, other, 999n);
+    const second = await createTestDeposit(pool, account, 200n);
+    await processDeposit(first, { outcome: 'approved' });
 
     const response = await getJson(app, `/accounts/${account.typeId}/transactions`, TRANSACTIONS);
     expect(response.statusCode).toBe(200);
-    const payments = response.json.payments as Record<string, unknown>[];
-    expect(payments.map((p) => [p.id, p.amount_minor, p.status])).toEqual([
-      [toTypeId('pay', second.id), '200', 'created'],
-      [toTypeId('pay', first.id), '100', 'credited'],
+    const deposits = response.json.deposits as Record<string, unknown>[];
+    expect(deposits.map((p) => [p.id, p.amount_minor, p.status])).toEqual([
+      [toTypeId('dep', second.id), '200', 'created'],
+      [toTypeId('dep', first.id), '100', 'credited'],
     ]);
-    expect(payments[0]).not.toHaveProperty('history');
+    expect(deposits[0]).not.toHaveProperty('history');
     expect(response.json.next_before).toBeNull();
   });
 
-  it('returns an empty page for an account without payments, and 404 for an unknown one', async () => {
+  it('returns an empty page for an account without deposits, and 404 for an unknown one', async () => {
     const account = await createTestAccount(pool);
     const empty = await getJson(app, `/accounts/${account.typeId}/transactions`, TRANSACTIONS);
-    expect(empty.json).toEqual({ payments: [], next_before: null });
+    expect(empty.json).toEqual({ deposits: [], next_before: null });
 
     const unknown = await getJson(
       app,
@@ -126,18 +126,18 @@ describe('GET /accounts/:id/transactions', () => {
     expect(unknown.statusCode).toBe(404);
   });
 
-  it('pages through the payments with limit and before', async () => {
+  it('pages through the deposits with limit and before', async () => {
     const account = await createTestAccount(pool);
-    const created: Payment[] = [];
-    for (let i = 0; i < 5; i++) created.push(await createTestPayment(pool, account));
-    const newestFirst = created.map((p) => toTypeId('pay', p.id)).reverse();
+    const created: Deposit[] = [];
+    for (let i = 0; i < 5; i++) created.push(await createTestDeposit(pool, account));
+    const newestFirst = created.map((p) => toTypeId('dep', p.id)).reverse();
 
     const seen: unknown[] = [];
     const cursors: unknown[] = [];
     let url = `/accounts/${account.typeId}/transactions?limit=2`;
     for (;;) {
       const page = await getJson(app, url, TRANSACTIONS);
-      seen.push(...(page.json.payments as { id: string }[]).map((p) => p.id));
+      seen.push(...(page.json.deposits as { id: string }[]).map((p) => p.id));
       const next = page.json.next_before;
       cursors.push(next);
       if (typeof next !== 'string') break; // null on the last page
@@ -149,10 +149,10 @@ describe('GET /accounts/:id/transactions', () => {
 
   it('includes the status history with include=history', async () => {
     const account = await createTestAccount(pool);
-    const approved = await createTestPayment(pool, account);
-    const rejected = await createTestPayment(pool, account);
-    await processPayment(approved, { outcome: 'approved' });
-    await processPayment(rejected, { outcome: 'rejected', reason: 'sanctions screening hit' });
+    const approved = await createTestDeposit(pool, account);
+    const rejected = await createTestDeposit(pool, account);
+    await processDeposit(approved, { outcome: 'approved' });
+    await processDeposit(rejected, { outcome: 'rejected', reason: 'sanctions screening hit' });
 
     const response = await getJson(
       app,
@@ -160,13 +160,13 @@ describe('GET /accounts/:id/transactions', () => {
       TRANSACTIONS,
     );
     const byId = new Map(
-      (response.json.payments as { id: string; history: Record<string, unknown>[] }[]).map((p) => [
+      (response.json.deposits as { id: string; history: Record<string, unknown>[] }[]).map((p) => [
         p.id,
         p.history,
       ]),
     );
     expect(
-      byId.get(toTypeId('pay', approved.id))?.map((h) => [h.from_status, h.to_status]),
+      byId.get(toTypeId('dep', approved.id))?.map((h) => [h.from_status, h.to_status]),
     ).toEqual([
       [null, 'created'],
       ['created', 'received'],
@@ -174,7 +174,7 @@ describe('GET /accounts/:id/transactions', () => {
       ['under_review', 'approved'],
       ['approved', 'credited'],
     ]);
-    expect(byId.get(toTypeId('pay', rejected.id))?.[3]).toMatchObject({
+    expect(byId.get(toTypeId('dep', rejected.id))?.[3]).toMatchObject({
       from_status: 'under_review',
       to_status: 'rejected',
       reason: 'sanctions screening hit',

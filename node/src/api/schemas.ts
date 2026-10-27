@@ -7,15 +7,15 @@ import {
   sepaTextSchema,
   typeIdSchema,
 } from '../shared/schemas.ts';
-import type { Payment } from '../payments/payments.ts';
+import type { Deposit } from '../deposits/deposits.ts';
 import type { Balance } from '../ledger/balances.ts';
-import type { PaymentStatus, StatusChange } from '../payments/status.ts';
+import type { DepositStatus, StatusChange } from '../deposits/status.ts';
 import type { WithdrawalStatus, WithdrawalStatusChange } from '../withdrawals/status.ts';
 import type { NewWithdrawal, Withdrawal } from '../withdrawals/withdrawals.ts';
 import type { Uuid } from '../shared/ids.ts';
 
-export type PaymentResponse = {
-  readonly id: TypeIdString<'pay'>;
+export type DepositResponse = {
+  readonly id: TypeIdString<'dep'>;
   readonly account_id: TypeIdString<'acct'>;
   readonly creditor_iban: string;
   readonly provider_account_id: string | null;
@@ -23,7 +23,7 @@ export type PaymentResponse = {
   readonly currency: 'EUR';
   readonly network: 'SEPA';
   readonly network_transaction_id: string;
-  readonly status: PaymentStatus;
+  readonly status: DepositStatus;
   readonly notification_count: number;
   readonly created_at: string;
   readonly updated_at: string;
@@ -31,20 +31,20 @@ export type PaymentResponse = {
 
 // Explicit mapping to the wire format: TypeIDs instead of UUIDs, amounts as digit strings
 // (JSON.stringify would throw on a BigInt), ISO 8601 timestamps.
-export function toPaymentResponse(payment: Payment): PaymentResponse {
+export function toDepositResponse(deposit: Deposit): DepositResponse {
   return {
-    id: toTypeId('pay', payment.id),
-    account_id: toTypeId('acct', payment.accountId),
-    creditor_iban: payment.creditorIban,
-    provider_account_id: payment.providerAccountId,
-    amount_minor: payment.amountMinor.toString(),
-    currency: payment.currency,
-    network: payment.network,
-    network_transaction_id: payment.networkTransactionId,
-    status: payment.status,
-    notification_count: payment.notificationCount,
-    created_at: payment.createdAt.toISOString(),
-    updated_at: payment.updatedAt.toISOString(),
+    id: toTypeId('dep', deposit.id),
+    account_id: toTypeId('acct', deposit.accountId),
+    creditor_iban: deposit.creditorIban,
+    provider_account_id: deposit.providerAccountId,
+    amount_minor: deposit.amountMinor.toString(),
+    currency: deposit.currency,
+    network: deposit.network,
+    network_transaction_id: deposit.networkTransactionId,
+    status: deposit.status,
+    notification_count: deposit.notificationCount,
+    created_at: deposit.createdAt.toISOString(),
+    updated_at: deposit.updatedAt.toISOString(),
   };
 }
 
@@ -55,7 +55,7 @@ export const accountParamsSchema = z.object({ account_id: typeIdSchema('acct') }
 export const transactionsQuerySchema = z.object({
   include: z.literal('history').optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
-  before: typeIdSchema('pay').optional(),
+  before: typeIdSchema('dep').optional(),
 });
 
 export type BalanceResponse = {
@@ -75,19 +75,19 @@ export function toBalanceResponse(balance: Balance): BalanceResponse {
 }
 
 export type StatusChangeResponse = {
-  readonly from_status: PaymentStatus | null;
-  readonly to_status: PaymentStatus;
+  readonly from_status: DepositStatus | null;
+  readonly to_status: DepositStatus;
   readonly reason: string | null;
   readonly at: string;
 };
 
-export type TransactionResponse = PaymentResponse & {
+export type TransactionResponse = DepositResponse & {
   readonly history?: readonly StatusChangeResponse[];
 };
 
 export type TransactionListResponse = {
-  readonly payments: readonly TransactionResponse[];
-  readonly next_before: TypeIdString<'pay'> | null;
+  readonly deposits: readonly TransactionResponse[];
+  readonly next_before: TypeIdString<'dep'> | null;
 };
 
 export function toStatusChangeResponse(change: StatusChange): StatusChangeResponse {
@@ -149,7 +149,7 @@ export type WithdrawalStatusChangeResponse = {
   readonly at: string;
 };
 
-// No provider_transfer_id: provider identifiers stay at the edge, as for payments' events.
+// No provider_transfer_id: provider identifiers stay at the edge, as for deposits' events.
 export type WithdrawalResponse = {
   readonly id: TypeIdString<'wd'>;
   readonly account_id: TypeIdString<'acct'>;

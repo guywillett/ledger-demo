@@ -291,7 +291,7 @@ describe('handleSubmission', () => {
     expect((await getWithdrawal(pool, withdrawal.id))?.providerTransferId).toBe('tr_A');
   });
 
-  it('terminates a ledger invariant violation with an alert, as the worker does', async () => {
+  it('terminates a ledger invariant violation with an alert, as the deposit-worker does', async () => {
     // A release movement already exists for a withdrawal still held: the two guards disagree,
     // so release() throws LedgerInconsistencyError. Retrying can't fix it.
     const { withdrawal, body } = await heldWithdrawal();
@@ -351,7 +351,7 @@ describe('handleSubmission', () => {
 
   it.each([
     ['not JSON', 'not json'],
-    ['not a withdrawal.held event', JSON.stringify({ event_type: 'payment.created' })],
+    ['not a withdrawal.held event', JSON.stringify({ event_type: 'deposit.created' })],
   ])('terminates an invalid event (%s)', async (_case, body) => {
     const msg = message(body);
     expect(await handleSubmission(deps(fakeProvider(ACCEPTED)), msg)).toBe('invalid');

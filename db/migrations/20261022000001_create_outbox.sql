@@ -10,9 +10,9 @@ CREATE TABLE outbox (
     id             uuid        PRIMARY KEY
         CHECK (uuid_extract_version(id) = 7),
     -- What the event is about, mirroring balance_movements.reference_type/id: reconciliation
-    -- joins outbox rows to payments here, without parsing TypeIDs out of the payload.
+    -- joins outbox rows to deposits here, without parsing TypeIDs out of the payload.
     entity_type    text        NOT NULL
-        CHECK (entity_type IN ('payment')),
+        CHECK (entity_type IN ('deposit')),
     entity_id      uuid        NOT NULL
         CHECK (uuid_extract_version(entity_id) = 7),
     subject        text        NOT NULL,

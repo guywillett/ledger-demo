@@ -5,15 +5,15 @@ import { readFileSync } from 'node:fs';
 import { claim, enqueue } from '../../src/outbox/outbox.ts';
 import { withTransaction } from '../../src/shared/db.ts';
 import { relayBatch } from '../../src/relay/relay.ts';
-import { paymentCreatedV1Schema } from '../../src/shared/events.ts';
+import { depositCreatedV1Schema } from '../../src/shared/events.ts';
 import { newUuid, toTypeId } from '../../src/shared/ids.ts';
 import { STREAMS } from '../../src/shared/nats.ts';
-import type { Payment } from '../../src/payments/payments.ts';
+import type { Deposit } from '../../src/deposits/deposits.ts';
 import {
   capturingLogger,
   connectTestNats,
   createTestAccount,
-  createTestPayment,
+  createTestDeposit,
   createTestPool,
   createTestWithdrawal,
   drainOutbox,
@@ -41,15 +41,15 @@ afterAll(async () => {
   await pool.end();
 });
 
-async function newPayment(): Promise<Payment> {
-  return createTestPayment(pool, await createTestAccount(pool));
+async function newDeposit(): Promise<Deposit> {
+  return createTestDeposit(pool, await createTestAccount(pool));
 }
 
-const msgIdOf = (payment: Payment): string => `${toTypeId('pay', payment.id)}.created`;
+const msgIdOf = (deposit: Deposit): string => `${toTypeId('dep', deposit.id)}.created`;
 
 describe('relayBatch', () => {
   it('publishes each event with its msg_id as Nats-Msg-Id, and marks it published', async () => {
-    const payments = [await newPayment(), await newPayment()];
+    const deposits = [await newDeposit(), await newDeposit()];
     const { publisher, published } = recordingPublisher(streamPublisher);
     const { logger, lines } = capturingLogger();
 
@@ -60,53 +60,53 @@ describe('relayBatch', () => {
     expect(acknowledged).toBe(claimed);
 
     const jsm = await jetstreamManager(nc);
-    for (const payment of payments) {
-      const [row] = await outboxRowsFor(pool, payment.id);
+    for (const deposit of deposits) {
+      const [row] = await outboxRowsFor(pool, deposit.id);
       expect(row).toMatchObject({ attempts: 1, last_error: null, claimed_until: null });
       expect(row?.published_at).toBeInstanceOf(Date);
 
-      const ours = published.filter((p) => p.msgId === msgIdOf(payment));
+      const ours = published.filter((p) => p.msgId === msgIdOf(deposit));
       expect(ours).toHaveLength(1);
-      expect(ours[0]?.subject).toBe('payment.created');
+      expect(ours[0]?.subject).toBe('deposit.created');
       expect(ours[0]?.result.duplicate).toBe(false);
 
       // Read it back from the stream: what consumers will actually get.
-      const stored = await jsm.streams.getMessage(STREAMS.payments, {
+      const stored = await jsm.streams.getMessage(STREAMS.deposits, {
         seq: ours[0]?.result.seq ?? 0,
       });
-      expect(stored?.header.get('Nats-Msg-Id')).toBe(msgIdOf(payment));
+      expect(stored?.header.get('Nats-Msg-Id')).toBe(msgIdOf(deposit));
       const decoded = stored?.json<Record<string, unknown>>();
       // The outbox row's ID is the event_id.
       expect(decoded?.event_id).toBe(row && toTypeId('evt', row.id));
       expect(decoded).toEqual(row?.payload);
-      expect(paymentCreatedV1Schema.safeParse(decoded).success).toBe(true);
+      expect(depositCreatedV1Schema.safeParse(decoded).success).toBe(true);
     }
 
-    // In id order: the earlier payment's event first.
-    const order = published.map((p) => p.msgId).filter((id) => payments.map(msgIdOf).includes(id));
-    expect(order).toEqual(payments.map(msgIdOf));
+    // In id order: the earlier deposit's event first.
+    const order = published.map((p) => p.msgId).filter((id) => deposits.map(msgIdOf).includes(id));
+    expect(order).toEqual(deposits.map(msgIdOf));
 
     const logged = lines().filter((l) => l.msg === 'event published');
     expect(logged.length).toBe(claimed);
-    const firstPayment = payments[0] && toTypeId('pay', payments[0].id);
-    const first = logged.find((l) => l.payment_id === firstPayment);
+    const firstDeposit = deposits[0] && toTypeId('dep', deposits[0].id);
+    const first = logged.find((l) => l.deposit_id === firstDeposit);
     expect(first).toMatchObject({
       level: 'info',
       event_id: expect.stringMatching(/^evt_/),
-      subject: 'payment.created',
+      subject: 'deposit.created',
     });
     expect(first).not.toHaveProperty('stream_duplicate');
   });
 
   it('records a failure, leaves the event unpublished, and publishes it after the retry delay', async () => {
-    const payment = await newPayment();
+    const deposit = await newDeposit();
     const { logger, lines } = capturingLogger();
 
     const failed = await relayBatch(
       testRelayDeps(pool, failingPublisher, { logger, retryDelay: () => 300 }),
     );
     expect(failed.published).toBe(0);
-    let [row] = await outboxRowsFor(pool, payment.id);
+    let [row] = await outboxRowsFor(pool, deposit.id);
     expect(row).toMatchObject({
       attempts: 1,
       last_error: 'simulated publish failure',
@@ -117,31 +117,31 @@ describe('relayBatch', () => {
       level: 'warn',
       attempts: 1,
       retry_in_ms: 300,
-      payment_id: toTypeId('pay', payment.id),
+      deposit_id: toTypeId('dep', deposit.id),
     });
     expect(failure?.event_id).toMatch(/^evt_/);
 
     // Backed off: a batch straight away doesn't touch it.
     const { publisher, published } = recordingPublisher(streamPublisher);
     await relayBatch(testRelayDeps(pool, publisher));
-    expect(published.filter((p) => p.msgId === msgIdOf(payment))).toEqual([]);
+    expect(published.filter((p) => p.msgId === msgIdOf(deposit))).toEqual([]);
 
     // After the delay, the next batch publishes it: the second attempt.
     await sleep(400);
     await relayBatch(testRelayDeps(pool, publisher));
-    expect(published.filter((p) => p.msgId === msgIdOf(payment))).toHaveLength(1);
-    [row] = await outboxRowsFor(pool, payment.id);
+    expect(published.filter((p) => p.msgId === msgIdOf(deposit))).toHaveLength(1);
+    [row] = await outboxRowsFor(pool, deposit.id);
     expect(row).toMatchObject({ attempts: 2, last_error: null });
     expect(row?.published_at).toBeInstanceOf(Date);
   });
 
   it('publishes again after a relay crashed between publishing and marking, and the stream drops the repeat', async () => {
-    const payment = await newPayment();
+    const deposit = await newDeposit();
 
     // The "crashed" relay: claims with a short lease and publishes, but never marks.
     const claimed = await claim(pool, { limit: 100, leaseMs: 300 });
-    const event = claimed.find((e) => e.msgId === msgIdOf(payment));
-    if (event === undefined) throw new Error('the payment’s event was not claimed');
+    const event = claimed.find((e) => e.msgId === msgIdOf(deposit));
+    if (event === undefined) throw new Error('the deposit’s event was not claimed');
     const first = await streamPublisher.publish(event.subject, event.payload, event.msgId);
     expect(first.duplicate).toBe(false);
 
@@ -161,7 +161,7 @@ describe('relayBatch', () => {
     // The same event, with the same event_id: it is the outbox row, not rebuilt.
     expect(again[0]?.event).toEqual(event.payload);
 
-    const [row] = await outboxRowsFor(pool, payment.id);
+    const [row] = await outboxRowsFor(pool, deposit.id);
     expect(row).toMatchObject({ attempts: 2, last_error: null });
     expect(row?.published_at).toBeInstanceOf(Date);
     expect(lines().find((l) => l.msg === 'event published')).toMatchObject({
@@ -172,20 +172,20 @@ describe('relayBatch', () => {
 });
 
 describe('relay routing', () => {
-  it('publishes each event to its own stream: payment.created to PAYMENTS, withdrawal.held to WITHDRAWALS', async () => {
+  it('publishes each event to its own stream: deposit.created to DEPOSITS, withdrawal.held to WITHDRAWALS', async () => {
     const account = await createTestAccount(pool);
-    const payment = await fundTestAccount(pool, account, 1000n);
+    const deposit = await fundTestAccount(pool, account, 1000n);
     const withdrawal = await createTestWithdrawal(pool, account, 400n);
     const { publisher, published } = recordingPublisher(streamPublisher);
     const { logger, lines } = capturingLogger();
 
     await relayBatch(testRelayDeps(pool, publisher, { logger }));
 
-    const paymentEvent = published.find((p) => p.msgId === msgIdOf(payment));
+    const depositEvent = published.find((p) => p.msgId === msgIdOf(deposit));
     const withdrawalEvent = published.find(
       (p) => p.msgId === `${toTypeId('wd', withdrawal.id)}.held`,
     );
-    expect(paymentEvent?.result.stream).toBe(STREAMS.payments);
+    expect(depositEvent?.result.stream).toBe(STREAMS.deposits);
     expect(withdrawalEvent?.result.stream).toBe(STREAMS.withdrawals);
     expect(withdrawalEvent?.subject).toBe('withdrawal.held');
 
@@ -206,20 +206,20 @@ describe('relay routing', () => {
 
   it('records an event with an unknown subject as a publish failure', async () => {
     const id = newUuid('evt');
-    const paymentId = newUuid('pay');
+    const depositId = newUuid('dep');
     await withTransaction(pool, (tx) =>
       enqueue(tx, {
         id,
-        entityType: 'payment',
-        entityId: paymentId,
+        entityType: 'deposit',
+        entityId: depositId,
         subject: 'refund.created',
-        msgId: `${toTypeId('pay', paymentId)}.refunded`,
+        msgId: `${toTypeId('dep', depositId)}.refunded`,
         payload: { event_id: toTypeId('evt', id) },
       }),
     );
     try {
       await relayBatch(testRelayDeps(pool, streamPublisher));
-      const [row] = await outboxRowsFor(pool, paymentId);
+      const [row] = await outboxRowsFor(pool, depositId);
       expect(row).toMatchObject({
         attempts: 1,
         last_error: 'no stream for subject refund.created',

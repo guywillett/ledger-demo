@@ -8,7 +8,7 @@ import type { Withdrawal } from './withdrawals.ts';
 // are written to the outbox in the transaction that creates the withdrawal, and the relay
 // publishes them (src/relay/), to the WITHDRAWALS stream.
 
-// The Nats-Msg-Id: one per withdrawal and status, as for payments, so the stream drops a repeat
+// The Nats-Msg-Id: one per withdrawal and status, as for deposits, so the stream drops a repeat
 // publish of the same outbox row within its duplicate window.
 export function withdrawalMessageId(withdrawal: Withdrawal, event: 'held'): string {
   return `${toTypeId('wd', withdrawal.id)}.${event}`;

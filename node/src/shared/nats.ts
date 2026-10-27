@@ -7,19 +7,19 @@ export type { NatsConnection };
 
 // Streams are created by the nats-setup compose service from nats/streams/*.json, not by the
 // apps; see nats/setup.sh.
-export const STREAMS = { payments: 'PAYMENTS', withdrawals: 'WITHDRAWALS' } as const;
+export const STREAMS = { deposits: 'DEPOSITS', withdrawals: 'WITHDRAWALS' } as const;
 export type StreamName = (typeof STREAMS)[keyof typeof STREAMS];
 
 // The stream each subject is published to: one stream per entity, subjects <entity>.<status>.
 // An unknown subject is a bug (an event nobody routed); it throws, which the relay records as a
 // publish failure for that event.
 export function streamForSubject(subject: string): StreamName {
-  if (subject.startsWith('payment.')) return STREAMS.payments;
+  if (subject.startsWith('deposit.')) return STREAMS.deposits;
   if (subject.startsWith('withdrawal.')) return STREAMS.withdrawals;
   throw new Error(`no stream for subject ${subject}`);
 }
 // Durable consumers, created by nats-setup from nats/consumers/<STREAM>/<NAME>.json.
-export const CONSUMERS = { worker: 'worker', submitter: 'submitter' } as const;
+export const CONSUMERS = { depositWorker: 'deposit-worker', submitter: 'submitter' } as const;
 
 // How long a publish waits for the stream's acknowledgement before it counts as failed.
 export const PUBLISH_TIMEOUT_MS = 2000;

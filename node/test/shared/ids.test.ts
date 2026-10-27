@@ -9,20 +9,20 @@ describe('ids', () => {
   });
 
   it('round-trips a UUID through a TypeID', () => {
-    const uuid = newUuid('pay');
-    const typeId = toTypeId('pay', uuid);
-    expect(typeId).toMatch(/^pay_[0-9a-z]{26}$/);
-    expect(fromTypeId('pay', typeId)).toBe(uuid);
+    const uuid = newUuid('dep');
+    const typeId = toTypeId('dep', uuid);
+    expect(typeId).toMatch(/^dep_[0-9a-z]{26}$/);
+    expect(fromTypeId('dep', typeId)).toBe(uuid);
   });
 
   it('rejects a TypeID with the wrong prefix', () => {
     const typeId = toTypeId('acct', newUuid('acct'));
-    expect(() => fromTypeId('pay', typeId)).toThrow();
+    expect(() => fromTypeId('dep', typeId)).toThrow();
   });
 
   it('rejects malformed TypeIDs', () => {
-    expect(() => fromTypeId('pay', 'pay_not-a-typeid')).toThrow();
-    expect(() => fromTypeId('pay', '01m564xr00fx7rjvqryn5dzwxx')).toThrow();
+    expect(() => fromTypeId('dep', 'dep_not-a-typeid')).toThrow();
+    expect(() => fromTypeId('dep', '01m564xr00fx7rjvqryn5dzwxx')).toThrow();
   });
 
   it('rejects a TypeID that does not hold a UUIDv7', () => {
@@ -32,8 +32,8 @@ describe('ids', () => {
 
   it('keeps entity IDs apart at compile time', () => {
     const accountId = newUuid('acct');
-    // @ts-expect-error: an account UUID is not a payment UUID
-    toTypeId('pay', accountId);
+    // @ts-expect-error: an account UUID is not a deposit UUID
+    toTypeId('dep', accountId);
   });
 
   // The seed migration and docs/development.md, Demo accounts, hard-code these pairs.

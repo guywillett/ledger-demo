@@ -3,8 +3,8 @@ import type { LogLevel } from './config.ts';
 
 export type { Logger };
 
-// Structured JSON to stdout. Context such as request_id, payment_id and event_id
-// is attached with child loggers: logger.child({ payment_id }).
+// Structured JSON to stdout. Context such as request_id, deposit_id and event_id
+// is attached with child loggers: logger.child({ deposit_id }).
 // BigInts are converted in the object passed to each log call, but not in child bindings:
 // pino deliberately bypasses formatters for child bindings (it swaps formatters.bindings
 // for a pass-through when creating a child). So bind only IDs and other strings, and put

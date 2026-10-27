@@ -66,8 +66,8 @@ jobs:
       - name: End-to-end tests
         run: npm run test:e2e
 
-      # Against the development services: duplicates, conflicts, a killed worker, two workers,
-      # then reconciliation of the whole (fresh) database.
+      # Against the development services: duplicates, conflicts, a killed deposit-worker, two
+      # workers, then reconciliation of the whole (fresh) database.
       - name: Demo
         working-directory: .
         run: scripts/demo.sh

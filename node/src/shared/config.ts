@@ -3,7 +3,8 @@ import { z } from 'zod';
 export const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
-// Environment variables shared by every process (API, worker, relay, scripts).
+// Environment variables shared by the long-running processes that use the database (the API,
+// the relay, the deposit-worker and the submitter); scripts and provider-sim parse their own.
 // Process-specific variables (PORT, REVIEW_DELAY_MS, …) are parsed by their own modules.
 export const sharedEnvSchema = z.object({
   DATABASE_URL: z.url(),
@@ -15,8 +16,9 @@ export type SharedConfig = {
   readonly logLevel: LogLevel;
 };
 
-// For the processes that connect to NATS (worker, relay): their env schemas extend this one.
-// The API doesn't connect to NATS, so it doesn't require NATS_URL.
+// For every process that connects to NATS (the relay, the deposit-worker and the submitter):
+// their env schemas extend this one. The API doesn't connect to NATS, so it doesn't require
+// NATS_URL.
 export const natsEnvSchema = z.object({
   NATS_URL: z.url(),
 });

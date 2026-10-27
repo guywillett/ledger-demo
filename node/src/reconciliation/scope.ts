@@ -4,7 +4,7 @@ import type { Uuid } from '../shared/ids.ts';
 // In every check's SQL, $1 is the account filter: scope.accounts, NULL for all accounts.
 export type CheckScope = {
   readonly accounts: readonly Uuid<'acct'>[] | null;
-  // A payment or withdrawal in a non-final status, or an event unpublished, for longer than this
+  // A deposit or withdrawal in a non-final status, or an event unpublished, for longer than this
   // is reported as stuck.
   readonly stuckAfterMs: number;
 };

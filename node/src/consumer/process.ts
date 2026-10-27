@@ -12,9 +12,9 @@ import {
 import { startConsuming, type Consuming } from './consume.ts';
 import type { DeliveredMessage } from './messages.ts';
 
-// The process lifecycle shared by every consumer process (the worker, the submitter): connect,
-// check what the process needs, start the pull loop (consume.ts), shut down gracefully on a
-// signal, and exit with a failing code when something goes wrong for good, so the container is
+// The process lifecycle shared by every consumer process (the deposit-worker, the submitter):
+// connect, check what the process needs, start the pull loop (consume.ts), shut down gracefully on
+// a signal, and exit with a failing code when something goes wrong for good, so the container is
 // restarted. Each entry point (src/<consumer>/main.ts) only loads its config and builds its
 // handler: what differs between consumers is exactly what they pass in here.
 

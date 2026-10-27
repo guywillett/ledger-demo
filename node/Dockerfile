@@ -1,6 +1,5 @@
-# One image for the Node processes (the API, the worker, the relay, provider-sim); compose picks
-# the command.
-# TypeScript runs directly (type stripping), so there is no build stage, only dependencies.
+# One image for every Node process; compose picks the command. TypeScript runs directly (type
+# stripping), so there is no build stage, only dependencies.
 
 FROM node:26.12.0-alpine3.24 AS deps
 WORKDIR /app

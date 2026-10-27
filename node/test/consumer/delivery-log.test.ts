@@ -50,7 +50,7 @@ describe('withDeliveryLog', () => {
     const { logger, lines } = capturingLogger();
     const outcome = await withDeliveryLog(
       {
-        consumer: 'worker',
+        consumer: 'deposit-worker',
         eventType: 'test.event',
         schema: z.object({ n: z.number() }),
         pool,

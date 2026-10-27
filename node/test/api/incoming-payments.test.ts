@@ -13,14 +13,14 @@ import {
   newNetworkTransactionId,
   newTestIban,
   notificationBody,
-  paymentByNetworkId,
-  postPayment,
+  depositByNetworkId,
+  postIncomingPayment,
   refusingPool,
 } from '../helpers.ts';
 
 // POST /provider/incoming-payments, the provider's incoming-payment webhook. Every notification it
 // can parse gets 204 with no body, whatever it did (the webhook contract), so each test asserts
-// the recorded effects: the payment, its outbox row, conflict records, the log line.
+// the recorded effects: the deposit, its outbox row, conflict records, the log line.
 
 const { logger, lines } = capturingLogger();
 const { app, pool, close } = await createTestApp({ logger });
@@ -35,32 +35,32 @@ const SEED_ACCOUNT_IDS = {
 async function historyCount(networkTransactionId: unknown): Promise<number> {
   const result = await pool.query<{ n: number }>(
     `SELECT COUNT(*)::int AS n
-     FROM payment_status_history h JOIN incoming_payments p ON p.id = h.payment_id
+     FROM deposit_status_history h JOIN deposits p ON p.id = h.deposit_id
      WHERE p.network_transaction_id = $1`,
     [networkTransactionId],
   );
   return result.rows[0]?.n ?? 0;
 }
 
-async function outboxRows(paymentId: string): Promise<number> {
+async function outboxRows(depositId: string): Promise<number> {
   const result = await pool.query<{ n: number }>(
     'SELECT count(*)::int AS n FROM outbox WHERE entity_id = $1',
-    [paymentId],
+    [depositId],
   );
   return result.rows[0]?.n ?? 0;
 }
 
 async function conflictsOf(
-  paymentId: string,
+  depositId: string,
 ): Promise<{ differing_fields: string[]; amount_minor: bigint; creditor_iban: string }[]> {
   const result = await pool.query<{
     differing_fields: string[];
     amount_minor: bigint;
     creditor_iban: string;
   }>(
-    `SELECT differing_fields, amount_minor, creditor_iban FROM payment_notification_conflicts
-     WHERE payment_id = $1 ORDER BY id`,
-    [paymentId],
+    `SELECT differing_fields, amount_minor, creditor_iban FROM deposit_notification_conflicts
+     WHERE deposit_id = $1 ORDER BY id`,
+    [depositId],
   );
   return result.rows;
 }
@@ -70,14 +70,14 @@ function logOf(networkTransactionId: unknown, msg: string): Record<string, unkno
 }
 
 describe('POST /provider/incoming-payments: new notifications', () => {
-  it('records a payment as created, mapped to our account by IBAN, with its event', async () => {
+  it('records a deposit as created, mapped to our account by IBAN, with its event', async () => {
     const body = notificationBody({ provider_account_id: 'prov_acc_0001' });
-    const response = await postPayment(app, body);
+    const response = await postIncomingPayment(app, body);
 
     expect(response.statusCode).toBe(204);
     expect(response.body).toBe('');
-    const payment = await paymentByNetworkId(pool, body.network_transaction_id);
-    expect(payment).toMatchObject({
+    const deposit = await depositByNetworkId(pool, body.network_transaction_id);
+    expect(deposit).toMatchObject({
       account_id: SEED_ACCOUNT_IDS[ALICE.iban],
       status: 'created',
       creditor_iban: ALICE.iban,
@@ -86,10 +86,10 @@ describe('POST /provider/incoming-payments: new notifications', () => {
       notification_count: 1,
     });
     expect(await historyCount(body.network_transaction_id)).toBe(1);
-    expect(await outboxRows(String(payment?.id))).toBe(1);
-    expect(logOf(body.network_transaction_id, 'payment created')).toMatchObject({
+    expect(await outboxRows(String(deposit?.id))).toBe(1);
+    expect(logOf(body.network_transaction_id, 'deposit created')).toMatchObject({
       level: 'info',
-      payment_id: payment && toTypeId('pay', payment.id),
+      deposit_id: deposit && toTypeId('dep', deposit.id),
     });
   });
 
@@ -99,14 +99,14 @@ describe('POST /provider/incoming-payments: new notifications', () => {
       unknown
     >;
     const body = { ...example, network_transaction_id: newNetworkTransactionId() };
-    expect((await postPayment(app, body)).statusCode).toBe(204);
-    expect((await paymentByNetworkId(pool, body.network_transaction_id))?.status).toBe('created');
+    expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
+    expect((await depositByNetworkId(pool, body.network_transaction_id))?.status).toBe('created');
   });
 
   it('normalises the IBAN before matching', async () => {
     const body = notificationBody({ creditor_iban: 'fr76 1234 5000 0100 0000 0000 290' });
-    expect((await postPayment(app, body)).statusCode).toBe(204);
-    expect(await paymentByNetworkId(pool, body.network_transaction_id)).toMatchObject({
+    expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
+    expect(await depositByNetworkId(pool, body.network_transaction_id)).toMatchObject({
       account_id: SEED_ACCOUNT_IDS[BOB.iban],
       creditor_iban: BOB.iban,
     });
@@ -114,8 +114,8 @@ describe('POST /provider/incoming-payments: new notifications', () => {
 
   it('works for an account without a provider account ID', async () => {
     const body = notificationBody({ creditor_iban: CAROL.iban });
-    expect((await postPayment(app, body)).statusCode).toBe(204);
-    expect(await paymentByNetworkId(pool, body.network_transaction_id)).toMatchObject({
+    expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
+    expect(await depositByNetworkId(pool, body.network_transaction_id)).toMatchObject({
       account_id: SEED_ACCOUNT_IDS[CAROL.iban],
       provider_account_id: null,
     });
@@ -123,16 +123,16 @@ describe('POST /provider/incoming-payments: new notifications', () => {
 
   it('keeps amounts beyond 2^53 exact', async () => {
     const body = notificationBody({ amount_minor: '9007199254740993' });
-    expect((await postPayment(app, body)).statusCode).toBe(204);
-    expect((await paymentByNetworkId(pool, body.network_transaction_id))?.amount_minor).toBe(
+    expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
+    expect((await depositByNetworkId(pool, body.network_transaction_id))?.amount_minor).toBe(
       9007199254740993n,
     );
   });
 
   it('ignores unknown fields instead of rejecting them', async () => {
     const body = notificationBody({ payer_name: 'Jane Doe' });
-    expect((await postPayment(app, body)).statusCode).toBe(204);
-    expect((await paymentByNetworkId(pool, body.network_transaction_id))?.status).toBe('created');
+    expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
+    expect((await depositByNetworkId(pool, body.network_transaction_id))?.status).toBe('created');
   });
 });
 
@@ -140,29 +140,31 @@ describe('POST /provider/incoming-payments: duplicates', () => {
   it('records the same notification sent 5 times once, counting the repeats', async () => {
     const body = notificationBody();
     const statuses: number[] = [];
-    for (let i = 0; i < 5; i++) statuses.push((await postPayment(app, body)).statusCode);
+    for (let i = 0; i < 5; i++) statuses.push((await postIncomingPayment(app, body)).statusCode);
 
     expect(statuses).toEqual([204, 204, 204, 204, 204]);
-    const payment = await paymentByNetworkId(pool, body.network_transaction_id);
-    expect(payment?.notification_count).toBe(5);
+    const deposit = await depositByNetworkId(pool, body.network_transaction_id);
+    expect(deposit?.notification_count).toBe(5);
     expect(await historyCount(body.network_transaction_id)).toBe(1);
-    expect(await outboxRows(String(payment?.id))).toBe(1);
-    expect(logOf(body.network_transaction_id, 'duplicate payment notification')).toMatchObject({
+    expect(await outboxRows(String(deposit?.id))).toBe(1);
+    expect(logOf(body.network_transaction_id, 'duplicate deposit notification')).toMatchObject({
       level: 'info',
     });
   });
 
   it('records 10 concurrent identical notifications once', async () => {
     const body = notificationBody();
-    const responses = await Promise.all(Array.from({ length: 10 }, () => postPayment(app, body)));
+    const responses = await Promise.all(
+      Array.from({ length: 10 }, () => postIncomingPayment(app, body)),
+    );
 
     expect(responses.every((r) => r.statusCode === 204)).toBe(true);
     const count = await pool.query<{ n: number }>(
-      'SELECT count(*)::int AS n FROM incoming_payments WHERE network_transaction_id = $1',
+      'SELECT count(*)::int AS n FROM deposits WHERE network_transaction_id = $1',
       [body.network_transaction_id],
     );
     expect(count.rows[0]?.n).toBe(1);
-    expect((await paymentByNetworkId(pool, body.network_transaction_id))?.notification_count).toBe(
+    expect((await depositByNetworkId(pool, body.network_transaction_id))?.notification_count).toBe(
       10,
     );
     expect(await historyCount(body.network_transaction_id)).toBe(1);
@@ -170,12 +172,12 @@ describe('POST /provider/incoming-payments: duplicates', () => {
 
   it('treats a retry with or without provider_account_id as a duplicate, keeping the first value', async () => {
     const body = notificationBody({ provider_account_id: 'prov_acc_0001' });
-    await postPayment(app, body);
+    await postIncomingPayment(app, body);
     const { provider_account_id: _omitted, ...withoutProviderId } = body;
-    await postPayment(app, withoutProviderId);
-    await postPayment(app, { ...body, provider_account_id: 'something-else' });
+    await postIncomingPayment(app, withoutProviderId);
+    await postIncomingPayment(app, { ...body, provider_account_id: 'something-else' });
 
-    expect(await paymentByNetworkId(pool, body.network_transaction_id)).toMatchObject({
+    expect(await depositByNetworkId(pool, body.network_transaction_id)).toMatchObject({
       provider_account_id: 'prov_acc_0001',
       notification_count: 3,
     });
@@ -183,12 +185,12 @@ describe('POST /provider/incoming-payments: duplicates', () => {
 
   it('treats formatting differences as the same details', async () => {
     const body = notificationBody();
-    await postPayment(app, body);
+    await postIncomingPayment(app, body);
     const reformatted = `{ "network": "SEPA", "currency": "EUR",
       "creditor_iban": "fr76 1234 5000 0100 0000 0000 193",
       "amount_minor": "1250", "network_transaction_id": "${String(body.network_transaction_id)}" }`;
-    expect((await postPayment(app, reformatted)).statusCode).toBe(204);
-    expect((await paymentByNetworkId(pool, body.network_transaction_id))?.notification_count).toBe(
+    expect((await postIncomingPayment(app, reformatted)).statusCode).toBe(204);
+    expect((await depositByNetworkId(pool, body.network_transaction_id))?.notification_count).toBe(
       2,
     );
   });
@@ -200,20 +202,20 @@ describe('POST /provider/incoming-payments: conflicts', () => {
     ['a different IBAN of ours', { creditor_iban: BOB.iban }, ['creditor_iban']],
     ['an IBAN that is not ours', { creditor_iban: FOREIGN_IBAN }, ['creditor_iban']],
   ])(
-    'records %s as a conflict: 204, the payment unchanged, alerted',
+    'records %s as a conflict: 204, the deposit unchanged, alerted',
     async (_case, overrides, differing) => {
       const body = notificationBody();
-      await postPayment(app, body);
-      const before = await paymentByNetworkId(pool, body.network_transaction_id);
+      await postIncomingPayment(app, body);
+      const before = await depositByNetworkId(pool, body.network_transaction_id);
 
-      expect((await postPayment(app, { ...body, ...overrides })).statusCode).toBe(204);
-      expect(await paymentByNetworkId(pool, body.network_transaction_id)).toEqual(before);
+      expect((await postIncomingPayment(app, { ...body, ...overrides })).statusCode).toBe(204);
+      expect(await depositByNetworkId(pool, body.network_transaction_id)).toEqual(before);
       expect(await conflictsOf(String(before?.id))).toEqual([
         expect.objectContaining({ differing_fields: differing }),
       ]);
       const alert = logOf(
         body.network_transaction_id,
-        'payment notification conflicts with the stored payment; recorded, nothing changed',
+        'deposit notification conflicts with the stored deposit; recorded, nothing changed',
       );
       expect(alert).toMatchObject({ level: 'error', alert: true, differing_fields: differing });
       // Field names, never the values.
@@ -221,12 +223,12 @@ describe('POST /provider/incoming-payments: conflicts', () => {
     },
   );
 
-  it('lets exactly one of concurrent conflicting notifications create the payment', async () => {
+  it('lets exactly one of concurrent conflicting notifications create the deposit', async () => {
     const networkTransactionId = newNetworkTransactionId();
     const amounts = ['100', '200', '300', '400', '500'];
     const responses = await Promise.all(
       amounts.map((amount) =>
-        postPayment(
+        postIncomingPayment(
           app,
           notificationBody({ network_transaction_id: networkTransactionId, amount_minor: amount }),
         ),
@@ -234,13 +236,13 @@ describe('POST /provider/incoming-payments: conflicts', () => {
     );
 
     expect(responses.every((r) => r.statusCode === 204)).toBe(true);
-    const payment = await paymentByNetworkId(pool, networkTransactionId);
+    const deposit = await depositByNetworkId(pool, networkTransactionId);
     // The other four are conflict records, each differing in the amount.
-    const conflicts = await conflictsOf(String(payment?.id));
+    const conflicts = await conflictsOf(String(deposit?.id));
     expect(conflicts).toHaveLength(4);
     expect(conflicts.every((c) => c.differing_fields.join() === 'amount_minor')).toBe(true);
     expect(
-      [payment?.amount_minor, ...conflicts.map((c) => c.amount_minor)].map(String).sort(),
+      [deposit?.amount_minor, ...conflicts.map((c) => c.amount_minor)].map(String).sort(),
     ).toEqual(amounts);
   });
 });
@@ -248,66 +250,66 @@ describe('POST /provider/incoming-payments: conflicts', () => {
 describe('POST /provider/incoming-payments: suspense', () => {
   it('records a valid IBAN that is not ours as unmatched: no account, no event, no movement', async () => {
     const body = notificationBody({ creditor_iban: FOREIGN_IBAN });
-    expect((await postPayment(app, body)).statusCode).toBe(204);
+    expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
 
-    const payment = await paymentByNetworkId(pool, body.network_transaction_id);
-    expect(payment).toMatchObject({ status: 'unmatched', account_id: null, notification_count: 1 });
+    const deposit = await depositByNetworkId(pool, body.network_transaction_id);
+    expect(deposit).toMatchObject({ status: 'unmatched', account_id: null, notification_count: 1 });
     expect(await historyCount(body.network_transaction_id)).toBe(1);
-    expect(await outboxRows(String(payment?.id))).toBe(0);
+    expect(await outboxRows(String(deposit?.id))).toBe(0);
     const movements = await pool.query(
-      `SELECT 1 FROM balance_movements WHERE reference_type = 'payment' AND reference_id = $1`,
-      [payment?.id],
+      `SELECT 1 FROM balance_movements WHERE reference_type = 'deposit' AND reference_id = $1`,
+      [deposit?.id],
     );
     expect(movements.rowCount).toBe(0);
     expect(
       logOf(
         body.network_transaction_id,
-        'payment notification matches none of our accounts; recorded in suspense',
+        'deposit notification matches none of our accounts; recorded in suspense',
       ),
     ).toMatchObject({ level: 'error', alert: true, creditor_iban: 'DE75…6199' });
 
     // A repeat is a duplicate of the suspense record.
-    expect((await postPayment(app, body)).statusCode).toBe(204);
-    expect(await paymentByNetworkId(pool, body.network_transaction_id)).toMatchObject({
+    expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
+    expect(await depositByNetworkId(pool, body.network_transaction_id)).toMatchObject({
       status: 'unmatched',
       notification_count: 2,
     });
 
     // Whole-database reconciliation lists it in suspense; the books still agree for it.
     const report = await reconcile(pool, { stuckAfterMs: 24 * 3600 * 1000 });
-    expect(report.suspense?.payments.map((p) => p.networkTransactionId)).toContain(
+    expect(report.suspense?.deposits.map((p) => p.networkTransactionId)).toContain(
       body.network_transaction_id,
     );
-    expect(report.mismatches.map((m) => m.paymentId)).not.toContain(payment?.id);
+    expect(report.depositMismatches.map((m) => m.depositId)).not.toContain(deposit?.id);
   });
 
   it.each([
-    ['an unmatched payment with an account', 'unmatched', SEED_ACCOUNT_IDS[ALICE.iban]],
+    ['an unmatched deposit with an account', 'unmatched', SEED_ACCOUNT_IDS[ALICE.iban]],
     ['a matched status without an account', 'created', null],
   ])('refuses %s (the database CHECK)', async (_case, status, accountId) => {
     // Resolving suspense must be an explicit status change, never a quiet account_id update.
     await expect(
       pool.query(
-        `INSERT INTO incoming_payments (id, creditor_iban, account_id, amount_minor, currency,
+        `INSERT INTO deposits (id, creditor_iban, account_id, amount_minor, currency,
                                         network, network_transaction_id, status)
          VALUES ($1, $2, $3, 100, 'EUR', 'SEPA', $4, $5)`,
-        [newUuid('pay'), ALICE.iban, accountId, newNetworkTransactionId(), status],
+        [newUuid('dep'), ALICE.iban, accountId, newNetworkTransactionId(), status],
       ),
-    ).rejects.toMatchObject({ code: '23514', constraint: 'incoming_payments_unmatched_check' });
+    ).rejects.toMatchObject({ code: '23514', constraint: 'deposits_unmatched_check' });
   });
 
   it('keeps it unmatched after an account with that IBAN is created: resolution is never automatic', async () => {
     const iban = newTestIban();
     const body = notificationBody({ creditor_iban: iban });
-    await postPayment(app, body);
+    await postIncomingPayment(app, body);
     await pool.query('INSERT INTO accounts (id, name, iban) VALUES ($1, $2, $3)', [
       newUuid('acct'),
       `late-${iban}`,
       iban,
     ]);
 
-    expect((await postPayment(app, body)).statusCode).toBe(204);
-    expect(await paymentByNetworkId(pool, body.network_transaction_id)).toMatchObject({
+    expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
+    expect(await depositByNetworkId(pool, body.network_transaction_id)).toMatchObject({
       status: 'unmatched',
       account_id: null,
       notification_count: 2,
@@ -330,26 +332,26 @@ describe('POST /provider/incoming-payments: rejections', () => {
     ['a missing IBAN', { creditor_iban: undefined }, 'creditor_iban'],
   ])('answers 400 for %s, recording nothing', async (_label, overrides, path) => {
     const body = notificationBody(overrides);
-    const response = await postPayment(app, body);
+    const response = await postIncomingPayment(app, body);
     expect(response.statusCode).toBe(400);
     expect(response.json.type).toBe('urn:ledger-demo:problem:invalid-notification');
     expect(response.json.errors).toEqual([expect.objectContaining({ path })]);
-    expect(await paymentByNetworkId(pool, body.network_transaction_id)).toBeUndefined();
+    expect(await depositByNetworkId(pool, body.network_transaction_id)).toBeUndefined();
   });
 
   it('answers 400 for malformed JSON', async () => {
-    const response = await postPayment(app, '{"network_transaction_id": ');
+    const response = await postIncomingPayment(app, '{"network_transaction_id": ');
     expect(response.statusCode).toBe(400);
     expect(response.json.type).toBe('about:blank');
   });
 
   it.each([
     ['text/plain', JSON.stringify(notificationBody())],
-    ['application/xml', '<payment/>'],
+    ['application/xml', '<deposit/>'],
   ])(
     'answers 400 (not 415) for %s: a webhook has one 4xx, even for a valid JSON body',
     async (contentType, payload) => {
-      const response = await postPayment(app, payload, { 'content-type': contentType });
+      const response = await postIncomingPayment(app, payload, { 'content-type': contentType });
       expect(response.statusCode).toBe(400);
     },
   );
@@ -367,7 +369,7 @@ describe('POST /provider/incoming-payments: rejections', () => {
 
 describe('POST /provider/incoming-payments: request IDs', () => {
   it('reuses a well-formed x-request-id and echoes it', async () => {
-    const response = await postPayment(app, notificationBody(), {
+    const response = await postIncomingPayment(app, notificationBody(), {
       'x-request-id': 'provider-req.42',
     });
     expect(response.headers['x-request-id']).toBe('provider-req.42');
@@ -376,7 +378,7 @@ describe('POST /provider/incoming-payments: request IDs', () => {
   // HTTP header values can't contain a newline at all, but they can contain a tab.
   it('replaces an x-request-id that is too long or has characters outside the allowed set', async () => {
     for (const bad of ['x'.repeat(65), 'has spaces', 'has\ttab', 'drop;table']) {
-      const response = await postPayment(app, notificationBody(), { 'x-request-id': bad });
+      const response = await postIncomingPayment(app, notificationBody(), { 'x-request-id': bad });
       expect(response.headers['x-request-id']).not.toBe(bad);
       expect(String(response.headers['x-request-id'])).toMatch(/^[0-9a-f-]{36}$/);
     }
@@ -389,11 +391,11 @@ describe('POST /provider/incoming-payments: logging', () => {
     const logged = await createTestApp({ logger: own.logger });
     try {
       const body = notificationBody({ payer_name: 'Jane Doe' });
-      await postPayment(logged.app, body); // created
-      await postPayment(logged.app, body); // duplicate
-      await postPayment(logged.app, { ...body, amount_minor: '1' }); // conflict
-      await postPayment(logged.app, notificationBody({ creditor_iban: FOREIGN_IBAN })); // unmatched
-      await postPayment(logged.app, notificationBody({ amount_minor: 'lots' })); // 400
+      await postIncomingPayment(logged.app, body); // created
+      await postIncomingPayment(logged.app, body); // duplicate
+      await postIncomingPayment(logged.app, { ...body, amount_minor: '1' }); // conflict
+      await postIncomingPayment(logged.app, notificationBody({ creditor_iban: FOREIGN_IBAN })); // unmatched
+      await postIncomingPayment(logged.app, notificationBody({ amount_minor: 'lots' })); // 400
     } finally {
       await logged.close();
     }
@@ -403,14 +405,14 @@ describe('POST /provider/incoming-payments: logging', () => {
       .lines()
       .filter((line) => line.request_id !== undefined && line.msg !== 'request completed');
     expect(domain.map((line) => [line.level, line.msg])).toEqual([
-      ['info', 'payment created'],
-      ['info', 'duplicate payment notification'],
+      ['info', 'deposit created'],
+      ['info', 'duplicate deposit notification'],
       [
         'error',
-        'payment notification conflicts with the stored payment; recorded, nothing changed',
+        'deposit notification conflicts with the stored deposit; recorded, nothing changed',
       ],
-      ['error', 'payment notification matches none of our accounts; recorded in suspense'],
-      ['warn', 'invalid payment notification'],
+      ['error', 'deposit notification matches none of our accounts; recorded in suspense'],
+      ['warn', 'invalid deposit notification'],
     ]);
     expect(domain[0]).toMatchObject({ creditor_iban: 'FR76…0193', amount_minor: '1250' });
     expect(domain[0]?.event_id).toMatch(/^evt_/);
@@ -455,9 +457,9 @@ describe('POST /provider/incoming-payments: logging', () => {
 });
 
 describe('POST /provider/incoming-payments: internal inconsistency', () => {
-  // A refused notification whose stored payment differs in no compared field is our problem,
+  // A refused notification whose stored deposit differs in no compared field is our problem,
   // not the provider's. The real database can't produce it without changing shared seed data,
-  // so the app runs against a stub that refuses and then returns an identical stored payment.
+  // so the app runs against a stub that refuses and then returns an identical stored deposit.
   it('answers 500 and logs an error', async () => {
     const own = capturingLogger();
     const stubbed = buildApp({
@@ -465,7 +467,7 @@ describe('POST /provider/incoming-payments: internal inconsistency', () => {
       logger: own.logger,
     });
     try {
-      const response = await postPayment(stubbed, notificationBody());
+      const response = await postIncomingPayment(stubbed, notificationBody());
       expect(response.statusCode).toBe(500);
       expect(response.json).toEqual({
         type: 'about:blank',

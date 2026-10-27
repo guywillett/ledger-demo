@@ -21,7 +21,7 @@ const relayEnvSchema = natsEnvSchema
     RELAY_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(10),
     // How long a claim holds its events. At most 60 s: a crashed relay's events are published
     // again when its lease expires, and the stream drops that repeat only within its
-    // duplicate_window (120 s, nats/streams/PAYMENTS.json). A longer lease would quietly lose
+    // duplicate_window (120 s, nats/streams/DEPOSITS.json). A longer lease would quietly lose
     // the "dropped by the stream" guarantee (consumers would still cope: they are idempotent on
     // state).
     RELAY_LEASE_MS: z.coerce.number().int().min(1000).max(60_000).default(30_000),

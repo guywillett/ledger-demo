@@ -13,13 +13,13 @@ paths:
       description: |
         Idempotent on (network, network_transaction_id). The real webhook contract (a provider
         retries anything but a 2xx): 204, with no body, for everything recorded or deliberately
-        handled: a new payment (stored with its payment.created event, published
+        handled: a new deposit (stored with its deposit.created event, published
         asynchronously), a repeat with the same creditor_iban, amount_minor and currency
         (counted), a notification for an IBAN matching none of our accounts (recorded in
         suspense: money can't be refused over HTTP), and one that conflicts with the stored
-        payment (recorded, nothing changed). 400 only for a body that doesn't parse, an invalid
+        deposit (recorded, nothing changed). 400 only for a body that doesn't parse, an invalid
         IBAN included; 500 when a retry can help. The response never says what the
-        notification did, so the endpoint can't be used to probe accounts or payments. Unknown
+        notification did, so the endpoint can't be used to probe accounts or deposits. Unknown
         fields are ignored (tolerant reader).
       parameters:
         - name: x-request-id
@@ -33,7 +33,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PaymentNotification'
+              $ref: '#/components/schemas/IncomingPaymentNotification'
             example:
               network_transaction_id: NTX-2026-0001
               creditor_iban: FR7612345000010000000000193
@@ -85,9 +85,9 @@ paths:
                 $ref: '#/components/schemas/Problem'
   /accounts/{account_id}/transactions:
     get:
-      summary: The account's payments, newest first, a page at a time
+      summary: The account's deposits, newest first, a page at a time
       description: |
-        Paginated by seeking on the payment ID (UUIDv7 IDs sort by creation time): pass the
+        Paginated by seeking on the deposit ID (UUIDv7 IDs sort by creation time): pass the
         previous page's next_before as `before` to get the next, older page.
       parameters:
         - $ref: '#/components/parameters/AccountId'
@@ -102,19 +102,19 @@ paths:
         - name: before
           in: query
           required: false
-          description: Only payments older than this one (a previous page's next_before).
+          description: Only deposits older than this one (a previous page's next_before).
           schema:
             type: string
-            pattern: '^pay_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+            pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
         - name: include
           in: query
           required: false
-          description: '`history` adds each payment''s status history.'
+          description: '`history` adds each deposit''s status history.'
           schema:
             const: history
       responses:
         '200':
-          description: A page of payments
+          description: A page of deposits
           content:
             application/json:
               schema:
@@ -333,7 +333,7 @@ components:
       pattern: '^[1-9][0-9]*$'
       maxLength: 19
       examples: ['1250']
-    PaymentNotification:
+    IncomingPaymentNotification:
       type: object
       description: Unknown fields are ignored (tolerant reader).
       required: [network_transaction_id, creditor_iban, amount_minor, currency, network]
@@ -357,10 +357,10 @@ components:
           const: EUR
         network:
           const: SEPA
-    # The fields of a payment in an account's transaction list. Transaction closes itself with
+    # The fields of a deposit in an account's transaction list. Transaction closes itself with
     # unevaluatedProperties: false, which (unlike additionalProperties) also counts the
     # properties described through allOf.
-    PaymentFields:
+    DepositFields:
       type: object
       required:
         - id
@@ -378,7 +378,7 @@ components:
       properties:
         id:
           type: string
-          pattern: '^pay_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+          pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
         account_id:
           type: string
           pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
@@ -397,7 +397,7 @@ components:
         network_transaction_id:
           type: string
         status:
-          $ref: '#/components/schemas/PaymentStatus'
+          $ref: '#/components/schemas/DepositStatus'
         notification_count:
           type: integer
           minimum: 1
@@ -408,10 +408,10 @@ components:
           type: string
           format: date-time
     Transaction:
-      description: A payment in an account's transaction list.
+      description: A deposit in an account's transaction list.
       type: object
       allOf:
-        - $ref: '#/components/schemas/PaymentFields'
+        - $ref: '#/components/schemas/DepositFields'
       properties:
         history:
           description: Present with include=history. Oldest change first.
@@ -425,12 +425,12 @@ components:
       required: [from_status, to_status, reason, at]
       properties:
         from_status:
-          description: null for the first entry (the payment was created).
+          description: null for the first entry (the deposit was created).
           oneOf:
-            - $ref: '#/components/schemas/PaymentStatus'
+            - $ref: '#/components/schemas/DepositStatus'
             - type: 'null'
         to_status:
-          $ref: '#/components/schemas/PaymentStatus'
+          $ref: '#/components/schemas/DepositStatus'
         reason:
           type: [string, 'null']
         at:
@@ -439,9 +439,9 @@ components:
     TransactionList:
       type: object
       additionalProperties: false
-      required: [payments, next_before]
+      required: [deposits, next_before]
       properties:
-        payments:
+        deposits:
           type: array
           items:
             $ref: '#/components/schemas/Transaction'
@@ -449,7 +449,7 @@ components:
           description: Pass as `before` for the next page; null on the last page.
           oneOf:
             - type: string
-              pattern: '^pay_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+              pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
             - type: 'null'
     Balance:
       type: object
@@ -471,7 +471,7 @@ components:
       type: string
       pattern: '^(0|[1-9][0-9]*)$'
       maxLength: 19
-    PaymentStatus:
+    DepositStatus:
       type: string
       enum: [created, received, under_review, approved, rejected, credited, returned]
     SepaText:

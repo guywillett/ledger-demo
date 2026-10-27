@@ -13,15 +13,15 @@ import {
   drainOutbox,
   notificationBody,
   outboxRowsFor,
-  paymentByNetworkId,
-  postPayment,
-  type StoredPayment,
+  depositByNetworkId,
+  postIncomingPayment,
+  type StoredDeposit,
   recordingPublisher,
   testRelayDeps,
   testStreamPublisher,
 } from '../helpers.ts';
 
-// payment.created: stored in the outbox by POST /provider/incoming-payments, in the payment's
+// deposit.created: stored in the outbox by POST /provider/incoming-payments, in the deposit's
 // own transaction, and published by the relay. Runs in the serial "relay" project
 // (vitest.config.ts): nothing else writes to the outbox or the test stream meanwhile, so counts
 // before and after a request are exact.
@@ -38,12 +38,12 @@ afterAll(async () => {
   await testApp.close();
 });
 
-// The payment a notification created, read from the database (the webhook answers 204 with no
+// The deposit a notification created, read from the database (the webhook answers 204 with no
 // body).
-async function storedPayment(body: { network_transaction_id?: unknown }): Promise<StoredPayment> {
-  const payment = await paymentByNetworkId(pool, body.network_transaction_id);
-  if (payment === undefined) throw new Error('no payment stored');
-  return payment;
+async function storedDeposit(body: { network_transaction_id?: unknown }): Promise<StoredDeposit> {
+  const deposit = await depositByNetworkId(pool, body.network_transaction_id);
+  if (deposit === undefined) throw new Error('no deposit stored');
+  return deposit;
 }
 
 async function outboxCount(): Promise<number> {
@@ -51,37 +51,37 @@ async function outboxCount(): Promise<number> {
   return result.rows[0]?.n ?? 0;
 }
 
-describe('payment.created in the outbox', () => {
-  it('is stored once for a new payment, in the transaction that created it', async () => {
+describe('deposit.created in the outbox', () => {
+  it('is stored once for a new deposit, in the transaction that created it', async () => {
     const body = notificationBody();
-    expect((await postPayment(app, body)).statusCode).toBe(204);
-    const payment = await storedPayment(body);
-    const paymentId = payment.id;
-    const paymentTypeId = toTypeId('pay', paymentId);
+    expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
+    const deposit = await storedDeposit(body);
+    const depositId = deposit.id;
+    const depositTypeId = toTypeId('dep', depositId);
 
-    const rows = await outboxRowsFor(pool, paymentId);
+    const rows = await outboxRowsFor(pool, depositId);
     expect(rows).toHaveLength(1);
     const [row] = rows;
     expect(row).toMatchObject({
-      entity_type: 'payment',
-      entity_id: paymentId,
-      subject: 'payment.created',
-      msg_id: `${paymentTypeId}.created`,
+      entity_type: 'deposit',
+      entity_id: depositId,
+      subject: 'deposit.created',
+      msg_id: `${depositTypeId}.created`,
       attempts: 0,
       published_at: null,
     });
     expect(row?.payload).toEqual({
       // The outbox row's ID is the event_id.
       event_id: row && toTypeId('evt', row.id),
-      event_type: 'payment.created',
+      event_type: 'deposit.created',
       schema_version: 1,
-      payment_id: paymentTypeId,
+      deposit_id: depositTypeId,
       network: 'SEPA',
       network_transaction_id: body.network_transaction_id,
       account_id: ALICE.id,
       amount_minor: '1250',
       currency: 'EUR',
-      occurred_at: payment.created_at.toISOString(),
+      occurred_at: deposit.created_at.toISOString(),
     });
     expectEventMatchesContract(row?.payload);
     // No provider identifiers downstream.
@@ -91,51 +91,51 @@ describe('payment.created in the outbox', () => {
     // they were committed by one transaction.
     const xmin = await pool.query<{ same: boolean }>(
       `SELECT p.xmin::text = o.xmin::text AS same
-       FROM incoming_payments p JOIN outbox o ON o.entity_id = p.id
+       FROM deposits p JOIN outbox o ON o.entity_id = p.id
        WHERE p.id = $1`,
-      [paymentId],
+      [depositId],
     );
     expect(xmin.rows).toEqual([{ same: true }]);
   });
 
   it('is not stored again for duplicates', async () => {
     const body = notificationBody();
-    await postPayment(app, body);
+    await postIncomingPayment(app, body);
     const before = await outboxCount();
 
-    const repeats = [await postPayment(app, body), await postPayment(app, body)];
+    const repeats = [await postIncomingPayment(app, body), await postIncomingPayment(app, body)];
     expect(repeats.map((r) => r.statusCode)).toEqual([204, 204]);
     expect(await outboxCount()).toBe(before);
-    expect(await outboxRowsFor(pool, (await storedPayment(body)).id)).toHaveLength(1);
+    expect(await outboxRowsFor(pool, (await storedDeposit(body)).id)).toHaveLength(1);
   });
 
-  it('is not stored for conflicts, unmatched payments or invalid bodies', async () => {
+  it('is not stored for conflicts, unmatched deposits or invalid bodies', async () => {
     const body = notificationBody();
-    await postPayment(app, body);
+    await postIncomingPayment(app, body);
     const before = await outboxCount();
 
     const responses = [
-      await postPayment(app, { ...body, amount_minor: '1' }),
-      await postPayment(app, notificationBody({ creditor_iban: FOREIGN_IBAN })),
-      await postPayment(app, notificationBody({ amount_minor: '0' })),
+      await postIncomingPayment(app, { ...body, amount_minor: '1' }),
+      await postIncomingPayment(app, notificationBody({ creditor_iban: FOREIGN_IBAN })),
+      await postIncomingPayment(app, notificationBody({ amount_minor: '0' })),
     ];
     expect(responses.map((r) => r.statusCode)).toEqual([204, 204, 400]);
     expect(await outboxCount()).toBe(before);
-    expect(await outboxRowsFor(pool, (await storedPayment(body)).id)).toHaveLength(1);
+    expect(await outboxRowsFor(pool, (await storedDeposit(body)).id)).toHaveLength(1);
   });
 });
 
-describe('payment.created through the relay', () => {
-  it('reaches the PAYMENTS stream once', async () => {
+describe('deposit.created through the relay', () => {
+  it('reaches the DEPOSITS stream once', async () => {
     const jsm = await jetstreamManager(nc);
-    const messagesBefore = (await jsm.streams.info(STREAMS.payments)).state.messages;
+    const messagesBefore = (await jsm.streams.info(STREAMS.deposits)).state.messages;
 
     const body = notificationBody();
-    expect((await postPayment(app, body)).statusCode).toBe(204);
-    const paymentId = (await storedPayment(body)).id;
-    const [row] = await outboxRowsFor(pool, paymentId);
+    expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
+    const depositId = (await storedDeposit(body)).id;
+    const [row] = await outboxRowsFor(pool, depositId);
 
-    const msgId = `${toTypeId('pay', paymentId)}.created`;
+    const msgId = `${toTypeId('dep', depositId)}.created`;
     const { publisher, published } = recordingPublisher(streamPublisher);
     await relayBatch(testRelayDeps(pool, publisher));
     // A second batch doesn't publish it again: it is marked published.
@@ -146,24 +146,24 @@ describe('payment.created through the relay', () => {
     // Every publish the stream didn't drop as a duplicate stored one message (this one, and any
     // earlier test's backed-off event that became claimable meanwhile), and nothing else did.
     const stored = published.filter((p) => !p.result.duplicate).length;
-    expect((await jsm.streams.info(STREAMS.payments)).state.messages).toBe(messagesBefore + stored);
+    expect((await jsm.streams.info(STREAMS.deposits)).state.messages).toBe(messagesBefore + stored);
 
-    const message = await jsm.streams.getMessage(STREAMS.payments, {
+    const message = await jsm.streams.getMessage(STREAMS.deposits, {
       seq: ours[0]?.result.seq ?? 0,
     });
-    expect(message?.subject).toBe('payment.created');
+    expect(message?.subject).toBe('deposit.created');
     expect(message?.header.get('Nats-Msg-Id')).toBe(msgId);
     expect(message?.json<unknown>()).toEqual(row?.payload);
   });
 });
 
-describe('PAYMENTS stream', () => {
-  it('matches nats/streams/PAYMENTS.json', async () => {
+describe('DEPOSITS stream', () => {
+  it('matches nats/streams/DEPOSITS.json', async () => {
     const definition = JSON.parse(
-      readFileSync(new URL('../../../nats/streams/PAYMENTS.json', import.meta.url), 'utf8'),
+      readFileSync(new URL('../../../nats/streams/DEPOSITS.json', import.meta.url), 'utf8'),
     ) as Record<string, unknown>;
     const jsm = await jetstreamManager(nc);
-    const { config } = await jsm.streams.info(STREAMS.payments);
+    const { config } = await jsm.streams.info(STREAMS.deposits);
     expect(config).toMatchObject(definition);
   });
 });

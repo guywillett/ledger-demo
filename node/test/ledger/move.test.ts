@@ -16,18 +16,18 @@ import { balancesOf, createTestAccount, createTestPool, type TestAccount } from 
 const pool = createTestPool();
 afterAll(() => pool.end());
 
-// The payment branch of Movement: spreading overrides onto the whole union would lose the
+// The deposit branch of Movement: spreading overrides onto the whole union would lose the
 // pairing of referenceType with its ID and steps.
-type PaymentMovement = Extract<Movement, { referenceType: 'payment' }>;
+type DepositMovement = Extract<Movement, { referenceType: 'deposit' }>;
 
-function booking(account: TestAccount, overrides: Partial<PaymentMovement> = {}): PaymentMovement {
+function booking(account: TestAccount, overrides: Partial<DepositMovement> = {}): DepositMovement {
   return {
     accountId: account.id,
     from: 'external',
     to: 'pending_in',
     amountMinor: 1250n,
-    referenceType: 'payment',
-    referenceId: newUuid('pay'),
+    referenceType: 'deposit',
+    referenceId: newUuid('dep'),
     referenceStep: 'book',
     ...overrides,
   };
@@ -211,7 +211,7 @@ describe('move', () => {
     const again = withTransaction(pool, (tx) => moveOnce(tx, book));
     await expect(again).rejects.toThrow(LedgerInconsistencyError);
     await expect(again).rejects.toThrow(
-      `payment ${book.referenceId}: its book movement already exists, but the payment's state ` +
+      `deposit ${book.referenceId}: its book movement already exists, but the deposit's state ` +
         "says that step hasn't happened yet",
     );
     expect(await movementCount(book)).toBe(1);
@@ -228,8 +228,8 @@ describe('move', () => {
       from: 'external',
       to: 'pending_in',
       amountMinor: 1250n,
-      referenceType: 'payment',
-      referenceId: newUuid('pay'),
+      referenceType: 'deposit',
+      referenceId: newUuid('dep'),
       referenceStep: 'book',
     };
     await expect(withTransaction(pool, (tx) => move(tx, m))).rejects.toThrow(/no balance row/);

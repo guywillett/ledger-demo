@@ -41,18 +41,18 @@ afterAll(async () => {
   await pool.end();
 });
 
-// A minimal event about a fresh (never stored) payment; the outbox doesn't check that it exists.
-// Typed as the payment branch, so tests can spread overrides onto it.
-function testEvent(): Extract<NewOutboxEvent, { entityType: 'payment' }> {
+// A minimal event about a fresh (never stored) deposit; the outbox doesn't check that it exists.
+// Typed as the deposit branch, so tests can spread overrides onto it.
+function testEvent(): Extract<NewOutboxEvent, { entityType: 'deposit' }> {
   const id = newUuid('evt');
-  const paymentId = newUuid('pay');
+  const depositId = newUuid('dep');
   created.push(id);
   return {
     id,
-    entityType: 'payment',
-    entityId: paymentId,
-    subject: 'payment.created',
-    msgId: `${toTypeId('pay', paymentId)}.created`,
+    entityType: 'deposit',
+    entityId: depositId,
+    subject: 'deposit.created',
+    msgId: `${toTypeId('dep', depositId)}.created`,
     payload: { event_id: toTypeId('evt', id), nested: { amount_minor: '1250' } },
   };
 }
@@ -79,8 +79,8 @@ describe('enqueue', () => {
     const [row] = await outboxRowsFor(pool, event.entityId);
     expect(row).toMatchObject({
       id: event.id,
-      entity_type: 'payment',
-      subject: 'payment.created',
+      entity_type: 'deposit',
+      subject: 'deposit.created',
       msg_id: event.msgId,
       payload: event.payload,
       attempts: 0,

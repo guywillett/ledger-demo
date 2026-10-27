@@ -1,13 +1,13 @@
-import { listPayments } from '../payments/payments.ts';
+import { listDeposits } from '../deposits/deposits.ts';
 import { getBalance } from '../ledger/balances.ts';
 import type { Queryable } from '../shared/db.ts';
 import { toTypeId } from '../shared/ids.ts';
-import { statusHistories } from '../payments/status.ts';
+import { statusHistories } from '../deposits/status.ts';
 import { problems, sendProblem, validationErrors } from './problem.ts';
 import {
   accountParamsSchema,
   toBalanceResponse,
-  toPaymentResponse,
+  toDepositResponse,
   toStatusChangeResponse,
   transactionsQuerySchema,
   type TransactionListResponse,
@@ -28,8 +28,8 @@ export function registerAccountRoutes(app: App, deps: { db: Queryable }): void {
     return reply.send(toBalanceResponse(balance));
   });
 
-  // Payments newest first, a page at a time: ?limit (default 50, at most 200) and
-  // ?before=<next_before from the previous page>. ?include=history adds each payment's
+  // Deposits newest first, a page at a time: ?limit (default 50, at most 200) and
+  // ?before=<next_before from the previous page>. ?include=history adds each deposit's
   // status history, fetched for the whole page in one query.
   app.get('/accounts/:account_id/transactions', async (request, reply) => {
     const params = accountParamsSchema.safeParse(request.params);
@@ -41,7 +41,7 @@ export function registerAccountRoutes(app: App, deps: { db: Queryable }): void {
       return sendProblem(reply, problems.invalidRequest(validationErrors(query.error)));
     }
 
-    const page = await listPayments(deps.db, params.data.account_id, {
+    const page = await listDeposits(deps.db, params.data.account_id, {
       limit: query.data.limit,
       ...(query.data.before === undefined ? {} : { before: query.data.before }),
     });
@@ -51,18 +51,18 @@ export function registerAccountRoutes(app: App, deps: { db: Queryable }): void {
       query.data.include === 'history'
         ? await statusHistories(
             deps.db,
-            page.payments.map((p) => p.id),
+            page.deposits.map((p) => p.id),
           )
         : undefined;
 
     const response: TransactionListResponse = {
-      payments: page.payments.map((payment) => ({
-        ...toPaymentResponse(payment),
+      deposits: page.deposits.map((deposit) => ({
+        ...toDepositResponse(deposit),
         ...(histories === undefined
           ? {}
-          : { history: (histories.get(payment.id) ?? []).map(toStatusChangeResponse) }),
+          : { history: (histories.get(deposit.id) ?? []).map(toStatusChangeResponse) }),
       })),
-      next_before: page.nextBefore === null ? null : toTypeId('pay', page.nextBefore),
+      next_before: page.nextBefore === null ? null : toTypeId('dep', page.nextBefore),
     };
     return reply.send(response);
   });

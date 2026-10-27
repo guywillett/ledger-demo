@@ -1,7 +1,7 @@
 {
-  "name": "PAYMENTS",
-  "description": "Payment lifecycle events, one subject per status: payment.<status>",
-  "subjects": ["payment.>"],
+  "name": "DEPOSITS",
+  "description": "Deposit lifecycle events, one subject per status: deposit.<status>",
+  "subjects": ["deposit.>"],
   "storage": "file",
   "num_replicas": 1,
   "retention": "limits",

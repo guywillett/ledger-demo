@@ -414,7 +414,7 @@ describe('GET /withdrawals/:withdrawal_id', () => {
 
     const invalid = await getJson(
       app,
-      `/withdrawals/${toTypeId('pay', newUuid('pay'))}`,
+      `/withdrawals/${toTypeId('dep', newUuid('dep'))}`,
       '/withdrawals/{withdrawal_id}',
     );
     expect(invalid.statusCode).toBe(400);

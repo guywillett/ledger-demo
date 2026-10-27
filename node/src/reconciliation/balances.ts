@@ -2,7 +2,7 @@ import type { Queryable } from '../shared/db.ts';
 import type { Uuid } from '../shared/ids.ts';
 import type { CheckScope } from './scope.ts';
 
-// The balance check: each account's balance row against what its payment and withdrawal statuses
+// The balance check: each account's balance row against what its deposit and withdrawal statuses
 // say, and against the net of its movements.
 
 export type Buckets = {
@@ -11,7 +11,7 @@ export type Buckets = {
   readonly held: bigint;
 };
 
-// An account whose balance disagrees with what its payment and withdrawal statuses, or its
+// An account whose balance disagrees with what its deposit and withdrawal statuses, or its
 // movements, say.
 export type AccountDifference = {
   readonly accountId: Uuid<'acct'>;
@@ -31,8 +31,8 @@ export type AccountDifference = {
 // (with NULL balances) instead of being skipped. One row per account, all held in memory (see
 // the scale note at the top).
 //
-// What the statuses say: pending_in is the payments being processed; available is the credited
-// payments minus every withdrawal that has taken funds from it (held, submitted or executed;
+// What the statuses say: pending_in is the deposits being processed; available is the credited
+// deposits minus every withdrawal that has taken funds from it (held, submitted or executed;
 // a failed one gave them back); held is the withdrawals not yet settled.
 const BALANCES_SQL = `
 WITH accounts_checked AS (
@@ -41,13 +41,13 @@ WITH accounts_checked AS (
   LEFT JOIN account_balances b ON b.account_id = a.id
   WHERE $1::uuid[] IS NULL OR a.id = ANY($1)
 ),
-by_payments AS (
+by_deposits AS (
   SELECT account_id,
          COALESCE(sum(amount_minor)
                     FILTER (WHERE status IN ('received', 'under_review', 'approved', 'rejected')),
                   0) AS pending_in,
          COALESCE(sum(amount_minor) FILTER (WHERE status = 'credited'), 0) AS available
-  FROM incoming_payments
+  FROM deposits
   WHERE account_id IN (SELECT account_id FROM accounts_checked)
   GROUP BY account_id
 ),
@@ -83,7 +83,7 @@ SELECT a.account_id,
        COALESCE(m.available, 0)::text AS movements_available,
        COALESCE(m.held, 0)::text AS movements_held
 FROM accounts_checked a
-LEFT JOIN by_payments p USING (account_id)
+LEFT JOIN by_deposits p USING (account_id)
 LEFT JOIN by_withdrawals w USING (account_id)
 LEFT JOIN by_movements m USING (account_id)
 `;
