@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 
-// Retry timing shared by the long-running processes (worker, relay).
+// Retry timing shared by the long-running processes (deposit-worker, relay).
 
 export type Backoff = {
   readonly retryBaseDelayMs: number;

@@ -329,7 +329,7 @@ describe('reconcile', () => {
         `INSERT INTO event_deliveries (consumer, event_id, delivery_attempt, outcome, received_at)
          VALUES ('submitter', $1, 1, 'applied', now()),
                 ('submitter', $2, 1, 'in_progress', now() - interval '2 minutes'),
-                ('worker', $3, 1, 'duplicate', now())`,
+                ('deposit-worker', $3, 1, 'duplicate', now())`,
         [newUuid('evt'), newUuid('evt'), newUuid('evt')],
       );
       const after = await reconcile(tx, { stuckAfterMs: 60_000 });
@@ -340,7 +340,9 @@ describe('reconcile', () => {
           count(after, 'submitter', 'applied') - count(before, 'submitter', 'applied'),
         submitterInProgress:
           count(after, 'submitter', 'in_progress') - count(before, 'submitter', 'in_progress'),
-        workerDuplicate: count(after, 'worker', 'duplicate') - count(before, 'worker', 'duplicate'),
+        depositWorkerDuplicate:
+          count(after, 'deposit-worker', 'duplicate') -
+          count(before, 'deposit-worker', 'duplicate'),
         staleSubmitter:
           (after.deliveries.staleInProgress.submitter ?? 0) -
           (before.deliveries.staleInProgress.submitter ?? 0),
@@ -349,7 +351,7 @@ describe('reconcile', () => {
     expect(delta).toEqual({
       submitterApplied: 1,
       submitterInProgress: 1,
-      workerDuplicate: 1,
+      depositWorkerDuplicate: 1,
       staleSubmitter: 1,
     });
   });

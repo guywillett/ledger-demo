@@ -99,8 +99,8 @@ describe('hold', () => {
     const error = await createTestWithdrawal(pool, account, 1001n).catch((err: unknown) => err);
 
     expect(error).toBeInstanceOf(InsufficientFundsError);
-    // A business outcome, not the OverdraftError the worker treats as a bug; the cause keeps
-    // the database's refusal.
+    // A business outcome, not the OverdraftError the deposit-worker treats as a bug; the cause
+    // keeps the database's refusal.
     expect(error).not.toBeInstanceOf(OverdraftError);
     expect((error as InsufficientFundsError).cause).toBeInstanceOf(OverdraftError);
     expect(error).toMatchObject({ accountId: account.id, amountMinor: 1001n });

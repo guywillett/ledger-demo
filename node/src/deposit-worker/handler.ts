@@ -13,8 +13,8 @@ import type { DeliveryOutcome } from '../consumer/deliveries.ts';
 import { withDeliveryLog } from '../consumer/delivery-log.ts';
 import type { DeliveredMessage } from '../consumer/messages.ts';
 
-// Handles one delivery of a deposit.created event: the worker's steps 1-10 in the slice spec.
-// Posting and compliance take turns, each step its own transaction:
+// Handles one delivery of a deposit.created event: the deposit-worker's steps 1-10 in the slice
+// spec. Posting and compliance take turns, each step its own transaction:
 //   Tx 1 book (posting) -> Tx 2 start review (compliance) -> review delay -> decision ->
 //   Tx 3 decide (compliance) -> Tx 4 post the decision (posting)
 // Every step is a conditional transition, so a redelivery (after a crash, a timeout or a
@@ -43,7 +43,7 @@ export function handleDelivery(deps: HandlerDeps, msg: DeliveredMessage): Promis
   // lifecycle's (consumer/delivery-log.ts), as is settling the message and recording the outcome.
   return withDeliveryLog(
     {
-      consumer: 'worker',
+      consumer: 'deposit-worker',
       eventType: 'deposit.created',
       schema: depositCreatedV1Schema,
       pool: deps.pool,

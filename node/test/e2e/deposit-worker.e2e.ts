@@ -16,11 +16,11 @@ import {
 } from '../helpers.ts';
 import { cleanStart, kill, startChild, waitFor, type Child } from './children.ts';
 
-// The real relay and worker as child processes (node src/relay/main.ts, node src/worker/main.ts),
-// against the test database and the test NATS, as in production: deposits are posted through
-// the API app, which stores deposit.created in the outbox; the relay publishes it, and the
-// worker consumes it through the durable `worker` consumer. One relay runs for the whole file;
-// workers are started (and killed) per test.
+// The real relay and deposit-worker as child processes (node src/relay/main.ts, node
+// src/deposit-worker/main.ts), against the test database and the test NATS, as in production:
+// deposits are posted through the API app, which stores deposit.created in the outbox; the relay
+// publishes it, and the deposit-worker consumes it through the durable `deposit-worker` consumer.
+// One relay runs for the whole file; workers are started (and killed) per test.
 
 const testApp = await createTestApp();
 const { app, pool } = testApp;
@@ -29,13 +29,14 @@ const nc = await connectTestNats();
 const workers: Child[] = [];
 let relay: Child | undefined;
 
-function startWorker(env: Record<string, string>): Promise<Child> {
-  return startChild('src/worker/main.ts', 'worker started', { APPROVE_RATE: '1', ...env }).then(
-    (worker) => {
-      workers.push(worker);
-      return worker;
-    },
-  );
+function startDepositWorker(env: Record<string, string>): Promise<Child> {
+  return startChild('src/deposit-worker/main.ts', 'deposit-worker started', {
+    APPROVE_RATE: '1',
+    ...env,
+  }).then((worker) => {
+    workers.push(worker);
+    return worker;
+  });
 }
 
 // Every account the tests post to, for the final reconciliation.
@@ -77,7 +78,7 @@ async function deliveriesFor(
 
 async function consumerDeliveries(): Promise<number> {
   const jsm = await jetstreamManager(nc);
-  const info = await jsm.consumers.info(STREAMS.deposits, CONSUMERS.worker);
+  const info = await jsm.consumers.info(STREAMS.deposits, CONSUMERS.depositWorker);
   return info.delivered.consumer_seq;
 }
 
@@ -96,9 +97,9 @@ afterAll(async () => {
   await testApp.close();
 });
 
-describe('worker process', () => {
-  it('processes a posted deposit end to end, and the worker shuts down cleanly on SIGTERM', async () => {
-    const worker = await startWorker({ REVIEW_DELAY_MS: '300' });
+describe('deposit-worker process', () => {
+  it('processes a posted deposit end to end, and the deposit-worker shuts down cleanly on SIGTERM', async () => {
+    const worker = await startDepositWorker({ REVIEW_DELAY_MS: '300' });
     const account = await createTestAccount(pool);
     const depositId = await post(account);
 
@@ -116,9 +117,9 @@ describe('worker process', () => {
     expect(worker.lines().some((l) => l.msg === 'shutting down')).toBe(true);
   });
 
-  it('completes a deposit once after the worker is killed mid-review and restarted', async () => {
+  it('completes a deposit once after the deposit-worker is killed mid-review and restarted', async () => {
     // A long review, so the kill lands inside it.
-    const first = await startWorker({ REVIEW_DELAY_MS: '5000' });
+    const first = await startDepositWorker({ REVIEW_DELAY_MS: '5000' });
     const account = await createTestAccount(pool);
     const depositId = await post(account);
 
@@ -131,7 +132,7 @@ describe('worker process', () => {
     ]);
 
     // JetStream redelivers once ack_wait (10 s) has passed since the last working() signal.
-    await startWorker({ REVIEW_DELAY_MS: '5000' });
+    await startDepositWorker({ REVIEW_DELAY_MS: '5000' });
     await waitFor(async () => (await statusOf(pool, depositId)) === 'credited', 'credited');
 
     expect(await balancesOf(pool, account.id)).toEqual({
@@ -147,8 +148,8 @@ describe('worker process', () => {
   });
 
   it('shares the consumer between two workers, each message going to one of them', async () => {
-    const env = { REVIEW_DELAY_MS: '300', WORKER_CONCURRENCY: '2' };
-    const [a, b] = await Promise.all([startWorker(env), startWorker(env)]);
+    const env = { REVIEW_DELAY_MS: '300', DEPOSIT_WORKER_CONCURRENCY: '2' };
+    const [a, b] = await Promise.all([startDepositWorker(env), startDepositWorker(env)]);
     const account = await createTestAccount(pool);
     const depositIds: Uuid<'dep'>[] = [];
     for (let i = 0; i < 6; i++) depositIds.push(await post(account));
@@ -180,7 +181,7 @@ describe('worker process', () => {
     // would run out unsignalled. (A prefetching consume() with max_messages 3 holds two more
     // messages beyond the three in flight; with one slot it prefetches none, which is why this
     // needs at least two.)
-    await startWorker({ REVIEW_DELAY_MS: '12000', WORKER_CONCURRENCY: '3' });
+    await startDepositWorker({ REVIEW_DELAY_MS: '12000', DEPOSIT_WORKER_CONCURRENCY: '3' });
     const account = await createTestAccount(pool);
     // JetStream counts every delivery, redeliveries included, in the consumer's sequence: the
     // most direct evidence of a redelivery (a redelivered copy may only be handled, and get its

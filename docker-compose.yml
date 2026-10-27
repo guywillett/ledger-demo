@@ -34,7 +34,7 @@ services:
       retries: 15
 
   # NATS for the tests, like ledger_test for the database: test events never reach the
-  # development stream (or the compose worker). No volume: test streams needn't survive a
+  # development stream (or the compose deposit-worker). No volume: test streams needn't survive a
   # restart.
   nats-test:
     image: nats:2.15.1-alpine
@@ -106,7 +106,8 @@ services:
 
   api:
     build: ./node
-    # Named, and built the same way by the worker and relay services: one image for all three.
+    # Named, and built the same way by every Node service: one image for all of them, and compose
+    # picks each service's command.
     image: ledger-demo-node
     # The API exits with a failing code if it can't start; restart it.
     restart: unless-stopped
@@ -148,14 +149,14 @@ services:
       nats-setup:
         condition: service_completed_successfully
 
-  # Books, reviews and posts deposits (src/worker/). Several instances can run at once
-  # (docker compose up -d --scale worker=3): they share the durable consumer, and each
+  # Books, reviews and posts deposits (src/deposit-worker/). Several instances can run at once
+  # (docker compose up -d --scale deposit-worker=3): they share the durable consumer, and each
   # message goes to one of them.
-  worker:
+  deposit-worker:
     # The same image as the api (one Dockerfile for the Node processes), with another command.
     build: ./node
     image: ledger-demo-node
-    command: ["node", "src/worker/main.ts"]
+    command: ["node", "src/deposit-worker/main.ts"]
     # Exits with a failing code if it can't start or loses NATS for good; restart it.
     restart: unless-stopped
     # Graceful shutdown can take just over Docker's default 10 s: a waiting fetch is closed at
@@ -168,7 +169,7 @@ services:
       NATS_URL: nats://nats:4222
       REVIEW_DELAY_MS: "2000"
       APPROVE_RATE: "0.8"
-      WORKER_CONCURRENCY: "10"
+      DEPOSIT_WORKER_CONCURRENCY: "10"
       LOG_LEVEL: info
     depends_on:
       migrate:
@@ -184,8 +185,8 @@ services:
     command: ["node", "src/submitter/main.ts"]
     # Exits with a failing code if it can't start or loses NATS for good; restart it.
     restart: unless-stopped
-    # As the worker: 5 s grace for in-flight submissions, up to 5 s to drain NATS. An unfinished
-    # submission is redelivered and sent again with the same key.
+    # As the deposit-worker: 5 s grace for in-flight submissions, up to 5 s to drain NATS. An
+    # unfinished submission is redelivered and sent again with the same key.
     stop_grace_period: 15s
     environment:
       DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
@@ -222,7 +223,7 @@ services:
 
   # Reconciliation on demand: docker compose run --rm reconcile [options]. It only reads the
   # shared database, so it checks whichever implementation wrote the data; scripts/demo.sh
-  # uses it rather than a script inside the worker image, which the Go worker won't have.
+  # uses it rather than a script inside the Node image, which the Go implementation won't have.
   # The "tools" profile keeps it out of docker compose up.
   reconcile:
     build: ./node

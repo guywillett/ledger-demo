@@ -2,13 +2,13 @@ import type { Queryable } from '../shared/db.ts';
 import type { Uuid } from '../shared/ids.ts';
 
 // The delivery log: one row per message a consumer receives, written before processing and
-// completed after. Shared by every consumer (the worker, the submitter), each row naming its
-// consumer (slice 2 decision 36). A log, not a guard: repeated deliveries of the same event get
+// completed after. Shared by every consumer (the deposit-worker, the submitter), each row naming
+// its consumer (slice 2 decision 36). A log, not a guard: repeated deliveries of the same event get
 // their own rows (no unique constraint), which is how duplicates are counted. Idempotency comes
 // from the entity's state and the ledger, never from this table.
 
 // The consumers that write here; the column's CHECK allows exactly these.
-export type ConsumerName = 'worker' | 'submitter';
+export type ConsumerName = 'deposit-worker' | 'submitter';
 
 export type DeliveryOutcome = 'applied' | 'duplicate' | 'invalid' | 'failed';
 

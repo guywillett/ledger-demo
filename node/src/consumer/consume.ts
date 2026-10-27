@@ -12,9 +12,9 @@ import type { Logger } from '../shared/logger.ts';
 import type { NatsConnection } from '../shared/nats.ts';
 import { delivered, type DeliveredMessage } from './messages.ts';
 
-// The pull loop shared by the processes that consume a durable JetStream consumer (the worker,
-// the submitter): handles up to `concurrency` messages at once. Several instances can share the
-// consumer: JetStream gives each message to one of them.
+// The pull loop shared by the processes that consume a durable JetStream consumer (the
+// deposit-worker, the submitter): handles up to `concurrency` messages at once. Several instances
+// can share the consumer: JetStream gives each message to one of them.
 //
 // Messages are pulled only when there's a free slot (fetch exactly the free slots), so every
 // message a process holds is being handled: its handler starts, and with it any working()

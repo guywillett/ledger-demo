@@ -18,7 +18,7 @@ import { moveOnce, OverdraftError, type Bucket, type WithdrawalStep } from './mo
 // transaction, so both happen or neither does. The deposits' postings are in posting.ts.
 
 // Not enough available funds for the withdrawal: a business outcome (the client asked for more
-// than the account holds), not a bug. Deliberately not an OverdraftError, which the worker
+// than the account holds), not a bug. Deliberately not an OverdraftError, which the deposit-worker
 // treats as an invariant violation: only hold() turns one into the other, for the `available`
 // bucket, where running short is expected.
 export class InsufficientFundsError extends Error {

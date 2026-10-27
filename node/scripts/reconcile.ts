@@ -326,7 +326,7 @@ function toText(report: ReconcileReport, stuckAfterMinutes: number): string {
 // Which side stalled, for a deposit stuck in `created`.
 const EVENT_STATE: Record<CreatedEventState, string> = {
   unpublished: 'unpublished (relay)',
-  published: 'published (worker)',
+  published: 'published (deposit-worker)',
   missing: 'MISSING (bug: stored without its event)',
 };
 

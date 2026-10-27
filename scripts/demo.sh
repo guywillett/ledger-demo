@@ -9,7 +9,7 @@
 # 2. 10 concurrent identical notifications  -> one deposit
 # 3. the same network ID, another amount    -> recorded as a conflict, the deposit unchanged
 # 4. a valid IBAN that isn't ours           -> recorded in suspense, in no account's list
-# 5. a burst of deposits, with the worker killed (SIGKILL) mid-review and restarted
+# 5. a burst of deposits, with the deposit-worker killed (SIGKILL) mid-review and restarted
 # 6. a burst of deposits shared by two workers
 # then waits until every deposit has finished, funds carol, and runs withdrawals through the
 # submitter and provider-sim (both in compose), checking each through the API and her balance:
@@ -24,8 +24,8 @@
 # withdrawals held or submitted, unpublished events).
 #
 # The final check covers the whole development database, not just this run: a deposit left
-# unfinished earlier (an aborted run, a notification sent while the worker was down) fails it
-# too, and the reconciliation report lists it. For a clean slate: docker compose down -v.
+# unfinished earlier (an aborted run, a notification sent while the deposit-worker was down) fails
+# it too, and the reconciliation report lists it. For a clean slate: docker compose down -v.
 #
 # Uses only the HTTP API and docker compose (reconciliation runs in its own compose service,
 # which reads the shared database), so it works against any implementation of the contract.
@@ -115,8 +115,8 @@ wait_transfer_created() {
   return 1
 }
 
-# fund <account> <iban> <minimum>: posts deposits of 2000 to the account, each waited on until
-# the worker has settled it, until available reaches the minimum. The pseudo review rejects some
+# fund <account> <iban> <minimum>: posts deposits of 2000 to the account, each waited on until the
+# deposit-worker has settled it, until available reaches the minimum. The pseudo review rejects some
 # deposits at random, so how many it takes varies; gives up (exit 2) after 20.
 fund() {
   local i ntx deadline settled
@@ -202,22 +202,22 @@ done
 contains "listed in the reconciliation report's suspense section" "$RUN-unknown" \
   "$(reconcile --stuck-after 10 2>/dev/null || true)"
 
-say "5. A burst of deposits while the worker is killed mid-review"
+say "5. A burst of deposits while the deposit-worker is killed mid-review"
 for i in $(seq 1 10); do post "$RUN-crash-$i" "$CAROL_IBAN" $((100 * i)) > /dev/null; done
-# Let the worker book them and start reviewing. The kill lands mid-review only because the
+# Let the deposit-worker book them and start reviewing. The kill lands mid-review only because the
 # review takes REVIEW_DELAY_MS (2000 in compose): with a much shorter delay the deposits would
 # finish first and this step would test nothing (the run would still pass).
 sleep 1
-docker compose kill -s SIGKILL worker > /dev/null 2>&1
-echo "   worker killed (SIGKILL): unacknowledged messages are redelivered after ack_wait (10 s)"
+docker compose kill -s SIGKILL deposit-worker > /dev/null 2>&1
+echo "   deposit-worker killed (SIGKILL): unacknowledged messages are redelivered after ack_wait (10 s)"
 sleep 2
-docker compose up -d worker > /dev/null 2>&1
-echo "   worker restarted"
+docker compose up -d deposit-worker > /dev/null 2>&1
+echo "   deposit-worker restarted"
 
 say "6. A burst of deposits shared by two workers"
-# Back to one worker however the script ends (set -e can stop it anywhere from here).
-trap 'docker compose up -d --scale worker=1 worker > /dev/null 2>&1' EXIT
-docker compose up -d --scale worker=2 --no-recreate worker > /dev/null 2>&1
+# Back to one deposit-worker however the script ends (set -e can stop it anywhere from here).
+trap 'docker compose up -d --scale deposit-worker=1 deposit-worker > /dev/null 2>&1' EXIT
+docker compose up -d --scale deposit-worker=2 --no-recreate deposit-worker > /dev/null 2>&1
 for i in $(seq 1 20); do post "$RUN-scaled-$i" "$BOB_IBAN" $((10 * i)) > /dev/null; done
 echo "   20 deposits posted to two workers"
 
@@ -309,7 +309,7 @@ expect "ends executed" executed "$(field "$(wait_final "$withdrawal" 60)" status
 expect "applied once" "$((before - 400))/0" "$(balance "$CAROL" available)/$(balance "$CAROL" held)"
 
 say "Reconciliation"
-echo "   (deliveries left in_progress are the trace of the killed worker and submitter: each redelivery got its own row)"
+echo "   (deliveries left in_progress are the trace of the killed deposit-worker and submitter: each redelivery got its own row)"
 set +e
 reconcile --stuck-after 0 --fail-on-stuck
 status=$?

@@ -19,7 +19,7 @@ export function streamForSubject(subject: string): StreamName {
   throw new Error(`no stream for subject ${subject}`);
 }
 // Durable consumers, created by nats-setup from nats/consumers/<STREAM>/<NAME>.json.
-export const CONSUMERS = { worker: 'worker', submitter: 'submitter' } as const;
+export const CONSUMERS = { depositWorker: 'deposit-worker', submitter: 'submitter' } as const;
 
 // How long a publish waits for the stream's acknowledgement before it counts as failed.
 export const PUBLISH_TIMEOUT_MS = 2000;

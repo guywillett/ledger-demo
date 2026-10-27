@@ -3,7 +3,7 @@ import { loadApiConfig } from '../../src/api/config.ts';
 import { loadRelayConfig } from '../../src/relay/config.ts';
 import { loadSharedConfig } from '../../src/shared/config.ts';
 import { assertTimeoutFitsAckWait, loadSubmitterConfig } from '../../src/submitter/config.ts';
-import { loadWorkerConfig } from '../../src/worker/config.ts';
+import { loadDepositWorkerConfig } from '../../src/deposit-worker/config.ts';
 
 const DATABASE_URL = 'postgres://u:p@localhost:5432/db';
 const NATS_URL = 'nats://localhost:4222';
@@ -25,10 +25,10 @@ describe('NATS_URL', () => {
     expect(loadApiConfig({ DATABASE_URL })).toMatchObject({ databaseUrl: DATABASE_URL });
   });
 
-  it('is required by the worker and the relay', () => {
-    expect(() => loadWorkerConfig({ DATABASE_URL })).toThrow(/NATS_URL/);
+  it('is required by the deposit-worker and the relay', () => {
+    expect(() => loadDepositWorkerConfig({ DATABASE_URL })).toThrow(/NATS_URL/);
     expect(() => loadRelayConfig({ DATABASE_URL })).toThrow(/NATS_URL/);
-    expect(loadWorkerConfig({ DATABASE_URL, NATS_URL }).natsUrl).toBe(NATS_URL);
+    expect(loadDepositWorkerConfig({ DATABASE_URL, NATS_URL }).natsUrl).toBe(NATS_URL);
   });
 });
 

@@ -14,7 +14,7 @@ export type Child = {
   readonly exited: Promise<number | null>;
 };
 
-// Starts `script` (e.g. src/worker/main.ts) and resolves once it has logged `ready`.
+// Starts `script` (e.g. src/deposit-worker/main.ts) and resolves once it has logged `ready`.
 export function startChild(
   script: string,
   ready: string,

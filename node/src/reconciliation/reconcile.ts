@@ -29,9 +29,9 @@ export type { StuckWithdrawal, TransferUpdateProblem, WithdrawalMismatch } from 
 // Plus what all three can agree on and still be wrong: deposits and withdrawals that stopped
 // part-way, and events stuck in the outbox.
 //
-// Read-only. Run it in one REPEATABLE READ transaction (scripts/reconcile.ts does) so every
-// query sees the same snapshot while the worker carries on: each worker step commits its status
-// change, movement and balance update together, so any snapshot is consistent.
+// Read-only. Run it in one REPEATABLE READ transaction (scripts/reconcile.ts does) so every query
+// sees the same snapshot while the deposit-worker carries on: each deposit-worker step commits its
+// status change, movement and balance update together, so any snapshot is consistent.
 //
 // Scale: fine for the demo, not for millions of deposits as written.
 // - Memory: DEPOSIT_STEPS_SQL returns a row per deposit, WITHDRAWAL_STEPS_SQL a row per

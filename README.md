@@ -26,8 +26,8 @@ at all. For example:
 
 Each of these is handled and proved. Every guarantee below names the test that shows it, and
 [`scripts/demo.sh`](scripts/demo.sh) causes the failures against the running system (repeats,
-conflicts, a worker killed mid-review, the submitter killed mid-transfer), then reconciles the
-books and fails if they don't agree. CI runs it on every push.
+conflicts, a deposit-worker killed mid-review, the submitter killed mid-transfer), then
+reconciles the books and fails if they don't agree. CI runs it on every push.
 
 ```text
 Deposits
@@ -42,7 +42,7 @@ provider ──POST /provider/incoming-payments──► API ──► Postgres,
                                  JetStream DEPOSITS: deposit.created
                                                │
                                                ▼
-                                 worker (any number of instances)
+                                 deposit-worker (any number of instances)
                     book ──► start review ──► decide ──► post the decision
                 (pending_in)                (approve/reject)   (available, or returned)
                           each step one transaction, through ledger/move()
@@ -72,15 +72,15 @@ provider ──POST /provider/transfer-updates (webhook)──► API ──► 
 | A repeated incoming payment notification changes nothing | `UNIQUE (network, network_transaction_id)` and one upsert statement: same details → a duplicate, counted | `test/api/incoming-payments.test.ts` ("records the same notification sent 5 times once…", "records 10 concurrent identical notifications once"); `scripts/demo.sh` steps 1–2 |
 | An incoming payment notification that can't be booked is recorded, never ignored | an unknown account goes into suspense (status `unmatched`: no account, no event, no movement; a retry stays a duplicate of it, resolution is never automatic); the same network ID with other details becomes a conflict record, the deposit unchanged; both alerted and reported by reconciliation | `test/api/incoming-payments.test.ts` ("records a valid IBAN that is not ours as unmatched…", "keeps it unmatched after an account with that IBAN is created…", "records a different amount as a conflict…"); `scripts/demo.sh` steps 3–4 |
 | An event is never lost between commit and publish | the event is written to `outbox` in the same transaction as the state change; a relay publishes it at least once (claims leased with `FOR UPDATE SKIP LOCKED`, marked after the stream's acknowledgement); the stream drops a repeat by its `msg_id` | `test/api/deposit-events.test.ts` and `test/api/withdrawals.test.ts` (one outbox row, same transaction); `test/outbox/outbox.test.ts` (rollback, leases, disjoint concurrent claims); `test/relay/relay.test.ts` ("publishes again after a relay crashed between publishing and marking, and the stream drops the repeat") |
-| A repeated or concurrent event moves money once | every step is a conditional transition (`UPDATE … WHERE status = $expected`), never check-then-act | `test/worker/handler.test.ts` (same event twice, two consumers at once) |
+| A repeated or concurrent event moves money once | every step is a conditional transition (`UPDATE … WHERE status = $expected`), never check-then-act | `test/deposit-worker/handler.test.ts` (same event twice, two consumers at once) |
 | A retried withdrawal request never takes money twice | the client's `Idempotency-Key` is unique per account on the withdrawal itself, so only a request that commits takes it (a `422`, `404` or crash leaves it free); a repeat returns the withdrawal's current state, a reused key with other details is a `409` | `test/api/withdrawals.test.ts` ("answers a repeated request with the same withdrawal…", "creates one withdrawal for 10 concurrent requests with one key", "refuses insufficient funds with 422, storing nothing, and the key stays free"); `scripts/demo.sh` steps 8–9 |
 | Insufficient funds is decided atomically with the hold | the hold is a `move(available → held)` in the request's own transaction, and the balance CHECK is the insufficient-funds check (no check-then-act), so concurrent withdrawals can't overspend | `test/ledger/withdrawals.test.ts` and `test/api/withdrawals.test.ts` ("lets exactly one of two concurrent withdrawals that together exceed available…"); `scripts/demo.sh` step 10 |
 | An unknown outcome is retried with the same key, never guessed | the submitter sends each withdrawal with its TypeID as `Idempotency-Key`, built only from the stored withdrawal; a timeout or `5xx` leaves it `held` and asks again later; only a definitive refusal releases funds | `test/submitter/provider.test.ts` ("maps a timeout to unknown, and the next call with the same key gets the same, single transfer"); `test/submitter/handler.test.ts`; `test/e2e/submitter.e2e.ts` ("settles once after the submitter is killed mid-call…", `SIM ERROR`); `scripts/demo.sh` step 13 |
 | A provider result is applied exactly once, even when it arrives first, twice, or contradicts itself | the update is recorded and the withdrawal settled in one transaction, by a conditional transition from `held` or `submitted`; a resend is counted, a second event for the same result skips, a contradiction (the other final status, another transfer ID) or an unmatched update is recorded and alerted, moving no money | `test/api/transfer-updates.test.ts`; `test/e2e/submitter.e2e.ts` (`SIM EARLY`, `SIM DUPLICATE`, `SIM FAIL`, `SIM REFUSE`); `scripts/demo.sh` steps 11–12 |
 | Provider webhooks follow the webhook contract | `204` with no body for everything recorded or deliberately handled (so they are no oracle for what exists), `400` only for an unusable body, `500` when a retry helps | `test/api/incoming-payments.test.ts`, `test/api/transfer-updates.test.ts` (every outcome `204`; "answers 400 (not 415)…") |
 | An answer that signals our bug moves no money | a provider `400`/`409`, a transfer-ID mismatch or a ledger invariant violation terminates the message with an alert and leaves the withdrawal `held` for a person | `test/submitter/handler.test.ts` ("treats invalid (400) as our bug…", "terminates a ledger invariant violation with an alert…") |
-| Crash safety | each step commits on its own; a redelivery skips what's done, and a recorded decision is never re-made | `test/worker/handler.test.ts` (crash after booking, after deciding); `test/e2e/worker.e2e.ts` and `test/e2e/submitter.e2e.ts` (real `kill -9` mid-review, mid-call); `scripts/demo.sh` steps 5 and 13 |
-| Horizontal scaling | instances share one durable JetStream consumer; each fetches only as many messages as it has free slots; relays claim disjoint batches | `test/e2e/worker.e2e.ts` (two workers; long reviews never redelivered); `test/outbox/outbox.test.ts` ("gives two concurrent claims disjoint events (SKIP LOCKED)") |
+| Crash safety | each step commits on its own; a redelivery skips what's done, and a recorded decision is never re-made | `test/deposit-worker/handler.test.ts` (crash after booking, after deciding); `test/e2e/deposit-worker.e2e.ts` and `test/e2e/submitter.e2e.ts` (real `kill -9` mid-review, mid-call); `scripts/demo.sh` steps 5 and 13 |
+| Horizontal scaling | instances share one durable JetStream consumer; each fetches only as many messages as it has free slots; relays claim disjoint batches | `test/e2e/deposit-worker.e2e.ts` (two workers; long reviews never redelivered); `test/outbox/outbox.test.ts` ("gives two concurrent claims disjoint events (SKIP LOCKED)") |
 | The ledger protects itself | `move()` records each movement under `UNIQUE (reference_type, reference_id, reference_step)`; a reused reference with other details is refused; a reference's type and step are checked as a pair, in the database and in the `Movement` type | `test/ledger/move.test.ts`, `test/ledger/withdrawals.test.ts` |
 | Audit trail | `balance_movements`, `deposit_status_history` and `withdrawal_status_history` are append-only, enforced by triggers | `test/ledger/move.test.ts`, `test/ledger/lifecycle.test.ts` |
 | Exact money | integer minor units as `bigint` in Postgres, `BigInt` in TypeScript, digit strings in JSON ([decision 0001](docs/decisions/0001-money-representation.md)) | amounts above 2^53 in the API, ledger, database and logging tests |
@@ -119,8 +119,8 @@ With ten minutes to spare:
 ## Repository layout
 
 ```text
-node/             the Node.js/TypeScript implementation: API, relay, worker, submitter, provider-sim
-  src/            one folder per concern (api, ledger, outbox, relay, consumer, worker, submitter, …)
+node/             the Node.js/TypeScript implementation: API, relay, deposit-worker, submitter, provider-sim
+  src/            one folder per concern (api, ledger, outbox, relay, consumer, deposit-worker, submitter, …)
   test/           integration tests against the compose services; e2e tests kill real processes
 db/migrations/    plain SQL run by dbmate, shared by every implementation
 contracts/        OpenAPI and event schemas; every test response and event is checked against them
@@ -132,8 +132,8 @@ docs/             slice specs with their decisions; decisions/ for cross-cutting
 ## Quick start
 
 ```sh
-docker compose up -d --build     # Postgres, NATS, migrations, stream setup, API, relay, worker, submitter, provider-sim
-scripts/demo.sh                  # deposits: duplicates, conflicts, suspense, a killed worker, two workers;
+docker compose up -d --build     # Postgres, NATS, migrations, stream setup, API, relay, deposit-worker, submitter, provider-sim
+scripts/demo.sh                  # deposits: duplicates, conflicts, suspense, a killed deposit-worker, two workers;
                                  # withdrawals: repeats, insufficient funds, provider failures, a killed submitter; then reconciles
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance    # alice
 ```

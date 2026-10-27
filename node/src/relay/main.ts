@@ -84,8 +84,8 @@ async function start(): Promise<RelayDeps> {
     });
   }
 
-  // As in the worker: outside a shutdown, the connection only closes for good on a fatal error,
-  // and every publish would fail from then on. Exit with a failing code, so the container is
+  // As in the deposit-worker: outside a shutdown, the connection only closes for good on a fatal
+  // error, and every publish would fail from then on. Exit with a failing code, so the container is
   // restarted.
   void nc.closed().then((err) => {
     if (shuttingDown) return;

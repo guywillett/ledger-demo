@@ -47,10 +47,10 @@ export function handleSubmission(
       pool: deps.pool,
       logger: deps.logger,
       retry: deps,
-      // Our bugs among thrown errors: a ledger invariant violation from markSubmitted or
-      // release, as in the worker, or the provider's update having stored another transfer ID
-      // (decision 35). Terminated with an alert, the withdrawal left held; the error's fields
-      // (e.g. both transfer IDs) are logged with it.
+      // Our bugs among thrown errors: a ledger invariant violation from markSubmitted or release,
+      // as in the deposit-worker, or the provider's update having stored another transfer ID
+      // (decision 35). Terminated with an alert, the withdrawal left held; the error's fields (e.g.
+      // both transfer IDs) are logged with it.
       isBug: (err) => isInvariantViolation(err) || err instanceof TransferIdMismatchError,
       // E.g. the database went away after an accepted call. The redelivery calls again with
       // the same key, gets the same transfer, and records it.

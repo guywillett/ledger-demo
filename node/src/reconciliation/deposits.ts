@@ -24,9 +24,9 @@ export type DepositMismatch = {
 };
 
 // For a deposit stuck in `created`, where its deposit.created event is, which says which side
-// stalled: 'unpublished', the relay (the event is still in the outbox); 'published', the worker
-// (the event reached the stream but the deposit wasn't booked); 'missing', a bug (the deposit
-// was stored without its event, which the shared transaction should make impossible).
+// stalled: 'unpublished', the relay (the event is still in the outbox); 'published', the
+// deposit-worker (the event reached the stream but the deposit wasn't booked); 'missing', a bug
+// (the deposit was stored without its event, which the shared transaction should make impossible).
 export type CreatedEventState = 'unpublished' | 'published' | 'missing';
 
 export type StuckDeposit = {

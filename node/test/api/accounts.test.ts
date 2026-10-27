@@ -13,9 +13,9 @@ import {
   type TestAccount,
 } from '../helpers.ts';
 
-// GET /accounts/:id/balance and /transactions against the test database. Deposits are put
-// through the lifecycle with the ledger and compliance functions directly (no worker needed).
-// Every response is checked against contracts/openapi.yaml by getJson.
+// GET /accounts/:id/balance and /transactions against the test database. Deposits are put through
+// the lifecycle with the ledger and compliance functions directly (no deposit-worker needed). Every
+// response is checked against contracts/openapi.yaml by getJson.
 
 const testApp = await createTestApp();
 const { app, pool } = testApp;

@@ -4,9 +4,10 @@ import type { CheckScope } from './scope.ts';
 // Delivery statistics: the consumers' delivery log (whole database: deliveries aren't linked to
 // accounts) and repeat notifications from the provider.
 
-// Per consumer (the worker, the submitter: one delivery log for both, slice 2 decision 36).
+// Per consumer (the deposit-worker, the submitter: one delivery log for both, slice 2 decision 36).
 export type DeliveryStats = {
-  // Outcome counts, e.g. { worker: { applied: 12, duplicate: 1 }, submitter: { applied: 3 } }.
+  // Outcome counts, e.g. { 'deposit-worker': { applied: 12, duplicate: 1 }, submitter: { applied: 3
+  // } }.
   readonly byConsumer: Readonly<Record<string, Readonly<Record<string, number>>>>;
   // Deliveries still in_progress after the stuck threshold: the trace a crash leaves (the
   // redelivery gets its own row), or a consumer still working on it. Consumers with none are

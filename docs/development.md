@@ -15,7 +15,7 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `nats-setup` | nats-box: applies the stream and consumer definitions in `nats/` and exits | — |
 | `api` | the Node API (`node/`, image `ledger-demo-node`); Postgres only, no NATS | `3000` |
 | `relay` | the Node relay (same image): publishes the outbox to JetStream (`DEPOSITS`, `WITHDRAWALS`) | — |
-| `worker` | the Node worker (same image): books, reviews and posts deposits | — |
+| `deposit-worker` | the Node deposit-worker (same image): books, reviews and posts deposits | — |
 | `submitter` | the Node submitter (same image): sends each held withdrawal to the provider | — |
 | `nats-test` | a separate NATS for the tests, so test events never reach the development stream | `4223`, `8223` |
 | `nats-setup-test` | the same definitions applied to `nats-test` | — |
@@ -42,7 +42,7 @@ docker compose stop             # stop containers, keep them and their data
 docker compose down             # remove containers and network; data volumes are kept
 ```
 
-`migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits; `nats-setup` does the same for the JetStream streams once NATS is healthy. It's normal for both to show as exited. The `api` starts only after `migrate` has succeeded; the `relay`, `worker` and `submitter` after both (the `submitter` also after `provider-sim` has started).
+`migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits; `nats-setup` does the same for the JetStream streams once NATS is healthy. It's normal for both to show as exited. The `api` starts only after `migrate` has succeeded; the `relay`, `deposit-worker` and `submitter` after both (the `submitter` also after `provider-sim` has started).
 
 There's no health endpoint yet (see *Known gaps* in the slice spec); `docker compose logs api` shows "Server listening" once it's up.
 
@@ -55,7 +55,7 @@ NATS="docker run --rm --network ledger-demo_default natsio/nats-box:0.20.0 nats 
 $NATS stream info DEPOSITS                       # configuration and message counts
 $NATS stream get DEPOSITS --last-for deposit.created   # the latest deposit.created event
 $NATS stream get WITHDRAWALS --last-for withdrawal.held # the latest withdrawal.held event (IDs and amount only)
-$NATS consumer info DEPOSITS worker              # the worker's consumer: pending, unacked, redelivered
+$NATS consumer info DEPOSITS deposit-worker              # the deposit-worker's consumer: pending, unacked, redelivered
 ```
 
 ## Fake provider
@@ -99,14 +99,14 @@ docker compose up -d --scale submitter=2   # two instances sharing the consumer
 $NATS consumer info WITHDRAWALS submitter  # pending, unacked, redelivered
 ```
 
-## Worker
+## Deposit-worker
 
-`docker compose up -d` starts one worker. It pulls `deposit.created` from the durable `worker` consumer, books the deposit, reviews it (`REVIEW_DELAY_MS`, default 2000), decides (approve with probability `APPROVE_RATE`, default 0.8) and posts the decision, handling up to `WORKER_CONCURRENCY` (default 10) messages at once.
+`docker compose up -d` starts one deposit-worker. It pulls `deposit.created` from the durable `deposit-worker` consumer, books the deposit, reviews it (`REVIEW_DELAY_MS`, default 2000), decides (approve with probability `APPROVE_RATE`, default 0.8) and posts the decision, handling up to `DEPOSIT_WORKER_CONCURRENCY` (default 10) messages at once.
 
 ```sh
-docker compose logs -f worker              # follow what it does
-docker compose up -d --scale worker=3      # three instances sharing the consumer; each message goes to one
-docker compose kill -s SIGKILL worker      # crash it mid-review: the message is redelivered after ack_wait (10 s)
+docker compose logs -f deposit-worker              # follow what it does
+docker compose up -d --scale deposit-worker=3      # three instances sharing the consumer; each message goes to one
+docker compose kill -s SIGKILL deposit-worker      # crash it mid-review: the message is redelivered after ack_wait (10 s)
 ```
 
 ## Migrations
@@ -201,7 +201,7 @@ Tests default to the compose services on `localhost`: `ledger_test` and the test
 One exception to "tests don't depend on each other": the tests that claim from the outbox (`test/relay/`, `test/outbox/`, `test/api/deposit-events.test.ts`). Claiming takes the oldest unpublished events in the whole table, and every test that creates a deposit leaves one behind, so these files form a second Vitest project, `relay`, that runs after all the others and one file at a time; each of their tests first drains the backlog (see `vitest.config.ts`).
 
 ```sh
-npm run test:e2e                # process-level tests: the real relay, worker, submitter and provider-sim; kill -9 the worker and the submitter, restart them (~2 min)
+npm run test:e2e                # process-level tests: the real relay, deposit-worker, submitter and provider-sim; kill -9 the deposit-worker and the submitter, restart them (~2 min)
 ```
 
 The e2e tests drain the test outbox and purge the test stream first; don't run them at the same time as `npm test`.
@@ -218,7 +218,7 @@ npm run start:api               # without watching
 docker compose start api        # afterwards, back to the container
 ```
 
-The same curl works against either. Send an incoming payment notification for alice to the provider webhook. It answers `204` with no body whatever the notification did (the webhook contract), so look at the effect in alice's transactions: a new deposit (`created`, then booked and reviewed by the worker), a rising `notification_count` when you repeat it, an unchanged deposit when you change the amount (recorded as a conflict), and nothing in any account for an IBAN that isn't ours (recorded in suspense; `docker compose run --rm reconcile` lists it). Each new deposit's `deposit.created` event goes to the outbox, and the relay publishes it (see *Streams* above to read it back):
+The same curl works against either. Send an incoming payment notification for alice to the provider webhook. It answers `204` with no body whatever the notification did (the webhook contract), so look at the effect in alice's transactions: a new deposit (`created`, then booked and reviewed by the deposit-worker), a rising `notification_count` when you repeat it, an unchanged deposit when you change the amount (recorded as a conflict), and nothing in any account for an IBAN that isn't ours (recorded in suspense; `docker compose run --rm reconcile` lists it). Each new deposit's `deposit.created` event goes to the outbox, and the relay publishes it (see *Streams* above to read it back):
 
 ```sh
 curl -i -X POST localhost:3000/provider/incoming-payments -H 'content-type: application/json' -d '{

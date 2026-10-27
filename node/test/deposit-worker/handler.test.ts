@@ -10,7 +10,7 @@ import { newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { createLogger } from '../../src/shared/logger.ts';
 import { startDelivery } from '../../src/consumer/deliveries.ts';
 import type { DeliveredMessage } from '../../src/consumer/messages.ts';
-import { handleDelivery, type HandlerDeps } from '../../src/worker/handler.ts';
+import { handleDelivery, type HandlerDeps } from '../../src/deposit-worker/handler.ts';
 import {
   balancesOf,
   capturingLogger,
@@ -21,8 +21,8 @@ import {
   statusOf,
 } from '../helpers.ts';
 
-// The worker's handler against the test database, with fake messages. No NATS: a message here
-// is what JetStream would deliver, and "redelivery" is calling the handler again.
+// The deposit-worker's handler against the test database, with fake messages. No NATS: a message
+// here is what JetStream would deliver, and "redelivery" is calling the handler again.
 
 const pool = createTestPool();
 afterAll(() => pool.end());
@@ -197,7 +197,7 @@ describe('handleDelivery', () => {
     const deposit = await newDeposit();
     const { body, eventId } = eventFor(deposit);
     await startDelivery(pool, {
-      consumer: 'worker',
+      consumer: 'deposit-worker',
       eventId,
       natsMsgId: 'crashed',
       deliveryAttempt: 1,
@@ -221,7 +221,7 @@ describe('handleDelivery', () => {
     const deposit = await newDeposit();
     const { body, eventId } = eventFor(deposit);
     await startDelivery(pool, {
-      consumer: 'worker',
+      consumer: 'deposit-worker',
       eventId,
       natsMsgId: 'crashed',
       deliveryAttempt: 1,

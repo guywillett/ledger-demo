@@ -9,8 +9,8 @@ import { providerClient } from './provider.ts';
 // Entry point: node src/submitter/main.ts. Pulls withdrawal.held messages from the durable
 // `submitter` consumer and sends each withdrawal to the provider, up to SUBMITTER_CONCURRENCY at
 // once. The process lifecycle (connect, pull loop, signals, graceful shutdown, exit codes) is
-// shared with the worker: src/consumer/process.ts. Several instances can share the consumer:
-// JetStream gives each message to one of them. An unfinished submission is redelivered on
+// shared with the deposit-worker: src/consumer/process.ts. Several instances can share the
+// consumer: JetStream gives each message to one of them. An unfinished submission is redelivered on
 // shutdown, and asks again with the same key.
 
 // An unknown provider outcome or a transient failure is retried with DELIVERY_RETRY

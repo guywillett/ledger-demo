@@ -147,7 +147,7 @@ CREATE INDEX event_deliveries_event_idx
     ON event_deliveries (event_id);
 
 -- Append-only audit logs: rows are inserted, never changed or removed, whoever connects.
--- event_deliveries is not included: the worker updates each delivery's outcome.
+-- event_deliveries is not included: the consumers update each delivery's outcome.
 -- (DROP TABLE, as in migrate:down or a database reset, is not affected.)
 --
 -- Good enough for the demo, where everything connects as one user that owns the tables. In
