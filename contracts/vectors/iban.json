@@ -1,0 +1,482 @@
+[
+  {
+    "name": "electronic format",
+    "input": "DE75512108001245126199",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "paper format (groups of four)",
+    "input": "DE75 5121 0800 1245 1261 99",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "lower case",
+    "input": "de75512108001245126199",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "leading and trailing spaces",
+    "input": "  DE75512108001245126199 ",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "tabs and newlines",
+    "input": "DE75\t5121\n0800\r\n1245 1261 99",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "no-break spaces (U+00A0)",
+    "input": "DE75\u00a05121\u00a00800\u00a01245\u00a01261\u00a099",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "narrow no-break spaces (U+202F)",
+    "input": "DE75\u202f5121\u202f0800\u202f1245\u202f1261\u202f99",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "a byte-order mark (U+FEFF) in front",
+    "input": "\ufeffDE75512108001245126199",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "ideographic space (U+3000)",
+    "input": "DE75\u30005121080012451261 99",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "next line (U+0085) is not whitespace to JavaScript",
+    "input": "DE75\u00855121080012451261 99",
+    "ok": false,
+    "why": "U+0085 is not removed; not a letter or digit"
+  },
+  {
+    "name": "zero-width space (U+200B) is not whitespace",
+    "input": "DE75\u200b5121080012451261 99",
+    "ok": false,
+    "why": "U+200B is not removed"
+  },
+  {
+    "name": "dotless i (U+0131) upper-cases to I",
+    "input": "\u0131t60x0542811101000000123456",
+    "ok": true,
+    "value": "IT60X0542811101000000123456"
+  },
+  {
+    "name": "long s (U+017F) upper-cases to S",
+    "input": "GB63BO\u017f\u017f12345612345678",
+    "ok": true,
+    "value": "GB63BOSS12345612345678"
+  },
+  {
+    "name": "sharp s (U+00DF) upper-cases to SS",
+    "input": "gb63bo\u00df12345612345678",
+    "ok": true,
+    "value": "GB63BOSS12345612345678"
+  },
+  {
+    "name": "the st ligature (U+FB06) upper-cases to ST",
+    "input": "GB82WE\ufb0612345698765432",
+    "ok": true,
+    "value": "GB82WEST12345698765432"
+  },
+  {
+    "name": "fullwidth letters stay non-ASCII",
+    "input": "\uff24\uff2575512108001245126199",
+    "ok": false,
+    "why": "not ASCII letters"
+  },
+  {
+    "name": "a dotted capital I (U+0130) stays non-ASCII",
+    "input": "\u0130T60X0542811101000000123456",
+    "ok": false,
+    "why": "not an ASCII letter"
+  },
+  {
+    "name": "64 characters before normalisation",
+    "input": "DE75512108001245126199\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "65 characters before normalisation",
+    "input": "DE75512108001245126199\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0",
+    "ok": false,
+    "why": "at most 64 characters as received"
+  },
+  {
+    "name": "empty",
+    "input": "",
+    "ok": false,
+    "why": "not an IBAN"
+  },
+  {
+    "name": "only whitespace",
+    "input": "   ",
+    "ok": false,
+    "why": "not an IBAN"
+  },
+  {
+    "name": "hyphens",
+    "input": "DE75-5121-0800-1245-1261-99",
+    "ok": false,
+    "why": "only letters and digits"
+  },
+  {
+    "name": "no country code",
+    "input": "7612345000010000000000193",
+    "ok": false,
+    "why": "must start with a country code"
+  },
+  {
+    "name": "letters as check digits",
+    "input": "DEXX512108001245126199",
+    "ok": false,
+    "why": "check digits are digits"
+  },
+  {
+    "name": "a country outside SEPA (US)",
+    "input": "US64SVBKUS6S3300958879",
+    "ok": false,
+    "why": "not in SEPA"
+  },
+  {
+    "name": "a country outside SEPA (BR)",
+    "input": "BR1800360305000010009795493C1",
+    "ok": false,
+    "why": "not in SEPA"
+  },
+  {
+    "name": "not a country code",
+    "input": "XX75512108001245126199",
+    "ok": false,
+    "why": "not in SEPA"
+  },
+  {
+    "name": "one character short",
+    "input": "DE7551210800124512619",
+    "ok": false,
+    "why": "wrong length for DE"
+  },
+  {
+    "name": "one character long",
+    "input": "DE755121080012451261990",
+    "ok": false,
+    "why": "wrong length for DE"
+  },
+  {
+    "name": "check digits 00 (pass mod-97, never issued)",
+    "input": "DE00123456780000000016",
+    "ok": false,
+    "why": "check digits out of range"
+  },
+  {
+    "name": "check digits 01 (pass mod-97, never issued)",
+    "input": "DE01123456780000000095",
+    "ok": false,
+    "why": "check digits out of range"
+  },
+  {
+    "name": "check digits 99 (pass mod-97, never issued)",
+    "input": "DE99123456780000000077",
+    "ok": false,
+    "why": "check digits out of range"
+  },
+  {
+    "name": "check digits 02",
+    "input": "DE02123456780000000077",
+    "ok": true,
+    "value": "DE02123456780000000077"
+  },
+  {
+    "name": "check digits 97",
+    "input": "DE97123456780000000016",
+    "ok": true,
+    "value": "DE97123456780000000016"
+  },
+  {
+    "name": "check digits 98",
+    "input": "DE98123456780000000095",
+    "ok": true,
+    "value": "DE98123456780000000095"
+  },
+  {
+    "name": "a wrong check digit",
+    "input": "DE76512108001245126199",
+    "ok": false,
+    "why": "checksum"
+  },
+  {
+    "name": "a wrong BBAN digit",
+    "input": "DE75512108001245126198",
+    "ok": false,
+    "why": "checksum"
+  },
+  {
+    "name": "a JSON number",
+    "input": 1234,
+    "ok": false,
+    "why": "must be a string"
+  },
+  {
+    "name": "AD: the registry example",
+    "input": "AD1400080001001234567890",
+    "ok": true,
+    "value": "AD1400080001001234567890"
+  },
+  {
+    "name": "AL: the registry example",
+    "input": "AL35202111090000000001234567",
+    "ok": true,
+    "value": "AL35202111090000000001234567"
+  },
+  {
+    "name": "AT: the registry example",
+    "input": "AT483200000012345864",
+    "ok": true,
+    "value": "AT483200000012345864"
+  },
+  {
+    "name": "BE: the registry example",
+    "input": "BE71096123456769",
+    "ok": true,
+    "value": "BE71096123456769"
+  },
+  {
+    "name": "BG: the registry example",
+    "input": "BG19STSA93000123456789",
+    "ok": true,
+    "value": "BG19STSA93000123456789"
+  },
+  {
+    "name": "CH: the registry example",
+    "input": "CH5604835012345678009",
+    "ok": true,
+    "value": "CH5604835012345678009"
+  },
+  {
+    "name": "CY: the registry example",
+    "input": "CY21002001950000357001234567",
+    "ok": true,
+    "value": "CY21002001950000357001234567"
+  },
+  {
+    "name": "CZ: the registry example",
+    "input": "CZ5508000000001234567899",
+    "ok": true,
+    "value": "CZ5508000000001234567899"
+  },
+  {
+    "name": "DE: the registry example",
+    "input": "DE75512108001245126199",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "DK: the registry example",
+    "input": "DK9520000123456789",
+    "ok": true,
+    "value": "DK9520000123456789"
+  },
+  {
+    "name": "EE: the registry example",
+    "input": "EE471000001020145685",
+    "ok": true,
+    "value": "EE471000001020145685"
+  },
+  {
+    "name": "ES: the registry example",
+    "input": "ES7921000813610123456789",
+    "ok": true,
+    "value": "ES7921000813610123456789"
+  },
+  {
+    "name": "FI: the registry example",
+    "input": "FI1410093000123458",
+    "ok": true,
+    "value": "FI1410093000123458"
+  },
+  {
+    "name": "FR: the registry example",
+    "input": "FR7630006000011234567890189",
+    "ok": true,
+    "value": "FR7630006000011234567890189"
+  },
+  {
+    "name": "GB: the registry example",
+    "input": "GB33BUKB20201555555555",
+    "ok": true,
+    "value": "GB33BUKB20201555555555"
+  },
+  {
+    "name": "GI: the registry example",
+    "input": "GI56XAPO000001234567890",
+    "ok": true,
+    "value": "GI56XAPO000001234567890"
+  },
+  {
+    "name": "GR: the registry example",
+    "input": "GR9608100010000001234567890",
+    "ok": true,
+    "value": "GR9608100010000001234567890"
+  },
+  {
+    "name": "HR: the registry example",
+    "input": "HR1723600001101234565",
+    "ok": true,
+    "value": "HR1723600001101234565"
+  },
+  {
+    "name": "HU: the registry example",
+    "input": "HU93116000060000000012345676",
+    "ok": true,
+    "value": "HU93116000060000000012345676"
+  },
+  {
+    "name": "IE: the registry example",
+    "input": "IE06BOFI90008412345671",
+    "ok": true,
+    "value": "IE06BOFI90008412345671"
+  },
+  {
+    "name": "IS: the registry example",
+    "input": "IS750001121234563108962099",
+    "ok": true,
+    "value": "IS750001121234563108962099"
+  },
+  {
+    "name": "IT: the registry example",
+    "input": "IT60X0542811101000000123456",
+    "ok": true,
+    "value": "IT60X0542811101000000123456"
+  },
+  {
+    "name": "LI: the registry example",
+    "input": "LI7408806123456789012",
+    "ok": true,
+    "value": "LI7408806123456789012"
+  },
+  {
+    "name": "LT: the registry example",
+    "input": "LT601010012345678901",
+    "ok": true,
+    "value": "LT601010012345678901"
+  },
+  {
+    "name": "LU: the registry example",
+    "input": "LU120010001234567891",
+    "ok": true,
+    "value": "LU120010001234567891"
+  },
+  {
+    "name": "LV: the registry example",
+    "input": "LV97HABA0012345678910",
+    "ok": true,
+    "value": "LV97HABA0012345678910"
+  },
+  {
+    "name": "MC: the registry example",
+    "input": "MC5810096180790123456789085",
+    "ok": true,
+    "value": "MC5810096180790123456789085"
+  },
+  {
+    "name": "MD: the registry example",
+    "input": "MD21EX000000000001234567",
+    "ok": true,
+    "value": "MD21EX000000000001234567"
+  },
+  {
+    "name": "ME: the registry example",
+    "input": "ME25510000012345678920",
+    "ok": true,
+    "value": "ME25510000012345678920"
+  },
+  {
+    "name": "MK: the registry example",
+    "input": "MK07200002785123453",
+    "ok": true,
+    "value": "MK07200002785123453"
+  },
+  {
+    "name": "MT: the registry example",
+    "input": "MT31MALT01100000000000000000123",
+    "ok": true,
+    "value": "MT31MALT01100000000000000000123"
+  },
+  {
+    "name": "NL: the registry example",
+    "input": "NL02ABNA0123456789",
+    "ok": true,
+    "value": "NL02ABNA0123456789"
+  },
+  {
+    "name": "NO: the registry example",
+    "input": "NO8330001234567",
+    "ok": true,
+    "value": "NO8330001234567"
+  },
+  {
+    "name": "PL: the registry example",
+    "input": "PL10105000997603123456789123",
+    "ok": true,
+    "value": "PL10105000997603123456789123"
+  },
+  {
+    "name": "PT: the registry example",
+    "input": "PT50003310311234567890197",
+    "ok": true,
+    "value": "PT50003310311234567890197"
+  },
+  {
+    "name": "RO: the registry example",
+    "input": "RO66BACX0000001234567890",
+    "ok": true,
+    "value": "RO66BACX0000001234567890"
+  },
+  {
+    "name": "RS: the registry example",
+    "input": "RS35105008123123123173",
+    "ok": true,
+    "value": "RS35105008123123123173"
+  },
+  {
+    "name": "SE: the registry example",
+    "input": "SE7280000810340009783242",
+    "ok": true,
+    "value": "SE7280000810340009783242"
+  },
+  {
+    "name": "SI: the registry example",
+    "input": "SI56192001234567892",
+    "ok": true,
+    "value": "SI56192001234567892"
+  },
+  {
+    "name": "SK: the registry example",
+    "input": "SK8975000000000012345671",
+    "ok": true,
+    "value": "SK8975000000000012345671"
+  },
+  {
+    "name": "SM: the registry example",
+    "input": "SM76P0854009812123456789123",
+    "ok": true,
+    "value": "SM76P0854009812123456789123"
+  },
+  {
+    "name": "VA: the registry example",
+    "input": "VA59001123000012345678",
+    "ok": true,
+    "value": "VA59001123000012345678"
+  }
+]

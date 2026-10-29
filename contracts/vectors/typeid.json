@@ -1,0 +1,677 @@
+[
+  {
+    "name": "acct: valid",
+    "input": {
+      "prefix": "acct",
+      "text": "acct_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": true,
+    "value": "01a14c4e-e000-7f4f-896e-f8f54adff3bd"
+  },
+  {
+    "name": "acct: another prefix",
+    "input": {
+      "prefix": "acct",
+      "text": "dep_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be acct"
+  },
+  {
+    "name": "acct: no prefix",
+    "input": {
+      "prefix": "acct",
+      "text": "01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be acct"
+  },
+  {
+    "name": "acct: no prefix, leading underscore",
+    "input": {
+      "prefix": "acct",
+      "text": "_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be acct"
+  },
+  {
+    "name": "acct: upper-case prefix",
+    "input": {
+      "prefix": "acct",
+      "text": "ACCT_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "lower case only"
+  },
+  {
+    "name": "acct: upper-case suffix",
+    "input": {
+      "prefix": "acct",
+      "text": "acct_01M564XR00FX7RJVQRYN5DZWXX"
+    },
+    "ok": false,
+    "why": "lower case only"
+  },
+  {
+    "name": "acct: suffix one character short",
+    "input": {
+      "prefix": "acct",
+      "text": "acct_01m564xr00fx7rjvqryn5dzwx"
+    },
+    "ok": false,
+    "why": "suffix is 26 characters"
+  },
+  {
+    "name": "acct: suffix one character long",
+    "input": {
+      "prefix": "acct",
+      "text": "acct_01m564xr00fx7rjvqryn5dzwxxx"
+    },
+    "ok": false,
+    "why": "suffix is 26 characters"
+  },
+  {
+    "name": "acct: invalid base32 (i, l, o, u are not in the alphabet)",
+    "input": {
+      "prefix": "acct",
+      "text": "acct_01m564xr00fx7rjvqryn5dzwxu"
+    },
+    "ok": false,
+    "why": "Crockford base32 without i l o u"
+  },
+  {
+    "name": "acct: a non-v7 UUID (v4)",
+    "input": {
+      "prefix": "acct",
+      "text": "acct_1cbtjc0g3787xsr7jw7wpqx2mg"
+    },
+    "ok": false,
+    "why": "must hold a UUIDv7"
+  },
+  {
+    "name": "acct: first character overflows 128 bits",
+    "input": {
+      "prefix": "acct",
+      "text": "acct_81m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "first character 0-7"
+  },
+  {
+    "name": "acct: the largest suffix (all bits set, not v7)",
+    "input": {
+      "prefix": "acct",
+      "text": "acct_7zzzzzzzzzzzzzzzzzzzzzzzzz"
+    },
+    "ok": false,
+    "why": "must hold a UUIDv7"
+  },
+  {
+    "name": "acct: a raw UUID",
+    "input": {
+      "prefix": "acct",
+      "text": "01a14c4e-e000-7f4f-896e-f8f54adff3bd"
+    },
+    "ok": false,
+    "why": "a TypeID, not a UUID"
+  },
+  {
+    "name": "acct: empty",
+    "input": {
+      "prefix": "acct",
+      "text": ""
+    },
+    "ok": false,
+    "why": "required"
+  },
+  {
+    "name": "acct: a JSON number",
+    "input": {
+      "prefix": "acct",
+      "text": 12345
+    },
+    "ok": false,
+    "why": "must be a string"
+  },
+  {
+    "name": "dep: valid",
+    "input": {
+      "prefix": "dep",
+      "text": "dep_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": true,
+    "value": "01a14c4e-e000-7f4f-896e-f8f54adff3bd"
+  },
+  {
+    "name": "dep: another prefix",
+    "input": {
+      "prefix": "dep",
+      "text": "acct_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be dep"
+  },
+  {
+    "name": "dep: no prefix",
+    "input": {
+      "prefix": "dep",
+      "text": "01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be dep"
+  },
+  {
+    "name": "dep: no prefix, leading underscore",
+    "input": {
+      "prefix": "dep",
+      "text": "_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be dep"
+  },
+  {
+    "name": "dep: upper-case prefix",
+    "input": {
+      "prefix": "dep",
+      "text": "DEP_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "lower case only"
+  },
+  {
+    "name": "dep: upper-case suffix",
+    "input": {
+      "prefix": "dep",
+      "text": "dep_01M564XR00FX7RJVQRYN5DZWXX"
+    },
+    "ok": false,
+    "why": "lower case only"
+  },
+  {
+    "name": "dep: suffix one character short",
+    "input": {
+      "prefix": "dep",
+      "text": "dep_01m564xr00fx7rjvqryn5dzwx"
+    },
+    "ok": false,
+    "why": "suffix is 26 characters"
+  },
+  {
+    "name": "dep: suffix one character long",
+    "input": {
+      "prefix": "dep",
+      "text": "dep_01m564xr00fx7rjvqryn5dzwxxx"
+    },
+    "ok": false,
+    "why": "suffix is 26 characters"
+  },
+  {
+    "name": "dep: invalid base32 (i, l, o, u are not in the alphabet)",
+    "input": {
+      "prefix": "dep",
+      "text": "dep_01m564xr00fx7rjvqryn5dzwxu"
+    },
+    "ok": false,
+    "why": "Crockford base32 without i l o u"
+  },
+  {
+    "name": "dep: a non-v7 UUID (v4)",
+    "input": {
+      "prefix": "dep",
+      "text": "dep_1cbtjc0g3787xsr7jw7wpqx2mg"
+    },
+    "ok": false,
+    "why": "must hold a UUIDv7"
+  },
+  {
+    "name": "dep: first character overflows 128 bits",
+    "input": {
+      "prefix": "dep",
+      "text": "dep_81m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "first character 0-7"
+  },
+  {
+    "name": "dep: the largest suffix (all bits set, not v7)",
+    "input": {
+      "prefix": "dep",
+      "text": "dep_7zzzzzzzzzzzzzzzzzzzzzzzzz"
+    },
+    "ok": false,
+    "why": "must hold a UUIDv7"
+  },
+  {
+    "name": "dep: a raw UUID",
+    "input": {
+      "prefix": "dep",
+      "text": "01a14c4e-e000-7f4f-896e-f8f54adff3bd"
+    },
+    "ok": false,
+    "why": "a TypeID, not a UUID"
+  },
+  {
+    "name": "dep: empty",
+    "input": {
+      "prefix": "dep",
+      "text": ""
+    },
+    "ok": false,
+    "why": "required"
+  },
+  {
+    "name": "dep: a JSON number",
+    "input": {
+      "prefix": "dep",
+      "text": 12345
+    },
+    "ok": false,
+    "why": "must be a string"
+  },
+  {
+    "name": "wd: valid",
+    "input": {
+      "prefix": "wd",
+      "text": "wd_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": true,
+    "value": "01a14c4e-e000-7f4f-896e-f8f54adff3bd"
+  },
+  {
+    "name": "wd: another prefix",
+    "input": {
+      "prefix": "wd",
+      "text": "dep_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be wd"
+  },
+  {
+    "name": "wd: no prefix",
+    "input": {
+      "prefix": "wd",
+      "text": "01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be wd"
+  },
+  {
+    "name": "wd: no prefix, leading underscore",
+    "input": {
+      "prefix": "wd",
+      "text": "_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be wd"
+  },
+  {
+    "name": "wd: upper-case prefix",
+    "input": {
+      "prefix": "wd",
+      "text": "WD_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "lower case only"
+  },
+  {
+    "name": "wd: upper-case suffix",
+    "input": {
+      "prefix": "wd",
+      "text": "wd_01M564XR00FX7RJVQRYN5DZWXX"
+    },
+    "ok": false,
+    "why": "lower case only"
+  },
+  {
+    "name": "wd: suffix one character short",
+    "input": {
+      "prefix": "wd",
+      "text": "wd_01m564xr00fx7rjvqryn5dzwx"
+    },
+    "ok": false,
+    "why": "suffix is 26 characters"
+  },
+  {
+    "name": "wd: suffix one character long",
+    "input": {
+      "prefix": "wd",
+      "text": "wd_01m564xr00fx7rjvqryn5dzwxxx"
+    },
+    "ok": false,
+    "why": "suffix is 26 characters"
+  },
+  {
+    "name": "wd: invalid base32 (i, l, o, u are not in the alphabet)",
+    "input": {
+      "prefix": "wd",
+      "text": "wd_01m564xr00fx7rjvqryn5dzwxu"
+    },
+    "ok": false,
+    "why": "Crockford base32 without i l o u"
+  },
+  {
+    "name": "wd: a non-v7 UUID (v4)",
+    "input": {
+      "prefix": "wd",
+      "text": "wd_1cbtjc0g3787xsr7jw7wpqx2mg"
+    },
+    "ok": false,
+    "why": "must hold a UUIDv7"
+  },
+  {
+    "name": "wd: first character overflows 128 bits",
+    "input": {
+      "prefix": "wd",
+      "text": "wd_81m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "first character 0-7"
+  },
+  {
+    "name": "wd: the largest suffix (all bits set, not v7)",
+    "input": {
+      "prefix": "wd",
+      "text": "wd_7zzzzzzzzzzzzzzzzzzzzzzzzz"
+    },
+    "ok": false,
+    "why": "must hold a UUIDv7"
+  },
+  {
+    "name": "wd: a raw UUID",
+    "input": {
+      "prefix": "wd",
+      "text": "01a14c4e-e000-7f4f-896e-f8f54adff3bd"
+    },
+    "ok": false,
+    "why": "a TypeID, not a UUID"
+  },
+  {
+    "name": "wd: empty",
+    "input": {
+      "prefix": "wd",
+      "text": ""
+    },
+    "ok": false,
+    "why": "required"
+  },
+  {
+    "name": "wd: a JSON number",
+    "input": {
+      "prefix": "wd",
+      "text": 12345
+    },
+    "ok": false,
+    "why": "must be a string"
+  },
+  {
+    "name": "evt: valid",
+    "input": {
+      "prefix": "evt",
+      "text": "evt_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": true,
+    "value": "01a14c4e-e000-7f4f-896e-f8f54adff3bd"
+  },
+  {
+    "name": "evt: another prefix",
+    "input": {
+      "prefix": "evt",
+      "text": "dep_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be evt"
+  },
+  {
+    "name": "evt: no prefix",
+    "input": {
+      "prefix": "evt",
+      "text": "01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be evt"
+  },
+  {
+    "name": "evt: no prefix, leading underscore",
+    "input": {
+      "prefix": "evt",
+      "text": "_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be evt"
+  },
+  {
+    "name": "evt: upper-case prefix",
+    "input": {
+      "prefix": "evt",
+      "text": "EVT_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "lower case only"
+  },
+  {
+    "name": "evt: upper-case suffix",
+    "input": {
+      "prefix": "evt",
+      "text": "evt_01M564XR00FX7RJVQRYN5DZWXX"
+    },
+    "ok": false,
+    "why": "lower case only"
+  },
+  {
+    "name": "evt: suffix one character short",
+    "input": {
+      "prefix": "evt",
+      "text": "evt_01m564xr00fx7rjvqryn5dzwx"
+    },
+    "ok": false,
+    "why": "suffix is 26 characters"
+  },
+  {
+    "name": "evt: suffix one character long",
+    "input": {
+      "prefix": "evt",
+      "text": "evt_01m564xr00fx7rjvqryn5dzwxxx"
+    },
+    "ok": false,
+    "why": "suffix is 26 characters"
+  },
+  {
+    "name": "evt: invalid base32 (i, l, o, u are not in the alphabet)",
+    "input": {
+      "prefix": "evt",
+      "text": "evt_01m564xr00fx7rjvqryn5dzwxu"
+    },
+    "ok": false,
+    "why": "Crockford base32 without i l o u"
+  },
+  {
+    "name": "evt: a non-v7 UUID (v4)",
+    "input": {
+      "prefix": "evt",
+      "text": "evt_1cbtjc0g3787xsr7jw7wpqx2mg"
+    },
+    "ok": false,
+    "why": "must hold a UUIDv7"
+  },
+  {
+    "name": "evt: first character overflows 128 bits",
+    "input": {
+      "prefix": "evt",
+      "text": "evt_81m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "first character 0-7"
+  },
+  {
+    "name": "evt: the largest suffix (all bits set, not v7)",
+    "input": {
+      "prefix": "evt",
+      "text": "evt_7zzzzzzzzzzzzzzzzzzzzzzzzz"
+    },
+    "ok": false,
+    "why": "must hold a UUIDv7"
+  },
+  {
+    "name": "evt: a raw UUID",
+    "input": {
+      "prefix": "evt",
+      "text": "01a14c4e-e000-7f4f-896e-f8f54adff3bd"
+    },
+    "ok": false,
+    "why": "a TypeID, not a UUID"
+  },
+  {
+    "name": "evt: empty",
+    "input": {
+      "prefix": "evt",
+      "text": ""
+    },
+    "ok": false,
+    "why": "required"
+  },
+  {
+    "name": "evt: a JSON number",
+    "input": {
+      "prefix": "evt",
+      "text": 12345
+    },
+    "ok": false,
+    "why": "must be a string"
+  },
+  {
+    "name": "mov: valid",
+    "input": {
+      "prefix": "mov",
+      "text": "mov_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": true,
+    "value": "01a14c4e-e000-7f4f-896e-f8f54adff3bd"
+  },
+  {
+    "name": "mov: another prefix",
+    "input": {
+      "prefix": "mov",
+      "text": "dep_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be mov"
+  },
+  {
+    "name": "mov: no prefix",
+    "input": {
+      "prefix": "mov",
+      "text": "01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be mov"
+  },
+  {
+    "name": "mov: no prefix, leading underscore",
+    "input": {
+      "prefix": "mov",
+      "text": "_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "prefix must be mov"
+  },
+  {
+    "name": "mov: upper-case prefix",
+    "input": {
+      "prefix": "mov",
+      "text": "MOV_01m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "lower case only"
+  },
+  {
+    "name": "mov: upper-case suffix",
+    "input": {
+      "prefix": "mov",
+      "text": "mov_01M564XR00FX7RJVQRYN5DZWXX"
+    },
+    "ok": false,
+    "why": "lower case only"
+  },
+  {
+    "name": "mov: suffix one character short",
+    "input": {
+      "prefix": "mov",
+      "text": "mov_01m564xr00fx7rjvqryn5dzwx"
+    },
+    "ok": false,
+    "why": "suffix is 26 characters"
+  },
+  {
+    "name": "mov: suffix one character long",
+    "input": {
+      "prefix": "mov",
+      "text": "mov_01m564xr00fx7rjvqryn5dzwxxx"
+    },
+    "ok": false,
+    "why": "suffix is 26 characters"
+  },
+  {
+    "name": "mov: invalid base32 (i, l, o, u are not in the alphabet)",
+    "input": {
+      "prefix": "mov",
+      "text": "mov_01m564xr00fx7rjvqryn5dzwxu"
+    },
+    "ok": false,
+    "why": "Crockford base32 without i l o u"
+  },
+  {
+    "name": "mov: a non-v7 UUID (v4)",
+    "input": {
+      "prefix": "mov",
+      "text": "mov_1cbtjc0g3787xsr7jw7wpqx2mg"
+    },
+    "ok": false,
+    "why": "must hold a UUIDv7"
+  },
+  {
+    "name": "mov: first character overflows 128 bits",
+    "input": {
+      "prefix": "mov",
+      "text": "mov_81m564xr00fx7rjvqryn5dzwxx"
+    },
+    "ok": false,
+    "why": "first character 0-7"
+  },
+  {
+    "name": "mov: the largest suffix (all bits set, not v7)",
+    "input": {
+      "prefix": "mov",
+      "text": "mov_7zzzzzzzzzzzzzzzzzzzzzzzzz"
+    },
+    "ok": false,
+    "why": "must hold a UUIDv7"
+  },
+  {
+    "name": "mov: a raw UUID",
+    "input": {
+      "prefix": "mov",
+      "text": "01a14c4e-e000-7f4f-896e-f8f54adff3bd"
+    },
+    "ok": false,
+    "why": "a TypeID, not a UUID"
+  },
+  {
+    "name": "mov: empty",
+    "input": {
+      "prefix": "mov",
+      "text": ""
+    },
+    "ok": false,
+    "why": "required"
+  },
+  {
+    "name": "mov: a JSON number",
+    "input": {
+      "prefix": "mov",
+      "text": 12345
+    },
+    "ok": false,
+    "why": "must be a string"
+  }
+]

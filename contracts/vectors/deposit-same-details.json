@@ -1,0 +1,223 @@
+[
+  {
+    "name": "the same notification",
+    "input": {
+      "a": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      },
+      "b": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "the IBAN in paper format",
+    "input": {
+      "a": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      },
+      "b": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR76 1234 5000 0100 0000 0000 193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "the IBAN in lower case with tabs",
+    "input": {
+      "a": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      },
+      "b": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "fr76\t1234\t5000\t0100\t0000\t0000\t193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "the IBAN with narrow no-break spaces",
+    "input": {
+      "a": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      },
+      "b": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR76\u202f1234\u202f5000\u202f0100\u202f0000\u202f0000\u202f193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "provider_account_id differing (not compared)",
+    "input": {
+      "a": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA",
+        "provider_account_id": "pa_1"
+      },
+      "b": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA",
+        "provider_account_id": "pa_2"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "provider_account_id given and absent (not compared)",
+    "input": {
+      "a": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA",
+        "provider_account_id": "pa_1"
+      },
+      "b": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "an unknown field (dropped by the tolerant reader)",
+    "input": {
+      "a": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      },
+      "b": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA",
+        "payer_name": "Someone"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "a different amount",
+    "input": {
+      "a": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      },
+      "b": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1251",
+        "currency": "EUR",
+        "network": "SEPA"
+      }
+    },
+    "ok": true,
+    "value": [
+      "amount_minor"
+    ]
+  },
+  {
+    "name": "a different IBAN",
+    "input": {
+      "a": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      },
+      "b": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000290",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      }
+    },
+    "ok": true,
+    "value": [
+      "creditor_iban"
+    ]
+  },
+  {
+    "name": "the IBAN and the amount differing (fields in compare order)",
+    "input": {
+      "a": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000193",
+        "amount_minor": "1250",
+        "currency": "EUR",
+        "network": "SEPA"
+      },
+      "b": {
+        "network_transaction_id": "NTX-0001",
+        "creditor_iban": "FR7612345000010000000000290",
+        "amount_minor": "1",
+        "currency": "EUR",
+        "network": "SEPA"
+      }
+    },
+    "ok": true,
+    "value": [
+      "creditor_iban",
+      "amount_minor"
+    ]
+  }
+]

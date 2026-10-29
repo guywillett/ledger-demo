@@ -1,0 +1,390 @@
+[
+  {
+    "name": "required: plain",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane Doe"
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: every allowed punctuation mark",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "a/b-c?d:e(f)g.h,i'j+k"
+    },
+    "ok": true,
+    "value": "a/b-c?d:e(f)g.h,i'j+k"
+  },
+  {
+    "name": "required: digits",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Invoice 2026 10"
+    },
+    "ok": true,
+    "value": "Invoice 2026 10"
+  },
+  {
+    "name": "required: exactly max characters",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "ok": true,
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "required: max + 1 characters",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "ok": false,
+    "why": "too long"
+  },
+  {
+    "name": "required: max + 1 with a trailing space (trimmed first)",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "
+    },
+    "ok": true,
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "required: spaces at both ends trimmed",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "  Jane Doe "
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: spaces inside kept",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane  Doe"
+    },
+    "ok": true,
+    "value": "Jane  Doe"
+  },
+  {
+    "name": "required: tab and newline at the ends trimmed",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\tJane Doe\n"
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: no-break space (U+00A0) at the ends trimmed",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\u00a0Jane Doe\u00a0"
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: byte-order mark (U+FEFF) at the start trimmed",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\ufeffJane Doe"
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: ideographic space (U+3000) at the end trimmed",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane Doe\u3000"
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: next line (U+0085) at the end is not trimmed",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane Doe\u0085"
+    },
+    "ok": false,
+    "why": "U+0085 is kept, and is not in the character set"
+  },
+  {
+    "name": "required: zero-width space (U+200B) at the end is not trimmed",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane Doe\u200b"
+    },
+    "ok": false,
+    "why": "U+200B is kept, and is not in the character set"
+  },
+  {
+    "name": "required: a tab inside",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane\tDoe"
+    },
+    "ok": false,
+    "why": "only the space character"
+  },
+  {
+    "name": "required: a no-break space inside",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane\u00a0Doe"
+    },
+    "ok": false,
+    "why": "only the space character"
+  },
+  {
+    "name": "required: an accent",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Zo\u00eb M\u00fcller"
+    },
+    "ok": false,
+    "why": "basic Latin only, never transliterated"
+  },
+  {
+    "name": "required: an ampersand",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Smith & Sons"
+    },
+    "ok": false,
+    "why": "not in the SEPA set"
+  },
+  {
+    "name": "required: an underscore",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane_Doe"
+    },
+    "ok": false,
+    "why": "not in the SEPA set"
+  },
+  {
+    "name": "required: a double quote",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane \"JD\" Doe"
+    },
+    "ok": false,
+    "why": "not in the SEPA set"
+  },
+  {
+    "name": "required: an emoji",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane \ud83d\ude00"
+    },
+    "ok": false,
+    "why": "not in the SEPA set"
+  },
+  {
+    "name": "required: empty",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": ""
+    },
+    "ok": false,
+    "why": "must not be blank"
+  },
+  {
+    "name": "required: only spaces",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "   "
+    },
+    "ok": false,
+    "why": "must not be blank"
+  },
+  {
+    "name": "required: only Unicode whitespace",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\u00a0\ufeff\u3000"
+    },
+    "ok": false,
+    "why": "must not be blank"
+  },
+  {
+    "name": "required: null",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": null
+    },
+    "ok": false,
+    "why": "required"
+  },
+  {
+    "name": "required: absent",
+    "input": {
+      "max": 70,
+      "optional": false
+    },
+    "ok": false,
+    "why": "required"
+  },
+  {
+    "name": "required: a JSON number",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": 42
+    },
+    "ok": false,
+    "why": "must be a string"
+  },
+  {
+    "name": "optional: plain",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": "Rent October"
+    },
+    "ok": true,
+    "value": "Rent October"
+  },
+  {
+    "name": "optional: trimmed",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": " Rent  October "
+    },
+    "ok": true,
+    "value": "Rent  October"
+  },
+  {
+    "name": "optional: absent is none",
+    "input": {
+      "max": 140,
+      "optional": true
+    },
+    "ok": true,
+    "value": null
+  },
+  {
+    "name": "optional: null is none",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": null
+    },
+    "ok": true,
+    "value": null
+  },
+  {
+    "name": "optional: empty is none",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": ""
+    },
+    "ok": true,
+    "value": null
+  },
+  {
+    "name": "optional: only spaces is none",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": "   "
+    },
+    "ok": true,
+    "value": null
+  },
+  {
+    "name": "optional: only Unicode whitespace is none",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": "\u00a0\u202f\ufeff"
+    },
+    "ok": true,
+    "value": null
+  },
+  {
+    "name": "optional: only U+0085 is not none (not whitespace to JavaScript)",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": "\u0085"
+    },
+    "ok": false,
+    "why": "U+0085 is kept, and is not in the character set"
+  },
+  {
+    "name": "optional: exactly max characters",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "ok": true,
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "optional: max + 1 characters",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "ok": false,
+    "why": "too long"
+  },
+  {
+    "name": "optional: an accent",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": "Caf\u00e9"
+    },
+    "ok": false,
+    "why": "basic Latin only"
+  },
+  {
+    "name": "optional: a JSON number",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": 42
+    },
+    "ok": false,
+    "why": "must be a string"
+  }
+]
