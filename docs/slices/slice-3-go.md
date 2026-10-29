@@ -2,6 +2,7 @@
 
 Status: in progress
 Implementation: Go, against the tag `v0.2-node-reference` (schema, contracts, NATS definitions, demo)
+Go target: `v0.2` plus decision 56 (IBAN and SEPA text normalisation defined over ASCII, changed in Node too).
 Builds on: [slice 1](slice-1-incoming-payments.md), [slice 2](slice-2-outbox-and-withdrawals.md) and [ADR 0002](../decisions/0002-deposits-and-withdrawals.md) (vocabulary). Their decisions hold for Go unless this spec says otherwise.
 
 **Scope principle:** port the design, not the code (decision 39). The behaviour, the SQL and the guarantees carry over unchanged; the structure, error handling and concurrency are written the way Go does them.
@@ -104,7 +105,6 @@ All of slices 1 and 2's gaps apply to Go too. In addition:
 
 - **No Go process-level e2e tests.** Node's e2e tests start and kill real processes; Go relies on the demo (which kills the deposit-worker and the submitter through compose, whichever implementation runs them) and its integration tests. A Go e2e suite with `os/exec` would mirror Node's.
 - **Provider-sim and reconciliation are Node only** (decisions 50, slice 2 decision 31).
-- **IBAN upper-casing and whitespace follow JavaScript** (full case mapping, so ß is read as SS; JavaScript's whitespace set), see `contracts/vectors/README.md`. To be replaced right after step 2 by an explicit rule for both implementations (step 2b).
 - **Mixed versions over time:** both implementations are released together here. In production, implementations deployed at different times need versioned contracts and the expand–contract changes of ADR 0002.
 
 ## Decisions
@@ -126,3 +126,4 @@ All of slices 1 and 2's gaps apply to Go too. In addition:
 53. **One image, one binary per process** (`cmd/api`, `cmd/relay`, `cmd/deposit-worker`, `cmd/submitter`), built in a multi-stage Dockerfile onto a minimal base image.
 54. **Non-Go-like choices are documented where they're made, with their reason:** a comment at the spot, and a decision here when it shapes the structure (as 40, 44 and 47 do).
 55. **Tag `v0.3-go`** on the merge commit.
+56. **IBAN normalisation and SEPA text trimming are defined explicitly, over ASCII, for both implementations.** Separators are space, tab, CR, LF, no-break space (U+00A0) and narrow no-break space (U+202F), the last two because bank websites format IBANs with them. An IBAN has every separator removed and a–z upper-cased to A–Z; any other non-ASCII character is rejected, not removed. SEPA text has separators trimmed from both ends only. This changes Node's behaviour from v0.2 (an exception to decision 41, made here explicitly): inputs that relied on JavaScript's wider whitespace or full case mapping are now rejected.

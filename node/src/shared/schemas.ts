@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { parseIban, type Iban } from './iban.ts';
 import { fromTypeId, type IdPrefix, type Uuid } from './ids.ts';
+import { trimSeparators } from './separators.ts';
 
 // Zod schemas for values that appear on the wire in more than one place (HTTP requests and
 // responses, events), so every boundary validates them the same way. Messages never repeat the
@@ -35,8 +36,8 @@ export const amountMinorSchema = z
   .transform((value) => BigInt(value))
   .refine((value) => value <= INT8_MAX, 'is larger than the maximum amount');
 
-// A SEPA IBAN, normalised (whitespace removed, upper case) and checked by parseIban. The reason
-// in the message is one of parseIban's fixed texts, never the input.
+// A SEPA IBAN, normalised (separators removed, a-z upper-cased) and checked by parseIban. The
+// reason in the message is one of parseIban's fixed texts, never the input.
 export const ibanSchema = z
   .string()
   .max(64)
@@ -56,19 +57,22 @@ export const ibanSchema = z
 // never transliterated.
 const SEPA_BASIC_TEXT = /^[A-Za-z0-9/?:().,'+ -]+$/;
 
-// Required SEPA text of at most maxLength characters. Leading and trailing whitespace is trimmed
-// first (it is almost always a slip), and the trimmed value is what is stored and returned, so
-// the client still sees exactly what is sent. Whitespace inside is kept as it is.
+// Required SEPA text of at most maxLength characters. Separators at both ends are trimmed first
+// (they are almost always a slip), and the trimmed value is what is stored and returned, so the
+// client still sees exactly what is sent. Inside, nothing is changed. The separators are slice 3
+// decision 56's (separators.ts), not Zod's .trim(), which uses JavaScript's wider trim() set.
+// .overwrite() replaces the value and keeps it a string, so the checks after it see the trimmed
+// value: it is how Zod's own .trim() is built.
 export const sepaTextSchema = (maxLength: number): z.ZodType<string, string> =>
   z
     .string()
-    .trim()
+    .overwrite(trimSeparators)
     // abort: a blank value gets this one message, not also the character-set one.
     .min(1, { error: 'must not be blank', abort: true })
     .max(maxLength, `must be at most ${maxLength} characters`)
     .regex(SEPA_BASIC_TEXT, "may only contain letters, digits, spaces and / - ? : ( ) . , ' +");
 
-// Optional SEPA text: absent, null, empty or only whitespace all mean "none", stored as null
+// Optional SEPA text: absent, null, empty or only separators all mean "none", stored as null
 // (the one spelling of none; the database refuses ''). Otherwise as sepaTextSchema.
 export const optionalSepaTextSchema = (
   maxLength: number,
@@ -76,5 +80,7 @@ export const optionalSepaTextSchema = (
   z
     .string()
     .nullish()
-    .transform((value) => value?.trim() || null)
+    .transform((value) =>
+      value === null || value === undefined ? null : trimSeparators(value) || null,
+    )
     .pipe(sepaTextSchema(maxLength).nullable());

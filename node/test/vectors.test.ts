@@ -14,6 +14,7 @@ import {
   typeIdSchema,
 } from '../src/shared/schemas.ts';
 import { differingWithdrawalFields } from '../src/withdrawals/requests.ts';
+import { contractPropertyErrors } from './contract.ts';
 
 // The shared test vectors (contracts/vectors/, see its README): every case through the real
 // boundary code. Node is the reference implementation, so a failure here means Node's behaviour
@@ -80,4 +81,26 @@ check('deposit-same-details.json', (input) => {
   const { a, b } = input as { a: unknown; b: unknown };
   const parse = (body: unknown) => toNotification(notificationBodySchema.parse(body));
   return { ok: true, value: differingDepositFields(parse(a), parse(b)) };
+});
+
+// One way only: every value the implementation accepts must be valid against the contract's
+// request schema for that field. Not the reverse: the contract can't express a checksum, a
+// country's IBAN length or a length after trimming, so it accepts some values the
+// implementation rejects.
+describe('accepted inputs are valid against the contract', () => {
+  const accepted = (file: string) => load(file).filter((c) => c.ok);
+
+  it.each(accepted('iban.json').map((c) => [c.name, c] as const))('iban: %s', (_name, c) => {
+    expect(contractPropertyErrors('WithdrawalRequest', 'creditor_iban', c.input)).toBeUndefined();
+  });
+
+  it.each(accepted('sepa-text.json').map((c) => [c.name, c] as const))(
+    'sepa-text: %s',
+    (_name, c) => {
+      const { optional, text } = c.input as { optional: boolean; text?: unknown };
+      if (text === undefined) return; // an absent field: nothing to validate
+      const property = optional ? 'remittance_info' : 'creditor_name';
+      expect(contractPropertyErrors('WithdrawalRequest', property, text)).toBeUndefined();
+    },
+  );
 });

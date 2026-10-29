@@ -6,9 +6,9 @@ implementations that are both valid and still decide differently. In a mixed sta
 reach the other implementation, so two normalisations that are each reasonable but different
 would turn a duplicate into a conflict, or accept a request one implementation would refuse.
 
-The Node implementation (at `v0.2-node-reference`) is the reference: the vectors record what it
-does, including where JavaScript's Unicode rules decide the outcome (see *Unicode* below). Both
-implementations' tests read every file and must pass every case.
+The Node implementation is the reference (`v0.2-node-reference` plus slice 3 decision 56, see
+*Separators and case* below): the vectors record what it does. Both implementations' tests read
+every file and must pass every case.
 
 ## Format
 
@@ -50,16 +50,18 @@ differ.
   `internal/sepa`; the same-details files from steps 4 and 7) through `internal/vectortest`,
   decoding `input` with `encoding/json` into the same types a request body is decoded into.
 
-## Unicode
+## Separators and case
 
-The rules follow JavaScript, not Unicode in general, because Node is the reference:
+Defined over ASCII by slice 3 decision 56, so both implementations follow one sentence rather
+than a language's own definition of whitespace or case:
 
-- **Whitespace** (removed from IBANs, trimmed from SEPA text) is JavaScript's `\s` / `trim()`
-  set: tab, LF, VT, FF, CR, space, U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029, U+202F,
-  U+205F, U+3000 and U+FEFF. Not U+0085 (next line) or U+200B (zero-width space), which other
-  languages' definitions differ on.
-- **Upper case** for IBANs is JavaScript's `toUpperCase()`, Unicode's full case mapping: ten
-  non-ASCII characters become ASCII letters (`ß` → `SS`, `ı` → `I`, `ſ` → `S`, and the
-  ligatures `ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ ﬆ`), so an IBAN written with them is accepted as its ASCII form.
-- **Lengths** count UTF-16 code units (JavaScript's `length`), before normalisation for IBANs
-  (at most 64) and after trimming for SEPA text.
+- **Separators:** space, tab, CR, LF, no-break space (U+00A0) and narrow no-break space (U+202F),
+  the last two because bank websites format IBANs with them.
+- **IBANs:** every separator is removed and a–z upper-cased to A–Z. Any other non-ASCII
+  character, including every other Unicode space and letters such as `ß`, is rejected, never
+  removed or transliterated.
+- **SEPA text:** separators are trimmed from both ends only; anything else outside the SEPA basic
+  character set is rejected.
+- **Lengths** (64 for IBAN input, the field's maximum for text) can be counted in UTF-16 units or
+  code points with the same result: every input that can be accepted is ASCII apart from the two
+  no-break spaces, each one unit and one code point. Not in UTF-8 bytes.

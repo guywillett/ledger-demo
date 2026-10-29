@@ -143,10 +143,10 @@ paths:
         400, 404, 422 or 5xx the same key can be used again.
 
         The body is strict: unknown fields are rejected (unlike the provider webhook POST
-        /provider/incoming-payments, which ignores them). creditor_name and remittance_info are trimmed of
-        leading and trailing whitespace and must use the SEPA basic character set (letters,
-        digits, spaces and / - ? : ( ) . , ' +); text outside it is rejected, never
-        transliterated.
+        /provider/incoming-payments, which ignores them). creditor_name and remittance_info have
+        the separators (space, tab, CR, LF, U+00A0 and U+202F; slice 3 decision 56) trimmed
+        from both ends and must use the SEPA basic character set (letters, digits, spaces and
+        / - ? : ( ) . , ' +); text outside it is rejected, never transliterated.
       parameters:
         - $ref: '#/components/parameters/AccountId'
         - name: Idempotency-Key
@@ -344,8 +344,12 @@ components:
           maxLength: 255
         creditor_iban:
           type: string
-          description: SEPA IBAN; spaces and lower case are accepted and normalised.
+          description: |
+            SEPA IBAN. The separators (space, tab, CR, LF, U+00A0 and U+202F) are removed
+            and a-z upper-cased (slice 3 decision 56); every other character must be an ASCII
+            letter or digit. At most 64 characters as received, separators included.
           maxLength: 64
+          pattern: '^[ \t\r\n\u00a0\u202f]*(?:[A-Za-z0-9][ \t\r\n\u00a0\u202f]*)+$'
         provider_account_id:
           type: string
           minLength: 1
@@ -384,7 +388,7 @@ components:
           pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
         creditor_iban:
           type: string
-          description: Normalised (no spaces, upper case).
+          description: Normalised (no separators, upper case).
           pattern: '^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$'
         provider_account_id:
           type: [string, 'null']
@@ -476,10 +480,13 @@ components:
       enum: [created, received, under_review, approved, rejected, credited, returned]
     SepaText:
       description: |
-        Trimmed of leading and trailing whitespace, then letters, digits, spaces and
-        / - ? : ( ) . , ' + only (the SEPA basic character set).
+        The separators (space, tab, CR, LF, U+00A0 and U+202F) are trimmed from both ends
+        (slice 3 decision 56); what remains must not be blank and may contain only letters,
+        digits, spaces and / - ? : ( ) . , ' + (the SEPA basic character set). Inside, nothing
+        is changed. Each field's length limit applies after trimming, so it is stated in the
+        field's description rather than as a maxLength, which would apply to the raw value.
       type: string
-      pattern: '^\s*[A-Za-z0-9/?:().,''+ -]+\s*$'
+      pattern: '^[ \t\r\n\u00a0\u202f]*[A-Za-z0-9/?:().,''+-](?:[A-Za-z0-9/?:().,''+ -]*[A-Za-z0-9/?:().,''+-])?[ \t\r\n\u00a0\u202f]*$'
     WithdrawalRequest:
       type: object
       description: Unknown fields are rejected.
@@ -492,16 +499,22 @@ components:
           const: EUR
         creditor_iban:
           type: string
-          description: The destination, a SEPA IBAN; spaces and lower case are accepted and normalised.
+          description: |
+            The destination, a SEPA IBAN. The separators (space, tab, CR, LF, U+00A0 and
+            U+202F) are removed and a-z upper-cased (slice 3 decision 56); every other character
+            must be an ASCII letter or digit. At most 64 characters as received, separators
+            included.
           maxLength: 64
+          pattern: '^[ \t\r\n\u00a0\u202f]*(?:[A-Za-z0-9][ \t\r\n\u00a0\u202f]*)+$'
         creditor_name:
           description: Required; at most 70 characters after trimming, not blank.
           $ref: '#/components/schemas/SepaText'
         remittance_info:
           description: |
-            Optional reference shown to the recipient, at most 140 characters after trimming.
-            Absent, null, empty or only whitespace all mean none (null in the response).
+            Optional reference shown to the recipient, at most 140 characters after trimming (see
+            SepaText). Absent, null, empty or only separators all mean none (null in the response).
           type: [string, 'null']
+          pattern: '^[ \t\r\n\u00a0\u202f]*(?:[A-Za-z0-9/?:().,''+-](?:[A-Za-z0-9/?:().,''+ -]*[A-Za-z0-9/?:().,''+-])?[ \t\r\n\u00a0\u202f]*)?$'
     Withdrawal:
       type: object
       additionalProperties: false
@@ -533,7 +546,7 @@ components:
           const: EUR
         creditor_iban:
           type: string
-          description: Normalised (no spaces, upper case).
+          description: Normalised (no separators, upper case).
           pattern: '^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$'
         creditor_name:
           type: string

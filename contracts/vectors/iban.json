@@ -42,52 +42,184 @@
     "value": "DE75512108001245126199"
   },
   {
-    "name": "a byte-order mark (U+FEFF) in front",
+    "name": "separator space at the start, inside and at the end",
+    "input": " DE75 5121080012451261 99 ",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "separator tab at the start, inside and at the end",
+    "input": "\tDE75\t5121080012451261\t99\t",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "separator CR at the start, inside and at the end",
+    "input": "\rDE75\r5121080012451261\r99\r",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "separator LF at the start, inside and at the end",
+    "input": "\nDE75\n5121080012451261\n99\n",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "separator no-break space (U+00A0) at the start, inside and at the end",
+    "input": "\u00a0DE75\u00a05121080012451261\u00a099\u00a0",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "separator narrow no-break space (U+202F) at the start, inside and at the end",
+    "input": "\u202fDE75\u202f5121080012451261\u202f99\u202f",
+    "ok": true,
+    "value": "DE75512108001245126199"
+  },
+  {
+    "name": "not a separator: byte-order mark (U+FEFF) in front",
     "input": "\ufeffDE75512108001245126199",
-    "ok": true,
-    "value": "DE75512108001245126199"
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
   },
   {
-    "name": "ideographic space (U+3000)",
-    "input": "DE75\u30005121080012451261 99",
-    "ok": true,
-    "value": "DE75512108001245126199"
+    "name": "not a separator: byte-order mark (U+FEFF) at the end",
+    "input": "DE75512108001245126199\ufeff",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
   },
   {
-    "name": "next line (U+0085) is not whitespace to JavaScript",
+    "name": "not a separator: vertical tab inside",
+    "input": "DE75\u000b5121080012451261 99",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
+  },
+  {
+    "name": "not a separator: form feed inside",
+    "input": "DE75\f5121080012451261 99",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
+  },
+  {
+    "name": "not a separator: next line (U+0085) inside",
     "input": "DE75\u00855121080012451261 99",
     "ok": false,
-    "why": "U+0085 is not removed; not a letter or digit"
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
   },
   {
-    "name": "zero-width space (U+200B) is not whitespace",
+    "name": "not a separator: ogham space mark (U+1680) inside",
+    "input": "DE75\u16805121080012451261 99",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
+  },
+  {
+    "name": "not a separator: en quad (U+2000) inside",
+    "input": "DE75\u20005121080012451261 99",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
+  },
+  {
+    "name": "not a separator: hair space (U+200A) inside",
+    "input": "DE75\u200a5121080012451261 99",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
+  },
+  {
+    "name": "not a separator: zero-width space (U+200B) inside",
     "input": "DE75\u200b5121080012451261 99",
     "ok": false,
-    "why": "U+200B is not removed"
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
   },
   {
-    "name": "dotless i (U+0131) upper-cases to I",
+    "name": "not a separator: line separator (U+2028) inside",
+    "input": "DE75\u20285121080012451261 99",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
+  },
+  {
+    "name": "not a separator: paragraph separator (U+2029) at the end",
+    "input": "DE75512108001245126199\u2029",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
+  },
+  {
+    "name": "not a separator: medium mathematical space (U+205F) inside",
+    "input": "DE75\u205f5121080012451261 99",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
+  },
+  {
+    "name": "not a separator: ideographic space (U+3000) inside",
+    "input": "DE75\u30005121080012451261 99",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
+  },
+  {
+    "name": "not a separator: ideographic space (U+3000) in front",
+    "input": "\u3000DE75512108001245126199",
+    "ok": false,
+    "why": "only the six separators are removed; any other non-ASCII character is rejected"
+  },
+  {
+    "name": "dotless i (U+0131) is not upper-cased",
     "input": "\u0131t60x0542811101000000123456",
-    "ok": true,
-    "value": "IT60X0542811101000000123456"
+    "ok": false,
+    "why": "only a-z is upper-cased"
   },
   {
-    "name": "long s (U+017F) upper-cases to S",
+    "name": "long s (U+017F) is not upper-cased",
     "input": "GB63BO\u017f\u017f12345612345678",
-    "ok": true,
-    "value": "GB63BOSS12345612345678"
+    "ok": false,
+    "why": "only a-z is upper-cased"
   },
   {
-    "name": "sharp s (U+00DF) upper-cases to SS",
+    "name": "sharp s (U+00DF) is not upper-cased",
     "input": "gb63bo\u00df12345612345678",
-    "ok": true,
-    "value": "GB63BOSS12345612345678"
+    "ok": false,
+    "why": "only a-z is upper-cased"
   },
   {
-    "name": "the st ligature (U+FB06) upper-cases to ST",
+    "name": "the ff ligature (U+FB00) is not upper-cased",
+    "input": "GB82WE\ufb0012345698765432",
+    "ok": false,
+    "why": "only a-z is upper-cased"
+  },
+  {
+    "name": "the fi ligature (U+FB01) is not upper-cased",
+    "input": "GB82WE\ufb0112345698765432",
+    "ok": false,
+    "why": "only a-z is upper-cased"
+  },
+  {
+    "name": "the fl ligature (U+FB02) is not upper-cased",
+    "input": "GB82WE\ufb0212345698765432",
+    "ok": false,
+    "why": "only a-z is upper-cased"
+  },
+  {
+    "name": "the ffi ligature (U+FB03) is not upper-cased",
+    "input": "GB82WE\ufb0312345698765432",
+    "ok": false,
+    "why": "only a-z is upper-cased"
+  },
+  {
+    "name": "the ffl ligature (U+FB04) is not upper-cased",
+    "input": "GB82WE\ufb0412345698765432",
+    "ok": false,
+    "why": "only a-z is upper-cased"
+  },
+  {
+    "name": "the long st ligature (U+FB05) is not upper-cased",
+    "input": "GB82WE\ufb0512345698765432",
+    "ok": false,
+    "why": "only a-z is upper-cased"
+  },
+  {
+    "name": "the st ligature (U+FB06) is not upper-cased",
     "input": "GB82WE\ufb0612345698765432",
-    "ok": true,
-    "value": "GB82WEST12345698765432"
+    "ok": false,
+    "why": "only a-z is upper-cased"
   },
   {
     "name": "fullwidth letters stay non-ASCII",
@@ -96,10 +228,16 @@
     "why": "not ASCII letters"
   },
   {
-    "name": "a dotted capital I (U+0130) stays non-ASCII",
+    "name": "a dotted capital I (U+0130)",
     "input": "\u0130T60X0542811101000000123456",
     "ok": false,
     "why": "not an ASCII letter"
+  },
+  {
+    "name": "64 characters before normalisation, narrow no-break spaces",
+    "input": "DE75512108001245126199\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f\u202f",
+    "ok": true,
+    "value": "DE75512108001245126199"
   },
   {
     "name": "64 characters before normalisation",
@@ -120,8 +258,8 @@
     "why": "not an IBAN"
   },
   {
-    "name": "only whitespace",
-    "input": "   ",
+    "name": "only separators",
+    "input": " \t\u00a0\u202f ",
     "ok": false,
     "why": "not an IBAN"
   },
