@@ -17,6 +17,12 @@ import { getWithdrawalByKey, type NewWithdrawal, type Withdrawal } from './withd
 export type ComparedWithdrawalField =
   'amount_minor' | 'currency' | 'creditor_iban' | 'creditor_name' | 'remittance_info';
 
+// The details compared: a stored Withdrawal and a NewWithdrawal both have them.
+type WithdrawalDetails = Pick<
+  NewWithdrawal,
+  'amountMinor' | 'currency' | 'creditorIban' | 'creditorName' | 'remittanceInfo'
+>;
+
 export type RequestResult =
   // eventId: the withdrawal.held event stored in the outbox with it.
   | { readonly kind: 'created'; readonly withdrawal: Withdrawal; readonly eventId: Uuid<'evt'> }
@@ -50,14 +56,20 @@ export async function requestWithdrawal(tx: Tx, request: NewWithdrawal): Promise
       `withdrawal key conflict on account ${request.accountId}, but no withdrawal holds the key`,
     );
   }
-  const differingFields = compare(stored, request);
+  const differingFields = differingWithdrawalFields(stored, request);
   return differingFields.length === 0
     ? { kind: 'repeat', withdrawal: stored }
     : { kind: 'conflict', differingFields, stored };
 }
 
-// Field by field, no request hash (as slice 1 decision 16), so Node and Go share one rule.
-function compare(stored: Withdrawal, request: NewWithdrawal): ComparedWithdrawalField[] {
+// The fields in which a repeat with the same key differs from the stored withdrawal ([] = the same
+// request). Field by field, no request hash (as slice 1 decision 16), so Node and Go share one
+// rule. Exported for the tests and the shared vectors (contracts/vectors/
+// withdrawal-same-details.json), which pin the rule for both implementations.
+export function differingWithdrawalFields(
+  stored: WithdrawalDetails,
+  request: WithdrawalDetails,
+): ComparedWithdrawalField[] {
   const fields: ComparedWithdrawalField[] = [];
   if (stored.amountMinor !== request.amountMinor) fields.push('amount_minor');
   if (stored.currency !== request.currency) fields.push('currency');

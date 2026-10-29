@@ -1,0 +1,146 @@
+[
+  {
+    "name": "one",
+    "input": "1",
+    "ok": true,
+    "value": "1"
+  },
+  {
+    "name": "a typical amount",
+    "input": "1250",
+    "ok": true,
+    "value": "1250"
+  },
+  {
+    "name": "above 2^53, exact",
+    "input": "9007199254740993",
+    "ok": true,
+    "value": "9007199254740993"
+  },
+  {
+    "name": "19 digits",
+    "input": "1000000000000000000",
+    "ok": true,
+    "value": "1000000000000000000"
+  },
+  {
+    "name": "the int8 maximum",
+    "input": "9223372036854775807",
+    "ok": true,
+    "value": "9223372036854775807"
+  },
+  {
+    "name": "zero",
+    "input": "0",
+    "ok": false,
+    "why": "must be positive"
+  },
+  {
+    "name": "a leading zero",
+    "input": "01250",
+    "ok": false,
+    "why": "no leading zero: one spelling per amount"
+  },
+  {
+    "name": "only zeros",
+    "input": "000",
+    "ok": false,
+    "why": "no leading zero"
+  },
+  {
+    "name": "a minus sign",
+    "input": "-1250",
+    "ok": false,
+    "why": "digits only"
+  },
+  {
+    "name": "a plus sign",
+    "input": "+1250",
+    "ok": false,
+    "why": "digits only"
+  },
+  {
+    "name": "a decimal point",
+    "input": "12.50",
+    "ok": false,
+    "why": "whole minor units only"
+  },
+  {
+    "name": "a decimal comma",
+    "input": "12,50",
+    "ok": false,
+    "why": "digits only"
+  },
+  {
+    "name": "an exponent",
+    "input": "1e3",
+    "ok": false,
+    "why": "digits only"
+  },
+  {
+    "name": "a leading space",
+    "input": " 1250",
+    "ok": false,
+    "why": "no whitespace"
+  },
+  {
+    "name": "a trailing space",
+    "input": "1250 ",
+    "ok": false,
+    "why": "no whitespace"
+  },
+  {
+    "name": "a space inside",
+    "input": "12 50",
+    "ok": false,
+    "why": "no whitespace"
+  },
+  {
+    "name": "Arabic-Indic digits",
+    "input": "\u0661\u0662\u0665\u0660",
+    "ok": false,
+    "why": "ASCII digits 0-9 only"
+  },
+  {
+    "name": "fullwidth digits",
+    "input": "\uff11\uff12\uff15\uff10",
+    "ok": false,
+    "why": "ASCII digits 0-9 only"
+  },
+  {
+    "name": "empty",
+    "input": "",
+    "ok": false,
+    "why": "must be a positive whole number"
+  },
+  {
+    "name": "the int8 maximum + 1",
+    "input": "9223372036854775808",
+    "ok": false,
+    "why": "larger than the maximum amount"
+  },
+  {
+    "name": "19 nines",
+    "input": "9999999999999999999",
+    "ok": false,
+    "why": "larger than the maximum amount"
+  },
+  {
+    "name": "20 digits",
+    "input": "10000000000000000000",
+    "ok": false,
+    "why": "at most 19 characters"
+  },
+  {
+    "name": "a JSON number",
+    "input": 1250,
+    "ok": false,
+    "why": "must be a string of digits, not a JSON number"
+  },
+  {
+    "name": "null",
+    "input": null,
+    "ok": false,
+    "why": "must be a string"
+  }
+]

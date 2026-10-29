@@ -79,10 +79,10 @@ One commit per step on `slice-3`, reviewed before the next.
 1. **Scaffold:** the module with a pinned toolchain (`go`/`toolchain` directives), `gofmt`, `go vet` and `golangci-lint` (pinned), the `config`, `db` (pool, transaction helper), `ids`, `money` and logging packages, a Go test database `ledger_go_test` (migrated by compose like `ledger_test`), a Go CI job (format, vet, lint, vulnerability scan with `govulncheck`, test), and the Go section in CLAUDE.md.
 2. **Shared test vectors:** `contracts/vectors/` extracted from the Node tests; Node's tests read them; Go's `ids`, `money`, IBAN and SEPA-text code passes them.
 3. **Ledger:** `move()`, the deposit and withdrawal postings, invariants, and their tests (the cases of `node/test/ledger/`).
-4. **Read API and the deposit webhook:** a multi-stage Dockerfile (one image, every binary; the first binary is the API), the HTTP server (request IDs, access log, problem details, the webhook error contract), `GET /accounts/:id/balance` and `/transactions`, `POST /provider/incoming-payments` (deposit and outbox row in one transaction; suspense; conflicts). Contract-checked tests.
+4. **Read API and the deposit webhook:** a multi-stage Dockerfile (one image, every binary; the first binary is the API), the HTTP server (request IDs, access log, problem details, the webhook error contract), `GET /accounts/:id/balance` and `/transactions`, `POST /provider/incoming-payments` (deposit and outbox row in one transaction; suspense; conflicts). Contract-checked tests; the duplicate-or-conflict rule passes `contracts/vectors/deposit-same-details.json`.
 5. **Relay:** claim, publish, mark; leases; the lease and batch checks against the stream's duplicate window.
 6. **Consumer layer and the deposit-worker:** the pull loop (fetch only free slots), the delivery log (record then ack; the settle-once guard), `working()` during reviews, graceful shutdown; the deposit lifecycle.
-7. **Withdrawals:** `POST /accounts/:id/withdrawals` (`Idempotency-Key`, strict body), `GET /withdrawals/:id`, the submitter (provider client, timeout checked against `ack_wait`, outcomes), `POST /provider/transfer-updates`.
+7. **Withdrawals:** `POST /accounts/:id/withdrawals` (`Idempotency-Key`, strict body), `GET /withdrawals/:id`, the submitter (provider client, timeout checked against `ack_wait`, outcomes), `POST /provider/transfer-updates`. The repeat-or-reuse rule passes `contracts/vectors/withdrawal-same-details.json`.
 8. **Mixing:** per-service implementation selection in compose; the `implementation` log field in both implementations; demo runs against Node, Go and mixed stacks, plus a Node and a Go deposit-worker sharing the consumer; CI for all of them; README, development docs; tag.
 
 ## Done when
@@ -104,6 +104,7 @@ All of slices 1 and 2's gaps apply to Go too. In addition:
 
 - **No Go process-level e2e tests.** Node's e2e tests start and kill real processes; Go relies on the demo (which kills the deposit-worker and the submitter through compose, whichever implementation runs them) and its integration tests. A Go e2e suite with `os/exec` would mirror Node's.
 - **Provider-sim and reconciliation are Node only** (decisions 50, slice 2 decision 31).
+- **IBAN upper-casing and whitespace follow JavaScript** (full case mapping, so ß is read as SS; JavaScript's whitespace set), see `contracts/vectors/README.md`. To be replaced right after step 2 by an explicit rule for both implementations (step 2b).
 - **Mixed versions over time:** both implementations are released together here. In production, implementations deployed at different times need versioned contracts and the expand–contract changes of ADR 0002.
 
 ## Decisions
