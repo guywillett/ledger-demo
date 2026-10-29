@@ -80,17 +80,47 @@
     "value": "Jane  Doe"
   },
   {
-    "name": "required: tab and newline at the ends trimmed",
+    "name": "required: separator space trimmed at both ends",
     "input": {
       "max": 70,
       "optional": false,
-      "text": "\tJane Doe\n"
+      "text": " Jane Doe "
     },
     "ok": true,
     "value": "Jane Doe"
   },
   {
-    "name": "required: no-break space (U+00A0) at the ends trimmed",
+    "name": "required: separator tab trimmed at both ends",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\tJane Doe\t"
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: separator CR trimmed at both ends",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\rJane Doe\r"
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: separator LF trimmed at both ends",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\nJane Doe\n"
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: separator no-break space (U+00A0) trimmed at both ends",
     "input": {
       "max": 70,
       "optional": false,
@@ -100,44 +130,144 @@
     "value": "Jane Doe"
   },
   {
-    "name": "required: byte-order mark (U+FEFF) at the start trimmed",
+    "name": "required: separator narrow no-break space (U+202F) trimmed at both ends",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\u202fJane Doe\u202f"
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: a mix of separators trimmed at both ends",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": " \t\u00a0Jane Doe\r\n\u202f"
+    },
+    "ok": true,
+    "value": "Jane Doe"
+  },
+  {
+    "name": "required: not a separator: byte-order mark (U+FEFF) at the start",
     "input": {
       "max": 70,
       "optional": false,
       "text": "\ufeffJane Doe"
     },
-    "ok": true,
-    "value": "Jane Doe"
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
   },
   {
-    "name": "required: ideographic space (U+3000) at the end trimmed",
+    "name": "required: not a separator: byte-order mark (U+FEFF) at the end",
     "input": {
       "max": 70,
       "optional": false,
-      "text": "Jane Doe\u3000"
+      "text": "Jane Doe\ufeff"
     },
-    "ok": true,
-    "value": "Jane Doe"
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
   },
   {
-    "name": "required: next line (U+0085) at the end is not trimmed",
+    "name": "required: not a separator: vertical tab at the end",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane Doe\u000b"
+    },
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
+  },
+  {
+    "name": "required: not a separator: form feed at the start",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\fJane Doe"
+    },
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
+  },
+  {
+    "name": "required: not a separator: next line (U+0085) at the end",
     "input": {
       "max": 70,
       "optional": false,
       "text": "Jane Doe\u0085"
     },
     "ok": false,
-    "why": "U+0085 is kept, and is not in the character set"
+    "why": "not trimmed, and not in the character set"
   },
   {
-    "name": "required: zero-width space (U+200B) at the end is not trimmed",
+    "name": "required: not a separator: ogham space mark (U+1680) at the start",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\u1680Jane Doe"
+    },
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
+  },
+  {
+    "name": "required: not a separator: en quad (U+2000) at the end",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane Doe\u2000"
+    },
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
+  },
+  {
+    "name": "required: not a separator: hair space (U+200A) at the start",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\u200aJane Doe"
+    },
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
+  },
+  {
+    "name": "required: not a separator: zero-width space (U+200B) at the end",
     "input": {
       "max": 70,
       "optional": false,
       "text": "Jane Doe\u200b"
     },
     "ok": false,
-    "why": "U+200B is kept, and is not in the character set"
+    "why": "not trimmed, and not in the character set"
+  },
+  {
+    "name": "required: not a separator: line separator (U+2028) at the end",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane Doe\u2028"
+    },
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
+  },
+  {
+    "name": "required: not a separator: medium mathematical space (U+205F) at the start",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\u205fJane Doe"
+    },
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
+  },
+  {
+    "name": "required: not a separator: ideographic space (U+3000) at the end",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "Jane Doe\u3000"
+    },
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
   },
   {
     "name": "required: a tab inside",
@@ -230,14 +360,24 @@
     "why": "must not be blank"
   },
   {
-    "name": "required: only Unicode whitespace",
+    "name": "required: only separators",
     "input": {
       "max": 70,
       "optional": false,
-      "text": "\u00a0\ufeff\u3000"
+      "text": " \t\u00a0\u202f\r\n"
     },
     "ok": false,
     "why": "must not be blank"
+  },
+  {
+    "name": "required: only other Unicode spaces",
+    "input": {
+      "max": 70,
+      "optional": false,
+      "text": "\ufeff\u3000"
+    },
+    "ok": false,
+    "why": "not trimmed, and not in the character set"
   },
   {
     "name": "required: null",
@@ -328,24 +468,34 @@
     "value": null
   },
   {
-    "name": "optional: only Unicode whitespace is none",
+    "name": "optional: only separators is none",
     "input": {
       "max": 140,
       "optional": true,
-      "text": "\u00a0\u202f\ufeff"
+      "text": "\u00a0\u202f \t\r\n"
     },
     "ok": true,
     "value": null
   },
   {
-    "name": "optional: only U+0085 is not none (not whitespace to JavaScript)",
+    "name": "optional: a byte-order mark alone is not none",
+    "input": {
+      "max": 140,
+      "optional": true,
+      "text": "\ufeff"
+    },
+    "ok": false,
+    "why": "not a separator, and not in the character set"
+  },
+  {
+    "name": "optional: next line (U+0085) alone is not none",
     "input": {
       "max": 140,
       "optional": true,
       "text": "\u0085"
     },
     "ok": false,
-    "why": "U+0085 is kept, and is not in the character set"
+    "why": "not a separator, and not in the character set"
   },
   {
     "name": "optional: exactly max characters",

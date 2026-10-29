@@ -1,3 +1,5 @@
+import { removeSeparators } from './separators.ts';
+
 // IBANs as provider notifications identify accounts. Parse, don't validate: parseIban is the
 // only way to get an Iban, so any function taking one is guaranteed a normalised, valid IBAN.
 export type Iban = string & { readonly __brand: 'Iban' };
@@ -60,12 +62,14 @@ const SEPA_IBAN_LENGTHS: ReadonlyMap<string, number> = new Map([
   ['VA', 22],
 ]);
 
-// Normalises (whitespace removed, upper case), then checks format, the country's length, the
-// check digit range and the ISO 13616 mod-97 checksum. Reasons are fixed texts that repeat
+// Normalises (separators removed, a-z upper-cased: slice 3 decision 56, see separators.ts), then
+// checks format, the country's length, the check digit range and the ISO 13616 mod-97 checksum.
+// Any other non-ASCII character is left in place and fails the format check: rejected, never
+// removed or transliterated. Reasons are fixed texts that repeat
 // nothing from the input: they end up in 400 responses and logs, which never contain request
 // values.
 export function parseIban(input: string): IbanResult {
-  const value = input.replace(/\s+/g, '').toUpperCase();
+  const value = removeSeparators(input).replace(/[a-z]/g, (letter) => letter.toUpperCase());
   if (!/^[A-Z]{2}[0-9]{2}[A-Z0-9]+$/.test(value)) {
     return {
       ok: false,

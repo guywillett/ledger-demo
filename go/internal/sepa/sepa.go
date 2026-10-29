@@ -2,16 +2,16 @@
 // and withdrawals (client requests): IBANs and SEPA basic text. Node: node/src/shared/iban.ts and
 // the text schemas in node/src/shared/schemas.ts.
 //
-// Every rule must decide exactly as Node does (pinned by contracts/vectors/iban.json and
-// sepa-text.json), and Node's are JavaScript's: its definition of whitespace, its upper-casing,
-// its string lengths. Go's own differ in the details, so they're not used here (decision 54):
+// Every rule must decide exactly as Node does, pinned by the shared vectors
+// (contracts/vectors/iban.json and sepa-text.json). Both follow slice 3 decision 56, defined over
+// ASCII so it can be implemented identically from a sentence: the separators are space, tab, CR,
+// LF, no-break space (U+00A0) and narrow no-break space (U+202F); an IBAN has every separator
+// removed and a-z upper-cased; SEPA text has separators trimmed from both ends only; any other
+// non-ASCII character is rejected, never removed or transliterated.
 //
-//   - whitespace: Go's unicode.IsSpace (behind strings.TrimSpace and strings.Fields) includes
-//     U+0085 and leaves out U+FEFF; JavaScript's \s and trim() do the opposite. Go's regexp \s is
-//     ASCII only. jsWhitespace is JavaScript's set.
-//   - upper case: Go's strings.ToUpper maps one character to one; JavaScript's toUpperCase uses
-//     Unicode's full mapping, where ß becomes SS. jsUpperToASCII has the cases that matter.
-//   - length: Go's len counts bytes; JavaScript's length counts UTF-16 code units. utf16Len.
+// Go's own helpers aren't used for this because they define whitespace and case more widely:
+// strings.TrimSpace and unicode.IsSpace include U+0085 and the other Unicode spaces, and
+// strings.ToUpper maps every script's letters. isSeparator and the a-z loop are the rule itself.
 package sepa
 
 import (
@@ -19,33 +19,19 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"unicode/utf16"
+	"unicode/utf8"
 )
 
-// jsWhitespace reports whether r is whitespace to JavaScript (its \s and String.prototype.trim,
-// which are the same set): ECMAScript's WhiteSpace and LineTerminator. Measured against Node, not
-// taken from the spec alone; contracts/vectors/README.md lists the set.
-func jsWhitespace(r rune) bool {
+// isSeparator reports whether r is one of decision 56's separators.
+func isSeparator(r rune) bool {
 	switch r {
-	case '\t', '\n', '\v', '\f', '\r', ' ',
-		'\u00a0', '\u1680', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000', '\ufeff':
+	case ' ', '\t', '\r', '\n', '\u00a0', '\u202f':
 		return true
 	}
-	return r >= '\u2000' && r <= '\u200a'
+	return false
 }
 
-// utf16Len is a string's length as JavaScript counts it, in UTF-16 code units: one for most
-// characters, two for those outside the Basic Multilingual Plane (emoji, for instance).
-func utf16Len(s string) int {
-	n := 0
-	// range over a string yields runes (Unicode code points), decoding the UTF-8 bytes.
-	for _, r := range s {
-		n += utf16.RuneLen(r)
-	}
-	return n
-}
-
-// IBAN is a normalised SEPA IBAN (no whitespace, upper case) that passed ParseIBAN. Decoding a JSON
+// IBAN is a normalised SEPA IBAN (no separators, upper case) that passed ParseIBAN. Decoding a JSON
 // string into an IBAN parses it (UnmarshalText), so a request body's IBAN field is valid once
 // decoded. Any string can still be converted with IBAN(s), as Node's brand can be cast; outside
 // this package, only do that for a value read back from the database.
@@ -63,7 +49,13 @@ var (
 )
 
 // maxIBANInput is the longest IBAN input accepted, before normalisation (Node's ibanSchema
-// .max(64), in UTF-16 code units): enough for any IBAN with spaces, not unbounded work.
+// .max(64)): enough for any IBAN with separators, not unbounded work.
+//
+// Counted in code points (utf8.RuneCountInString), where Node counts UTF-16 code units. The two
+// can only differ for a character outside the Basic Multilingual Plane, and an input with any
+// non-ASCII character other than the two no-break spaces (each one code point and one UTF-16
+// unit) is rejected whatever its length, so the count can't change a decision. Bytes would: a
+// no-break space is 2 bytes in UTF-8, a narrow one 3.
 const maxIBANInput = 64
 
 // ibanLengths is the IBAN length per IBAN country code, for the countries in the SEPA schemes: the
@@ -82,38 +74,26 @@ var ibanLengths = map[string]int{
 // the input, so a pattern can't be made to backtrack for ever; [A-Z] and [0-9] are ASCII only.
 var ibanFormat = regexp.MustCompile(`^[A-Z]{2}[0-9]{2}[A-Z0-9]+$`)
 
-// jsUpperToASCII lists the non-ASCII characters that JavaScript's toUpperCase turns into ASCII
-// letters (enumerated over every code point with Node). Every other non-ASCII character stays
-// non-ASCII when upper-cased, and so fails the format check either way, so these ten are all that
-// can change a decision: with them, ıt60… is accepted as IT60… in both implementations.
-var jsUpperToASCII = map[rune]string{
-	'ß': "SS", 'ı': "I", 'ſ': "S",
-	'ﬀ': "FF", 'ﬁ': "FI", 'ﬂ': "FL", 'ﬃ': "FFI", 'ﬄ': "FFL", 'ﬅ': "ST", 'ﬆ': "ST",
-}
-
-// normaliseIBAN removes JavaScript whitespace and upper-cases as JavaScript does (Node's
-// input.replace(/\s+/g, "").toUpperCase()).
+// normaliseIBAN removes every separator and upper-cases a-z. Anything else is kept as it is, so
+// a non-ASCII character then fails the format check.
 func normaliseIBAN(input string) string {
 	var b strings.Builder
 	for _, r := range input {
 		switch {
-		case jsWhitespace(r):
+		case isSeparator(r):
 		case r >= 'a' && r <= 'z':
 			b.WriteRune(r - 'a' + 'A')
-		case jsUpperToASCII[r] != "":
-			b.WriteString(jsUpperToASCII[r])
 		default:
-			// ASCII as it is; any other non-ASCII character fails the format check.
 			b.WriteRune(r)
 		}
 	}
 	return b.String()
 }
 
-// ParseIBAN normalises (whitespace removed, upper case), then checks the format, the country's
+// ParseIBAN normalises (separators removed, a-z upper-cased), then checks the format, the country's
 // length, the check digit range and the ISO 13616 mod-97 checksum, as Node's parseIban does.
 func ParseIBAN(input string) (IBAN, error) {
-	if utf16Len(input) > maxIBANInput {
+	if utf8.RuneCountInString(input) > maxIBANInput {
 		return "", ErrIBANTooLong
 	}
 	value := normaliseIBAN(input)
@@ -190,15 +170,16 @@ func sepaBasic(s string) bool {
 }
 
 // ParseText checks required SEPA text of at most maxLen characters (slice 2 decision 32), as Node's
-// sepaTextSchema: whitespace at both ends is trimmed first (JavaScript's trim(), see the package
-// comment), and the trimmed text is the result; whitespace inside is kept. Text outside the
+// sepaTextSchema: separators at both ends are trimmed first (see the package comment), and the
+// trimmed text is the result; inside, nothing is changed. Text outside the
 // character set is rejected, never transliterated.
 func ParseText(input string, maxLen int) (string, error) {
-	text := strings.TrimFunc(input, jsWhitespace)
+	text := strings.TrimFunc(input, isSeparator)
 	if text == "" {
 		return "", ErrBlank
 	}
-	if utf16Len(text) > maxLen {
+	// Code points: accepted text is ASCII, so any count gives the same decision (see maxIBANInput).
+	if utf8.RuneCountInString(text) > maxLen {
 		return "", fmt.Errorf("%w: at most %d characters", ErrTooLong, maxLen)
 	}
 	if !sepaBasic(text) {
@@ -208,10 +189,10 @@ func ParseText(input string, maxLen int) (string, error) {
 }
 
 // ParseOptionalText is ParseText for an optional field, as Node's optionalSepaTextSchema: absent
-// (nil; a JSON null decodes to nil too), empty and only-whitespace all mean none, returned as nil,
+// (nil; a JSON null decodes to nil too), empty and only separators all mean none, returned as nil,
 // the one spelling of none (stored as NULL).
 func ParseOptionalText(input *string, maxLen int) (*string, error) {
-	if input == nil || strings.TrimFunc(*input, jsWhitespace) == "" {
+	if input == nil || strings.TrimFunc(*input, isSeparator) == "" {
 		return nil, nil
 	}
 	text, err := ParseText(*input, maxLen)
