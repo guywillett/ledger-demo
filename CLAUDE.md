@@ -33,7 +33,7 @@ Portfolio project: a small payment event-processing system (deposits with a pseu
 - **Status codes follow the caller** (slice 2 decision 38): the client API (top of `src/api/`) uses conventional REST codes; provider webhooks live under `src/api/webhooks/` at `/provider/…` and follow the webhook contract (`204` for anything recorded or deliberately handled, `400` only for an unusable body, `500` when a retry can help).
 - **Migrations:** plain SQL in `db/migrations/`, run by dbmate. Language-neutral: shared by the Node and Go implementations, neither of which migrates.
 - **Versions:** pin Docker image tags and dependency versions; commit lockfiles.
-- **Logging:** structured JSON with `request_id`, `deposit_id`, `event_id` where relevant.
+- **Logging:** structured JSON with `request_id`, `deposit_id`, `event_id` where relevant. Never use `time`, `level` or `msg` as field names: they would duplicate the built-in fields (readers keep the last), and Go renames them to `attr.*`.
 
 ## Go (`go/`)
 

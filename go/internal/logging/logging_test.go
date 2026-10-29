@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/guywillett/ledger-demo/go/internal/logging"
 	"github.com/guywillett/ledger-demo/go/internal/money"
@@ -62,9 +64,9 @@ func TestPinoShape(t *testing.T) {
 			t.Errorf("%s = %#v, want %#v", key, line[key], value)
 		}
 	}
-	time, _ := line["time"].(string)
-	if !regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$`).MatchString(time) {
-		t.Errorf("time = %q, want UTC to the millisecond like 2026-10-27T10:34:00.403Z", time)
+	written, _ := line["time"].(string)
+	if !regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$`).MatchString(written) {
+		t.Errorf("time = %q, want UTC to the millisecond like 2026-10-27T10:34:00.403Z", written)
 	}
 	if len(line) != len(want)+1 {
 		t.Errorf("line has extra fields: %v", line)
@@ -133,5 +135,53 @@ func TestAmounts(t *testing.T) {
 	logger.Info("held", "amount_minor", money.Amount(9007199254740993))
 	if !strings.Contains(buf.String(), `"amount_minor":"9007199254740993"`) {
 		t.Errorf("line = %s, want the amount as a digit string", buf.String())
+	}
+}
+
+// A caller's own "time", "level" or "msg" field is renamed to attr.*, whether it's passed in the
+// log call (Handle) or with logger.With (WithAttrs), and whatever its type: a valid slog.Level or
+// time.Time under those keys would otherwise replace the real one when the line is read, since
+// slog writes duplicate keys and JSON readers keep the last.
+func TestReservedKeysAreRenamed(t *testing.T) {
+	when := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		name string
+		log  func(logger *slog.Logger)
+	}{
+		{"in the log call", func(logger *slog.Logger) {
+			logger.Warn("x", "level", slog.LevelError, "msg", "hi", "time", when)
+		}},
+		{"with logger.With", func(logger *slog.Logger) {
+			logger.With("level", slog.LevelError, "msg", "hi", "time", when).Warn("x")
+		}},
+		{"values of other types", func(logger *slog.Logger) {
+			logger.Warn("x", "level", "high", "msg", 42, "time", "yesterday")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger, err := logging.New(&buf, "api", "info")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.log(logger)
+			raw := buf.String()
+			// Each key once: json.Unmarshal would hide a duplicate by keeping the last.
+			for _, key := range []string{`"level":`, `"msg":`, `"time":`} {
+				if n := strings.Count(raw, key); n != 1 {
+					t.Errorf("%s appears %d times in %s", key, n, raw)
+				}
+			}
+			line := lines(t, &buf)[0]
+			if line["level"] != "warn" || line["msg"] != "x" {
+				t.Errorf("level, msg = %v, %v; want warn, x", line["level"], line["msg"])
+			}
+			for _, key := range []string{"attr.level", "attr.msg", "attr.time"} {
+				if _, ok := line[key]; !ok {
+					t.Errorf("%s missing from %s", key, raw)
+				}
+			}
+		})
 	}
 }
