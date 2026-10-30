@@ -17,8 +17,7 @@ import (
 )
 
 // Move against the test database: the cases of node/test/ledger/move.test.ts. Each test uses its
-// own account, so balances start at zero. The two cases that move money through held use a
-// withdrawal reference and come with the withdrawal postings (step 3b).
+// own account, so balances start at zero.
 
 // booking is a deposit's book movement for the account, with a fresh deposit ID.
 func booking(account ids.AccountID) ledger.Movement {
@@ -210,6 +209,54 @@ func TestCannotOverdrawABucket(t *testing.T) {
 	}
 }
 
+func TestMovesThroughTheHeldBucket(t *testing.T) {
+	pool := testdb.Pool(t)
+	account := testdb.NewAccount(t, pool).ID
+	book := booking(account)
+	book.To = ledger.BucketAvailable
+	if _, err := move(pool, book); err != nil {
+		t.Fatal(err)
+	}
+
+	withdrawal := ids.New[ids.Withdrawal]()
+	reserve := ledger.Movement{
+		Account: account, From: ledger.BucketAvailable, To: ledger.BucketHeld, Amount: 1000,
+		Ref: ledger.WithdrawalReference(withdrawal, ledger.StepHold),
+	}
+	if r, err := move(pool, reserve); r != ledger.MoveApplied || err != nil {
+		t.Fatalf("hold = %v, %v", r, err)
+	}
+	if got := balancesOf(t, pool, account); got != (balances{0, 250, 1000}) {
+		t.Errorf("after the hold: %+v", got)
+	}
+
+	leave := reserve
+	leave.From, leave.To = ledger.BucketHeld, ledger.BucketExternal
+	leave.Ref = ledger.WithdrawalReference(withdrawal, ledger.StepExecute)
+	if r, err := move(pool, leave); r != ledger.MoveApplied || err != nil {
+		t.Fatalf("execute = %v, %v", r, err)
+	}
+	if got := balancesOf(t, pool, account); got != (balances{0, 250, 0}) {
+		t.Errorf("after executing: %+v", got)
+	}
+}
+
+func TestReportsOverdrawingHeldAsAnOverdraftOnHeld(t *testing.T) {
+	pool := testdb.Pool(t)
+	account := testdb.NewAccount(t, pool).ID
+	_, err := move(pool, ledger.Movement{
+		Account: account, From: ledger.BucketHeld, To: ledger.BucketAvailable, Amount: 1,
+		Ref: ledger.WithdrawalReference(ids.New[ids.Withdrawal](), ledger.StepRelease),
+	})
+	overdraft, ok := errors.AsType[*ledger.OverdraftError](err)
+	if !ok || overdraft.Bucket != ledger.BucketHeld || overdraft.Account != account {
+		t.Errorf("error = %v, want an OverdraftError on held", err)
+	}
+	if got := balancesOf(t, pool, account); got != (balances{}) {
+		t.Errorf("balances = %+v", got)
+	}
+}
+
 func TestMoveOnceReportsADuplicateAsLedgerInconsistency(t *testing.T) {
 	pool := testdb.Pool(t)
 	account := testdb.NewAccount(t, pool).ID
@@ -313,6 +360,8 @@ func TestIsInvariantViolation(t *testing.T) {
 		{"LedgerInconsistencyError", &ledger.LedgerInconsistencyError{}, true},
 		{"MovementConflictError", &ledger.MovementConflictError{}, true},
 		{"OverdraftError", &ledger.OverdraftError{}, true},
+		// A business outcome, though it wraps an OverdraftError (see InsufficientFundsError).
+		{"InsufficientFundsError", &ledger.InsufficientFundsError{}, false},
 		{"any check_violation", &pgconn.PgError{Code: "23514"}, true},
 		{"a wrapped violation", wrap(&ledger.MovementConflictError{}), true},
 		{"another database error", &pgconn.PgError{Code: "40001"}, false},
