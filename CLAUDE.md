@@ -48,6 +48,7 @@ The Go implementation (slice 3) follows the conventions above (SQL, no check-the
 - **Validation is hand-written:** decode into validated types (`ids.DepositID`, `money.Amount` validate themselves when decoded); client bodies with `DisallowUnknownFields`, webhook bodies tolerantly.
 - **Same observable behaviour as Node** (spec, *Equivalence*): environment variables and defaults, routes, status codes, JSON, events, database writes, log field names. Logs carry `implementation: "go"`.
 - **Anything that isn't the usual Go way is documented where it's made, with its reason** (a comment; a spec decision if it shapes the structure).
+- **Line length:** no line-length linter; wrap code over about 100 characters where it reads better (signatures one parameter per line, long calls); strings and test names may run long.
 - **Commands** (in `go/`): `gofmt -l .` (lists unformatted files; `gofmt -w .` fixes them), `go vet ./...`, `golangci-lint run` (version pinned in `.golangci-lint-version`; install in `docs/development.md`), `govulncheck ./...` (pinned in `.govulncheck-version`), `go test -race ./...` (against `ledger_go_test`; needs `docker compose up -d`).
 
 ## Running
