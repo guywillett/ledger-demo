@@ -15,8 +15,13 @@ import (
 // Node: node/src/ledger/invariants.ts.
 //
 // errors.AsType looks through the whole chain of wrapped errors (fmt.Errorf's %w, Unwrap), so a
-// violation wrapped with context by a caller is still found.
+// violation wrapped with context by a caller is still found. That is also why
+// InsufficientFundsError is checked first: it wraps an OverdraftError (and so a check_violation),
+// but is a business outcome, as in Node, where isInvariantViolation only looks at the error itself.
 func IsInvariantViolation(err error) bool {
+	if _, ok := errors.AsType[*InsufficientFundsError](err); ok {
+		return false
+	}
 	if _, ok := errors.AsType[*LedgerInconsistencyError](err); ok {
 		return true
 	}

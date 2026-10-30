@@ -44,7 +44,7 @@ const (
 
 // Reference is the business object causing a movement and the step within it: (type, ID, step),
 // applied at most once. Its fields are unexported, so a Reference comes only from a constructor
-// (DepositReference; WithdrawalReference in step 3b), each taking its entity's own ID type and
+// (DepositReference, WithdrawalReference), each taking its entity's own ID type and
 // step type: a deposit's ID with a withdrawal's step, or a withdrawal's UUID as a deposit's, can't
 // be written. Node gets the same pairing from a discriminated union (move.ts MovementReference),
 // and the database from its paired CHECK on (reference_type, reference_step).
@@ -57,7 +57,7 @@ type Reference struct {
 	step   string    // reference_step
 }
 
-// DepositReference is a deposit's step.
+// DepositReference is a deposit's step. (WithdrawalReference is in withdrawals.go.)
 func DepositReference(id ids.DepositID, step DepositStep) Reference {
 	return Reference{entity: "deposit", id: id.UUID(), typeID: id.TypeID(), step: string(step)}
 }
