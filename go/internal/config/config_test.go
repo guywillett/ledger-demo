@@ -102,3 +102,28 @@ func TestParseNATS(t *testing.T) {
 		t.Errorf("Err() = %v, want nil", err)
 	}
 }
+
+func TestInt(t *testing.T) {
+	tests := []struct {
+		vars map[string]string
+		want int
+		err  bool
+	}{
+		{map[string]string{}, 3000, false}, // unset: the default
+		{map[string]string{"PORT": "8080"}, 8080, false},
+		{map[string]string{"PORT": "1"}, 1, false},
+		{map[string]string{"PORT": "65535"}, 65535, false},
+		{map[string]string{"PORT": "0"}, 0, true},
+		{map[string]string{"PORT": "65536"}, 0, true},
+		{map[string]string{"PORT": ""}, 0, true},
+		{map[string]string{"PORT": "3e3"}, 0, true}, // Node's Number() would read 3000
+		{map[string]string{"PORT": "http"}, 0, true},
+	}
+	for _, tt := range tests {
+		p := config.NewParser(env(tt.vars))
+		got := p.Int("PORT", 3000, 1, 65535)
+		if err := p.Err(); (err != nil) != tt.err || got != tt.want {
+			t.Errorf("Int(%v) = %d, %v; want %d, error %v", tt.vars, got, err, tt.want, tt.err)
+		}
+	}
+}

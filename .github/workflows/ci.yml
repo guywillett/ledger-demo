@@ -140,6 +140,11 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      # The image every Go process will run from (one binary per process under cmd/); not in compose
+      # until step 8, so only built here, to catch a broken Dockerfile.
+      - name: Build the image
+        run: docker build -t ledger-demo-go .
+
       - name: Service logs
         if: failure()
         working-directory: .
