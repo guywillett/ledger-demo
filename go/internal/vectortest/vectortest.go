@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -20,10 +21,13 @@ type Case struct {
 	Why   string          `json:"why"`
 }
 
-// dir is the vectors directory relative to a package directory: `go test` runs each package's
-// tests in that package's directory (go/internal/<package>), and go:embed, the usual way to ship
-// test data, can't reach files outside the module (go/).
-const dir = "../../../contracts/vectors"
+// dir is the vectors directory, found from this source file's own location (runtime.Caller), not
+// from the test's working directory (each package's tests run in that package's directory, at any
+// depth). go:embed, the usual way to ship test data, can't reach files outside the module (go/).
+var dir = func() string {
+	_, here, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(here), "../../../contracts/vectors")
+}()
 
 // Load reads one vector file, failing the test if it can't, or if it holds no cases.
 func Load(t testing.TB, file string) []Case {

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -94,6 +95,24 @@ func (p *Parser) OneOf(name, def string, allowed []string) string {
 		return ""
 	}
 	return value
+}
+
+// Int reads a whole number in [lo, hi], or def when the variable is unset.
+//
+// Stricter than Node, which coerces with JavaScript's Number() (z.coerce.number()), so PORT="3e3"
+// or "0xBB8" would mean 3000 there: here only decimal digits (with an optional sign) are a number.
+// Operators set these in compose and the docs, always in decimal.
+func (p *Parser) Int(name string, def, lo, hi int) int {
+	value, ok := p.lookup(name)
+	if !ok {
+		return def
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < lo || n > hi {
+		p.fail(name, fmt.Sprintf("must be a whole number from %d to %d", lo, hi))
+		return 0
+	}
+	return n
 }
 
 func (p *Parser) fail(name, problem string) {
