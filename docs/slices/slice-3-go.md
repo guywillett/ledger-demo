@@ -89,7 +89,10 @@ One commit per step on `slice-3`, reviewed before the next.
 6. **Consumer layer and the deposit-worker** (split in two):
    - 6a. **Consumer layer:** the delivery log (record, then settle in the order the signal-versus-record rule requires; settle once), the lifecycle generic over the event type, the pull loop (fetch only free slots), graceful shutdown, and the process runner shared by the deposit-worker and the submitter.
    - 6b. **The deposit-worker:** the handler (the deposit lifecycle, `working()` during reviews), the compliance decision, `cmd/deposit-worker`.
-7. **Withdrawals:** `POST /accounts/:id/withdrawals` (`Idempotency-Key`, strict body), `GET /withdrawals/:id`, the submitter (provider client, timeout checked against `ack_wait`, outcomes), `POST /provider/transfer-updates`. The repeat-or-reuse rule passes `contracts/vectors/withdrawal-same-details.json`.
+7. **Withdrawals** (split in three):
+   - 7a. **The client endpoints:** `POST /accounts/:id/withdrawals` (`Idempotency-Key`, strict body, create and hold or classify the repeat or the reused key, `withdrawal.held` in the outbox) and `GET /withdrawals/:id`. The repeat-or-reuse rule passes `contracts/vectors/withdrawal-same-details.json`.
+   - 7b. **The submitter:** the provider client, the timeout checked against `ack_wait`, the outcomes.
+   - 7c. **`POST /provider/transfer-updates`:** the provider's transfer updates, on the webhook contract.
 8. **Mixing:** per-service implementation selection in compose; the `implementation` log field in both implementations; demo runs against Node, Go and mixed stacks, plus a Node and a Go deposit-worker sharing the consumer; CI for all of them; README, development docs; tag.
 
 ## Done when
