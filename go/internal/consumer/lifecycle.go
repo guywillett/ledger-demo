@@ -162,10 +162,16 @@ func (d *Delivery) Stop(ctx context.Context, outcome Outcome, reason string) (Se
 	return Settled{outcome}, nil
 }
 
-// RetryLater naks the message, to be delivered again after the backoff for this delivery attempt,
-// then records Failed, best-effort.
+// RetryDelay is the delay RetryLater redelivers after: the lifecycle's backoff for this delivery
+// attempt. For a handler that logs it before retrying, so the policy lives in one place.
+func (d *Delivery) RetryDelay() time.Duration {
+	return d.retry.Delay(d.message.DeliveryAttempt())
+}
+
+// RetryLater naks the message, to be delivered again after RetryDelay, then records Failed,
+// best-effort.
 func (d *Delivery) RetryLater(ctx context.Context) (Settled, error) {
-	return d.RetryAfter(ctx, d.retry.Delay(d.message.DeliveryAttempt()))
+	return d.RetryAfter(ctx, d.RetryDelay())
 }
 
 // RetryAfter is RetryLater with a delay of the handler's choosing (Node: retryLater(delayMs)).

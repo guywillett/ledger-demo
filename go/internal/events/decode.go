@@ -41,6 +41,26 @@ func DecodeDepositCreatedV1(body []byte) (DepositCreatedV1, error) {
 	return e, f.err()
 }
 
+// DecodeWithdrawalHeldV1 decodes and validates a withdrawal.held v1 message body, as Node's
+// withdrawalHeldV1Schema: IDs, the amount and the currency, no personal data.
+func DecodeWithdrawalHeldV1(body []byte) (WithdrawalHeldV1, error) {
+	f, err := newReader(body)
+	if err != nil {
+		return WithdrawalHeldV1{}, err
+	}
+	e := WithdrawalHeldV1{
+		EventID:       readID[ids.Event](f, "event_id"),
+		EventType:     f.literal("event_type", SubjectWithdrawalHeld),
+		SchemaVersion: f.version("schema_version", 1),
+		WithdrawalID:  readID[ids.Withdrawal](f, "withdrawal_id"),
+		AccountID:     readID[ids.Account](f, "account_id"),
+		AmountMinor:   f.amount("amount_minor"),
+		Currency:      f.literal("currency", "EUR"),
+		OccurredAt:    f.datetime("occurred_at"),
+	}
+	return e, f.err()
+}
+
 // reader reads a JSON object's fields, collecting a problem per field that fails.
 type reader struct {
 	object map[string]json.RawMessage

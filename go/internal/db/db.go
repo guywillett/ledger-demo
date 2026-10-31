@@ -99,3 +99,25 @@ func InTx(ctx context.Context, pool *pgxpool.Pool, fn func(tx Tx) error) error {
 	}
 	return nil
 }
+
+// InTxValue is InTx for a transaction that computes a value: fn returns it with its error, and
+// InTxValue returns it once the transaction has committed (the zero value if it failed). A generic
+// function (T is the value's type), so each caller keeps its own result type: the deposit-worker's
+// and the submitter's steps each run in a transaction of their own and return what they did.
+func InTxValue[T any](
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	fn func(tx Tx) (T, error),
+) (T, error) {
+	var value T
+	err := InTx(ctx, pool, func(tx Tx) error {
+		var err error
+		value, err = fn(tx)
+		return err
+	})
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return value, nil
+}

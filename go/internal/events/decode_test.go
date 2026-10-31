@@ -96,3 +96,36 @@ func TestRefusesWhatNodesSchemaRefuses(t *testing.T) {
 		}
 	}
 }
+
+// withdrawal.held as the withdrawal request writes it decodes back; another event, or a field
+// that fails Node's withdrawalHeldV1Schema, doesn't.
+func TestDecodesWithdrawalHeldV1(t *testing.T) {
+	want := events.WithdrawalHeldV1{
+		EventID:       ids.New[ids.Event](),
+		EventType:     events.SubjectWithdrawalHeld,
+		SchemaVersion: 1,
+		WithdrawalID:  ids.New[ids.Withdrawal](),
+		AccountID:     ids.New[ids.Account](),
+		AmountMinor:   400,
+		Currency:      "EUR",
+		OccurredAt:    timestamp.Time(time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)),
+	}
+	body, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := events.DecodeWithdrawalHeldV1(body)
+	if err != nil || got != want {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	for name, broken := range map[string]string{
+		"a deposit.created":   strings.Replace(string(body), `"withdrawal.held"`, `"deposit.created"`, 1),
+		"a dep withdrawal_id": strings.Replace(string(body), `"wd_`, `"dep_`, 1),
+		"a number amount":     strings.Replace(string(body), `"400"`, `400`, 1),
+		"not JSON":            "not json",
+	} {
+		if _, err := events.DecodeWithdrawalHeldV1([]byte(broken)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
