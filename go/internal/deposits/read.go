@@ -37,6 +37,17 @@ type Deposit struct {
 const columns = `id, account_id, creditor_iban, provider_account_id, amount_minor, currency,
 network, network_transaction_id, status, notification_count, created_at, updated_at`
 
+// CheckCurrencyAndNetwork rejects a stored deposit row with a currency or network this code doesn't
+// handle (the columns are text; only EUR and SEPA are written): every mapping of a deposits row
+// checks it, as Node's depositFromRow and unmatchedDepositFromRow do (expectLiteral).
+func CheckCurrencyAndNetwork(id ids.DepositID, currency, network string) error {
+	if currency != "EUR" || network != "SEPA" {
+		return fmt.Errorf("deposit %v: unexpected currency or network in database: %q, %q",
+			id, currency, network)
+	}
+	return nil
+}
+
 func scanDeposit(row pgx.Row) (Deposit, error) {
 	var d Deposit
 	var iban, status string
@@ -45,9 +56,8 @@ func scanDeposit(row pgx.Row) (Deposit, error) {
 	if err != nil {
 		return Deposit{}, err
 	}
-	if d.Currency != "EUR" || d.Network != "SEPA" {
-		return Deposit{}, fmt.Errorf("deposit %v: unexpected currency or network in database: %q, %q",
-			d.ID, d.Currency, d.Network)
+	if err := CheckCurrencyAndNetwork(d.ID, d.Currency, d.Network); err != nil {
+		return Deposit{}, err
 	}
 	// Stored only after sepa.ParseIBAN, and the column's CHECK guards the format.
 	d.CreditorIBAN = sepa.IBAN(iban)

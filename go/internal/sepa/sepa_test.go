@@ -73,3 +73,14 @@ func TestTextReasons(t *testing.T) {
 		t.Errorf("accent: error = %v, want ErrCharacters", err)
 	}
 }
+
+// As Node's maskIban: country, check digits and the last four characters.
+func TestMask(t *testing.T) {
+	iban, err := sepa.ParseIBAN("FR7612345000010000000000193")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := iban.Mask(); got != "FR76\u20260193" {
+		t.Errorf("Mask() = %q", got)
+	}
+}
