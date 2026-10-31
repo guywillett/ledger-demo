@@ -73,12 +73,12 @@ func NewParser(lookup Lookup) *Parser {
 func (p *Parser) URL(name string) string {
 	value, ok := p.lookup(name)
 	if !ok {
-		p.fail(name, "is required")
+		p.Fail(name, "is required")
 		return ""
 	}
 	u, err := url.Parse(value)
 	if err != nil || u.Scheme == "" {
-		p.fail(name, "must be an absolute URL")
+		p.Fail(name, "must be an absolute URL")
 		return ""
 	}
 	return value
@@ -91,7 +91,7 @@ func (p *Parser) OneOf(name, def string, allowed []string) string {
 		return def
 	}
 	if !slices.Contains(allowed, value) {
-		p.fail(name, "must be one of "+strings.Join(allowed, ", "))
+		p.Fail(name, "must be one of "+strings.Join(allowed, ", "))
 		return ""
 	}
 	return value
@@ -109,13 +109,16 @@ func (p *Parser) Int(name string, def, lo, hi int) int {
 	}
 	n, err := strconv.Atoi(value)
 	if err != nil || n < lo || n > hi {
-		p.fail(name, fmt.Sprintf("must be a whole number from %d to %d", lo, hi))
+		p.Fail(name, fmt.Sprintf("must be a whole number from %d to %d", lo, hi))
 		return 0
 	}
 	return n
 }
 
-func (p *Parser) fail(name, problem string) {
+// Fail records a problem found by the process itself, for a rule across variables (Zod's .refine
+// in Node): call it only when Err is still nil, as Zod runs a refinement only on values that
+// passed. The message is the variable's name followed by problem, like every other.
+func (p *Parser) Fail(name, problem string) {
 	p.errs = append(p.errs, fmt.Errorf("%s %s", name, problem))
 }
 

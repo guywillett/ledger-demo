@@ -43,3 +43,24 @@ type DepositCreatedV1 struct {
 func DepositCreatedMessageID(deposit ids.DepositID) string {
 	return deposit.TypeID() + ".created"
 }
+
+// WithdrawalHeldV1 is withdrawal.held, schema version 1 (contracts/events/withdrawal.held.v1.json):
+// a withdrawal was created and its funds held. Our IDs, the amount and the currency only: no IBAN,
+// creditor name or remittance text (consumers read those from the database). Node:
+// withdrawalHeldEvent in node/src/withdrawals/events.ts.
+type WithdrawalHeldV1 struct {
+	EventID       ids.EventID      `json:"event_id"`
+	EventType     string           `json:"event_type"`
+	SchemaVersion int              `json:"schema_version"`
+	WithdrawalID  ids.WithdrawalID `json:"withdrawal_id"`
+	AccountID     ids.AccountID    `json:"account_id"`
+	AmountMinor   money.Amount     `json:"amount_minor"`
+	Currency      string           `json:"currency"`
+	OccurredAt    timestamp.Time   `json:"occurred_at"` // when it entered held: when it was created
+}
+
+// WithdrawalMessageID is the Nats-Msg-Id for a withdrawal's event on entering status:
+// "<wd TypeID>.<status>", one per withdrawal and status.
+func WithdrawalMessageID(withdrawal ids.WithdrawalID, status string) string {
+	return withdrawal.TypeID() + "." + status
+}

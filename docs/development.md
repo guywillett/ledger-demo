@@ -13,6 +13,7 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `migrate` | dbmate: applies `db/migrations/` and exits | — |
 | `migrate-test` | the same migrations against the test database `ledger_test` | — |
 | `migrate-go-test` | the same migrations against the Go tests' database `ledger_go_test` | — |
+| `migrate-go-relay-test` | the same again against `ledger_go_relay_test`, the Go outbox and relay tests' own database | — |
 | `nats-setup` | nats-box: applies the stream and consumer definitions in `nats/` and exits | — |
 | `api` | the Node API (`node/`, image `ledger-demo-node`); Postgres only, no NATS | `3000` |
 | `relay` | the Node relay (same image): publishes the outbox to JetStream (`DEPOSITS`, `WITHDRAWALS`) | — |
@@ -304,7 +305,7 @@ go test -run TestCommits ./internal/db/   # one test
 
 govulncheck reports known vulnerabilities that the code can actually reach (in the toolchain or a dependency), and CI fails on any. It has no release binaries; `go install` builds it at the version in `go/.govulncheck-version`, outside this module (it doesn't touch `go.mod`): `go install "golang.org/x/vuln/cmd/govulncheck@$(cat .govulncheck-version)"`, then `govulncheck ./...` in `go/`.
 
-The tests run against their own database, `ledger_go_test` (migrated by `migrate-go-test`), never `ledger` or Node's `ledger_test`. `TEST_DATABASE_URL` points them elsewhere; as in Node, the database name must end in `_test`. The Node and Go suites share the test NATS, so don't run them at the same time.
+The tests run against their own database, `ledger_go_test` (migrated by `migrate-go-test`), never `ledger` or Node's `ledger_test`. The outbox and relay tests have one of their own, `ledger_go_relay_test` (migrated by `migrate-go-relay-test`): claiming takes the oldest unpublished events in the whole table, so they mustn't see the events other packages' tests leave behind, and the two packages take turns on it (a Postgres advisory lock held for each package's run; see `internal/testdb`). `TEST_DATABASE_URL` and `TEST_RELAY_DATABASE_URL` point them elsewhere, `TEST_NATS_URL` the NATS (default the compose `nats-test`); as in Node, the database names must end in `_test`. The Node and Go suites share the test NATS, so don't run them at the same time.
 
 ## Troubleshooting
 
