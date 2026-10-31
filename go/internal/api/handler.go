@@ -1,4 +1,4 @@
-// Package api is the HTTP API: the client API (accounts, later withdrawals) and the provider
+// Package api is the HTTP API: the client API (accounts and withdrawals) and the provider
 // webhooks (webhook_*.go). Node: node/src/api/. Routing is net/http's ServeMux (method and path
 // patterns, Go 1.22+), and everything around the handlers (request IDs, the access log, panics,
 // clean paths, a deadline per request) is middleware (middleware.go).
@@ -24,10 +24,13 @@ func NewHandler(pool *pgxpool.Pool, logger *slog.Logger) http.Handler {
 func newHandler(pool *pgxpool.Pool, logger *slog.Logger, webhooks webhookRoutes) http.Handler {
 	mux := http.NewServeMux()
 	accounts := accountRoutes{db: pool}
+	withdrawalsAPI := withdrawalRoutes{pool: pool}
 	// "GET" in a pattern matches HEAD too, as Fastify's GET routes do: net/http then sends the
 	// headers (Content-Length included) without the body.
 	mux.Handle("GET /accounts/{account_id}/balance", handle(accounts.balance))
 	mux.Handle("GET /accounts/{account_id}/transactions", handle(accounts.transactions))
+	mux.Handle("POST /accounts/{account_id}/withdrawals", handle(withdrawalsAPI.create))
+	mux.Handle("GET /withdrawals/{withdrawal_id}", handle(withdrawalsAPI.get))
 	mux.Handle("POST /provider/incoming-payments", handle(webhooks.incomingPayment))
 	// Every other request, whatever its method or path: the most specific matching pattern wins, so
 	// this matches only what nothing else does. Registering it also keeps ServeMux from answering

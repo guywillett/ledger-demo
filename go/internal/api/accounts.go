@@ -133,20 +133,28 @@ type transactionsQuery struct {
 // twice is invalid (Node's parser makes it an array, which no rule accepts). Every problem is
 // reported, in the schema's order; the messages are Zod's, though only the paths are part of the
 // contract.
+// includeHistory reads ?include, as Node's include: z.literal('history').optional(): absent is
+// false, exactly "history" true, anything else (another value, or the parameter given twice) a
+// problem. Shared by the deposits' and the withdrawals' GETs.
+func includeHistory(query map[string][]string) (bool, []ValidationError) {
+	values, ok := query["include"]
+	if !ok {
+		return false, nil
+	}
+	if len(values) == 1 && values[0] == "history" {
+		return true, nil
+	}
+	return false, []ValidationError{{Path: "include", Message: `Invalid input: expected "history"`}}
+}
+
 func parseTransactionsQuery(raw string) (transactionsQuery, []ValidationError) {
 	query := parseQuery(raw)
 	parsed := transactionsQuery{limit: 50}
 	var errs []ValidationError
 
-	if values, ok := query["include"]; ok {
-		if len(values) == 1 && values[0] == "history" {
-			parsed.history = true
-		} else {
-			errs = append(errs, ValidationError{
-				Path: "include", Message: `Invalid input: expected "history"`,
-			})
-		}
-	}
+	history, invalid := includeHistory(query)
+	parsed.history = history
+	errs = append(errs, invalid...)
 
 	if values, ok := query["limit"]; ok {
 		n := math.NaN()

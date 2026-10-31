@@ -161,11 +161,11 @@ var (
 	ErrCharacters = errors.New("may only contain letters, digits, spaces and / - ? : ( ) . , ' +")
 )
 
-// sepaBasic reports whether s uses only the EPC's SEPA basic Latin character set: a-z A-Z 0-9
+// IsBasicText reports whether s uses only the EPC's SEPA basic Latin character set: a-z A-Z 0-9
 // / - ? : ( ) . , ' + and space (Node's SEPA_BASIC_TEXT; the database CHECKs on withdrawals are
 // the backstop). Byte by byte: every allowed character is ASCII, and the bytes of a multi-byte
 // UTF-8 character are all above 127, so none of them can match.
-func sepaBasic(s string) bool {
+func IsBasicText(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
@@ -176,6 +176,13 @@ func sepaBasic(s string) bool {
 		}
 	}
 	return true
+}
+
+// TrimText trims separators from both ends of s, as ParseText does first: the text whose length
+// and characters are then checked (exported so the API can name every problem, as Zod does, while
+// ParseText decides acceptance).
+func TrimText(s string) string {
+	return strings.TrimFunc(s, isSeparator)
 }
 
 // ParseText checks required SEPA text of at most maxLen characters (slice 2 decision 32), as Node's
@@ -191,7 +198,7 @@ func ParseText(input string, maxLen int) (string, error) {
 	if utf8.RuneCountInString(text) > maxLen {
 		return "", fmt.Errorf("%w: at most %d characters", ErrTooLong, maxLen)
 	}
-	if !sepaBasic(text) {
+	if !IsBasicText(text) {
 		return "", ErrCharacters
 	}
 	return text, nil
