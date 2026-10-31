@@ -9,7 +9,8 @@ import (
 // IsInvariantViolation reports whether err means our data or code is wrong, as opposed to a
 // dependency failing: the two guards disagree (LedgerInconsistencyError), a movement reference is
 // reused for something else (MovementConflictError), a movement would overdraw a bucket
-// (OverdraftError), or any other CHECK constraint rejected a change (a check_violation anywhere in
+// (OverdraftError) or overflow a balance (BalanceOverflowError, decision 60's defence in depth),
+// or any other CHECK constraint rejected a change (a check_violation anywhere in
 // the chain). Retrying can't fix them, so the consumers that post (the deposit-worker, the
 // submitter) terminate the message with an alert instead of redelivering it up to max_deliver.
 // Node: node/src/ledger/invariants.ts.
@@ -29,6 +30,9 @@ func IsInvariantViolation(err error) bool {
 		return true
 	}
 	if _, ok := errors.AsType[*OverdraftError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[*BalanceOverflowError](err); ok {
 		return true
 	}
 	pgErr, ok := errors.AsType[*pgconn.PgError](err)

@@ -80,6 +80,28 @@ export class OverdraftError extends Error {
   }
 }
 
+// The movement would take a balance beyond Postgres bigint's range (SQLSTATE 22003,
+// numeric_value_out_of_range, on the balance update). Requests can't cause it: their amounts are
+// capped at the SEPA Credit Transfer maximum (slice 3 decision 60). So, like an overdraft, only a
+// bug or corrupted data gets here, and it is an invariant violation rather than a raw database
+// error that consumers would retry until max_deliver. Postgres doesn't say which column overflowed,
+// so no bucket is named.
+export class BalanceOverflowError extends Error {
+  readonly accountId: Uuid<'acct'>;
+  readonly amountMinor: bigint;
+
+  constructor(m: Movement, cause: unknown) {
+    super(
+      `movement ${m.referenceType}/${m.referenceId}/${m.referenceStep} would take a balance of ` +
+        `account ${m.accountId} beyond the bigint range`,
+      { cause },
+    );
+    this.name = 'BalanceOverflowError';
+    this.accountId = m.accountId;
+    this.amountMinor = m.amountMinor;
+  }
+}
+
 // Postgres names a column's CHECK constraint <table>_<column>_check.
 const BALANCE_CHECKS: Readonly<Record<string, Bucket>> = {
   account_balances_pending_in_check: 'pending_in',
@@ -87,10 +109,12 @@ const BALANCE_CHECKS: Readonly<Record<string, Bucket>> = {
   account_balances_held_check: 'held',
 };
 
-// A check_violation (SQLSTATE 23514) on one of the balance CHECKs becomes an OverdraftError;
-// anything else is returned unchanged, to be rethrown as it was.
-function asOverdraft(err: unknown, m: Movement): unknown {
+// A check_violation (SQLSTATE 23514) on one of the balance CHECKs becomes an OverdraftError, and a
+// numeric_value_out_of_range (22003) a BalanceOverflowError; anything else is returned unchanged,
+// to be rethrown as it was.
+function asBalanceError(err: unknown, m: Movement): unknown {
   if (typeof err !== 'object' || err === null) return err;
+  if ('code' in err && err.code === '22003') return new BalanceOverflowError(m, err);
   if (!('code' in err) || err.code !== '23514') return err;
   if (!('constraint' in err) || typeof err.constraint !== 'string') return err;
   const bucket = BALANCE_CHECKS[err.constraint];
@@ -114,7 +138,8 @@ WHERE reference_type = $1 AND reference_id = $2 AND reference_step = $3
 // One fixed statement for every movement: the change to each bucket is computed in TypeScript
 // (minus for the source, plus for the destination, nothing for external), so the SQL never
 // changes shape and no column names are built from strings. CHECK (... >= 0) on each column
-// rejects a movement that would overdraw a bucket (reported as an OverdraftError).
+// rejects a movement that would overdraw a bucket (reported as an OverdraftError), and bigint's
+// range one that would overflow a balance (a BalanceOverflowError).
 const APPLY_TO_BALANCES_SQL = `
 UPDATE account_balances
 SET pending_in = pending_in + $2,
@@ -158,7 +183,7 @@ export async function move(tx: Tx, m: Movement): Promise<'applied' | 'duplicate'
       change('held', m),
     ])
     .catch((err: unknown) => {
-      throw asOverdraft(err, m);
+      throw asBalanceError(err, m);
     });
   if (balances.rowCount !== 1) {
     throw new Error(`no balance row for account ${m.accountId}`);
