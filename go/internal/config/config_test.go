@@ -127,3 +127,39 @@ func TestInt(t *testing.T) {
 		}
 	}
 }
+
+// Float takes decimal numbers in range only (APPROVE_RATE).
+func TestFloat(t *testing.T) {
+	tests := []struct {
+		value string
+		want  float64
+		ok    bool
+	}{
+		{"0.8", 0.8, true},
+		{"1", 1, true},
+		{"0", 0, true},
+		{"1.5", 0, false},
+		{"-0.1", 0, false},
+		{".5", 0, false},
+		{"8e-1", 0, false},
+		{"0x0", 0, false},
+		{"NaN", 0, false},
+		{"", 0, false},
+	}
+	for _, tt := range tests {
+		p := config.NewParser(env(map[string]string{"APPROVE_RATE": tt.value}))
+		got := p.Float("APPROVE_RATE", 0.8, 0, 1)
+		if (p.Err() == nil) != tt.ok || got != tt.want {
+			t.Errorf("%q: got %v, err %v", tt.value, got, p.Err())
+		}
+	}
+	p := config.NewParser(env(nil))
+	if got := p.Float("APPROVE_RATE", 0.8, 0, 1); got != 0.8 || p.Err() != nil {
+		t.Errorf("unset: %v %v", got, p.Err())
+	}
+	p = config.NewParser(env(map[string]string{"APPROVE_RATE": "2"}))
+	p.Float("APPROVE_RATE", 0.8, 0, 1)
+	if p.Err() == nil || !strings.Contains(p.Err().Error(), "APPROVE_RATE must be a number from 0 to 1") {
+		t.Errorf("message: %v", p.Err())
+	}
+}

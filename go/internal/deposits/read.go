@@ -205,3 +205,17 @@ func StatusHistories(
 	}
 	return histories, rows.Err()
 }
+
+const existsSQL = `SELECT EXISTS (SELECT 1 FROM deposits WHERE id = $1)`
+
+// Exists reports whether a deposit exists. For classifying an outcome after the fact (an event
+// whose transitions all skipped: already processed, or a deposit that doesn't exist), never for
+// deciding whether to act. Node: depositExists. SELECT EXISTS always returns one row, true or
+// false, so there is no "no rows" case to tell apart from an error.
+func Exists(ctx context.Context, q db.Querier, id ids.DepositID) (bool, error) {
+	var exists bool
+	if err := q.QueryRow(ctx, existsSQL, id).Scan(&exists); err != nil {
+		return false, fmt.Errorf("deposit %v exists: %w", id, err)
+	}
+	return exists, nil
+}

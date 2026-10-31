@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -113,6 +114,24 @@ func (p *Parser) Int(name string, def, lo, hi int) int {
 		return 0
 	}
 	return n
+}
+
+// decimal is what Float accepts: decimal digits, optionally a fraction, optionally a sign.
+var decimal = regexp.MustCompile(`^[+-]?[0-9]+(\.[0-9]+)?$`)
+
+// Float reads a number in [lo, hi], or def when the variable is unset. As strict as Int: only a
+// decimal number (0.8, 1, 0.25) is one; Node's Number() would also take ".5", "8e-1" or "0x0".
+func (p *Parser) Float(name string, def, lo, hi float64) float64 {
+	value, ok := p.lookup(name)
+	if !ok {
+		return def
+	}
+	f, err := strconv.ParseFloat(value, 64)
+	if !decimal.MatchString(value) || err != nil || f < lo || f > hi {
+		p.Fail(name, fmt.Sprintf("must be a number from %g to %g", lo, hi))
+		return 0
+	}
+	return f
 }
 
 // Fail records a problem found by the process itself, for a rule across variables (Zod's .refine
