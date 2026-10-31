@@ -94,6 +94,21 @@ services:
       postgres:
         condition: service_healthy
 
+  # And for the Go outbox and relay tests alone (ledger_go_relay_test): claiming takes the oldest
+  # unpublished events in the whole table, so those tests mustn't see the other Go tests' events.
+  migrate-go-relay-test:
+    image: ghcr.io/amacneil/dbmate:2.36.0
+    environment:
+      DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger_go_relay_test?sslmode=disable
+      DBMATE_WAIT: "true"
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes:
+      - ./db:/db
+    command: ["up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # Applies the JetStream definitions in nats/ (streams and consumers) and exits, like migrate
   # does for the schema (see nats/setup.sh).
   nats-setup:

@@ -124,16 +124,19 @@ jobs:
           go install "golang.org/x/vuln/cmd/govulncheck@$(cat .govulncheck-version)"
           "$(go env GOPATH)/bin/govulncheck" ./...
 
-      # Only what the tests need so far: Postgres and the Go test database's migrations.
-      - name: Start the test database
+      # What the tests need: Postgres with the Go test databases (ledger_go_test, and
+      # ledger_go_relay_test for the outbox and relay tests), and the test NATS with its streams.
+      - name: Start the test services
         working-directory: .
         run: |
-          docker compose up -d postgres migrate-go-test
-          code=$(docker wait "$(docker compose ps -a -q migrate-go-test)")
-          if [ "$code" != "0" ]; then
-            echo "migrate-go-test exited with $code"
-            exit 1
-          fi
+          docker compose up -d postgres nats-test migrate-go-test migrate-go-relay-test nats-setup-test
+          for service in migrate-go-test migrate-go-relay-test nats-setup-test; do
+            code=$(docker wait "$(docker compose ps -a -q "$service")")
+            if [ "$code" != "0" ]; then
+              echo "$service exited with $code"
+              exit 1
+            fi
+          done
 
       # -race: the race detector, which fails a test when two goroutines touch the same memory
       # without synchronisation.

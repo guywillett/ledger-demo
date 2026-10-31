@@ -49,9 +49,9 @@ The Go implementation (slice 3) follows the conventions above (SQL, no check-the
 - **Same observable behaviour as Node** (spec, *Equivalence*): environment variables and defaults, routes, status codes, JSON, events, database writes, log field names. Logs carry `implementation: "go"`.
 - **Anything that isn't the usual Go way is documented where it's made, with its reason** (a comment; a spec decision if it shapes the structure).
 - **Line length:** no line-length linter; wrap code over about 100 characters where it reads better (signatures one parameter per line, long calls); strings and test names may run long.
-- **Commands** (in `go/`): `gofmt -l .` (lists unformatted files; `gofmt -w .` fixes them), `go vet ./...`, `golangci-lint run` (version pinned in `.golangci-lint-version`; install in `docs/development.md`), `govulncheck ./...` (pinned in `.govulncheck-version`), `go test -race ./...` (against `ledger_go_test`; needs `docker compose up -d`).
+- **Commands** (in `go/`): `gofmt -l .` (lists unformatted files; `gofmt -w .` fixes them), `go vet ./...`, `golangci-lint run` (version pinned in `.golangci-lint-version`; install in `docs/development.md`), `govulncheck ./...` (pinned in `.govulncheck-version`), `go test -race ./...` (against `ledger_go_test`, and `ledger_go_relay_test` for the outbox and relay tests; needs `docker compose up -d`).
 
 ## Running
 
 - `docker compose up` starts Postgres, NATS (JetStream), migrations and stream setup, the API, relay, deposit-worker, submitter and provider-sim (the fake BaaS); `reconcile` runs on demand (`docker compose run --rm reconcile`).
-- Integration tests (Vitest for Node, `go test` for Go) run against the compose services, each in its own test database (`ledger_test`, `ledger_go_test`).
+- Integration tests (Vitest for Node, `go test` for Go) run against the compose services, each in its own test database (`ledger_test`, `ledger_go_test`; the Go outbox and relay tests in `ledger_go_relay_test`).

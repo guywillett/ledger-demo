@@ -1,22 +1,28 @@
 // Package testdb connects tests to the Go test database and creates the rows they need. Imported
 // only by tests, like vectortest and the standard library's httptest.
 //
-// The database is ledger_go_test, migrated by the compose service migrate-go-test, so the Node
-// and Go suites never share rows (slice 3 decision 52).
+// Two databases, so the Node and Go suites never share rows (slice 3 decision 52):
 //
-// `go test ./...` runs the packages' tests in parallel, as separate processes, all against this
-// one database. Nothing conflicts yet: each test creates its own rows with fresh IDs. The outbox
-// tests (step 5) will: claiming takes the oldest unpublished events in the whole table, as in
-// Node, where those tests run last and one file at a time.
+//   - Main, ledger_go_test (compose service migrate-go-test), for every package's tests but two.
+//     `go test ./...` runs packages in parallel, as separate processes, all against it; they don't
+//     conflict, since each test creates its own rows with fresh IDs.
+//   - Relay, ledger_go_relay_test (migrate-go-relay-test), for the outbox and relay tests only.
+//     Claiming takes the oldest unpublished events in the whole table, so those tests must see no
+//     other package's events (the webhook tests leave deposit.created rows behind in Main on every
+//     run) and must not run while each other's are running: each of the two packages holds the
+//     database's lock for its whole run (Exclusive). Node runs the same tests one file at a time,
+//     in its serial "relay" project.
 package testdb
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/guywillett/ledger-demo/go/internal/db"
@@ -24,23 +30,55 @@ import (
 	"github.com/guywillett/ledger-demo/go/internal/money"
 )
 
-const defaultURL = "postgres://ledger:ledger@localhost:5432/ledger_go_test?sslmode=disable"
+// Database is a test database: the environment variable that can point elsewhere, and its default.
+type Database struct {
+	envVar     string
+	defaultURL string
+}
 
-// Pool connects to TEST_DATABASE_URL (default: the compose ledger_go_test), refusing any database
-// whose name doesn't end in _test, as Node's vitest.config.ts does. The pool is closed when the
-// test ends (t.Cleanup, the counterpart of Vitest's afterAll).
-func Pool(t testing.TB) *pgxpool.Pool {
-	t.Helper()
-	databaseURL := os.Getenv("TEST_DATABASE_URL")
+var (
+	// Main is ledger_go_test (TEST_DATABASE_URL).
+	Main = Database{
+		envVar:     "TEST_DATABASE_URL",
+		defaultURL: "postgres://ledger:ledger@localhost:5432/ledger_go_test?sslmode=disable",
+	}
+	// Relay is ledger_go_relay_test (TEST_RELAY_DATABASE_URL), for the outbox and relay tests.
+	Relay = Database{
+		envVar:     "TEST_RELAY_DATABASE_URL",
+		defaultURL: "postgres://ledger:ledger@localhost:5432/ledger_go_relay_test?sslmode=disable",
+	}
+)
+
+// url is the database's URL, checked: its name must end in _test, as Node's vitest.config.ts
+// requires.
+func (d Database) url() (*url.URL, error) {
+	databaseURL := os.Getenv(d.envVar)
 	if databaseURL == "" {
-		databaseURL = defaultURL
+		databaseURL = d.defaultURL
 	}
 	u, err := url.Parse(databaseURL)
 	if err != nil {
-		t.Fatalf("TEST_DATABASE_URL is not a URL")
+		return nil, fmt.Errorf("%s is not a URL", d.envVar)
 	}
 	if name := strings.TrimPrefix(u.Path, "/"); !strings.HasSuffix(name, "_test") {
-		t.Fatalf("refusing to run tests against database %q: its name must end in _test", name)
+		return nil, fmt.Errorf("refusing to run tests against database %q: its name must end in _test", name)
+	}
+	return u, nil
+}
+
+// Pool connects to Main; see PoolFor.
+func Pool(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+	return PoolFor(t, Main)
+}
+
+// PoolFor connects to a test database (refusing any whose name doesn't end in _test). The pool is
+// closed when the test ends (t.Cleanup, the counterpart of Vitest's afterAll).
+func PoolFor(t testing.TB, d Database) *pgxpool.Pool {
+	t.Helper()
+	u, err := d.url()
+	if err != nil {
+		t.Fatal(err)
 	}
 	// Up to 10 connections, as Node's pg pool, unless the URL sets its own: pgxpool's default is
 	// the number of CPUs (at least 4), and the concurrency tests run 10 transactions at once.
@@ -120,4 +158,46 @@ VALUES ($1, NULL, 'created')`, id)
 		t.Fatal(err)
 	}
 	return id
+}
+
+// exclusiveLock is the advisory lock Exclusive holds: any number, the same in every package.
+const exclusiveLock = 0x6c656467 // "ledg"
+
+// Exclusive runs a package's tests (m.Run, from its TestMain) holding a lock on the database, so
+// no other package holding it runs at the same time, and returns their exit code.
+//
+// TestMain, if a test package defines one, runs instead of the tests and calls m.Run itself: the
+// place for set-up around a whole package (Vitest: globalSetup, or a project's settings). The lock
+// is a Postgres advisory lock, held by this connection's session: pg_advisory_lock waits until
+// it is free, and Postgres releases it when the connection closes, so a crashed test process can't
+// leave it held. If it is taken, a line says so before waiting, so a package stuck behind another
+// that hangs says why.
+func Exclusive(m *testing.M, d Database) int {
+	u, err := d.url()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, u.String())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "test database unreachable (is `docker compose up -d` running?): %v\n", err)
+		return 1
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	var locked bool
+	err = conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", exclusiveLock).Scan(&locked)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if !locked {
+		fmt.Fprintf(os.Stderr, "waiting for the %s lock (another package's tests hold it)\n",
+			strings.TrimPrefix(u.Path, "/"))
+		if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", exclusiveLock); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
+	return m.Run()
 }
