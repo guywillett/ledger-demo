@@ -121,12 +121,26 @@ describe('POST /provider/incoming-payments: new notifications', () => {
     });
   });
 
-  it('keeps amounts beyond 2^53 exact', async () => {
-    const body = notificationBody({ amount_minor: '9007199254740993' });
+  // Decision 60: at most the SEPA Credit Transfer maximum, 999,999,999.99 EUR. (Amounts beyond
+  // 2^53 can't arrive in a notification any more; the ledger still moves them exactly, see
+  // test/ledger/move.test.ts.)
+  it('accepts the SEPA Credit Transfer maximum exactly, and refuses one minor unit more', async () => {
+    const body = notificationBody({ amount_minor: '99999999999' });
     expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
     expect((await depositByNetworkId(pool, body.network_transaction_id))?.amount_minor).toBe(
-      9007199254740993n,
+      99_999_999_999n,
     );
+
+    const over = notificationBody({ amount_minor: '100000000000' });
+    const response = await postIncomingPayment(app, over);
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).errors).toEqual([
+      {
+        path: 'amount_minor',
+        message: 'is larger than the SEPA Credit Transfer maximum (999999999.99 EUR)',
+      },
+    ]);
+    expect(await depositByNetworkId(pool, over.network_transaction_id)).toBeUndefined();
   });
 
   it('ignores unknown fields instead of rejecting them', async () => {

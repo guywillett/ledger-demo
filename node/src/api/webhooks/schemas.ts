@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { Notification } from '../../ingestion/incoming-payments.ts';
 import type { TransferUpdate } from '../../ingestion/transfer-updates.ts';
 import { fromTypeId, type Uuid } from '../../shared/ids.ts';
-import { amountMinorSchema, ibanSchema } from '../../shared/schemas.ts';
+import { ibanSchema, sepaAmountSchema } from '../../shared/schemas.ts';
 
 // The provider webhooks' request bodies and their mapping to ingestion's types. The client
 // API's request schemas, and every response type, are in ../schemas.ts.
@@ -15,7 +15,8 @@ export const notificationBodySchema = z.object({
   network_transaction_id: z.string().min(1).max(255),
   creditor_iban: ibanSchema,
   provider_account_id: z.string().min(1).max(255).optional(),
-  amount_minor: amountMinorSchema,
+  // At most the SEPA Credit Transfer maximum (decision 60).
+  amount_minor: sepaAmountSchema,
   currency: z.literal('EUR'),
   network: z.literal('SEPA'),
 });

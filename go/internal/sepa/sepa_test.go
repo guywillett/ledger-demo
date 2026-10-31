@@ -20,6 +20,18 @@ func TestIBANVectors(t *testing.T) {
 	})
 }
 
+// The shared vectors (contracts/vectors/sepa-amount.json): the field's raw value, which must be a
+// JSON string (a JSON number fails to decode into one), then ParseAmount (decision 60's cap).
+func TestAmountVectors(t *testing.T) {
+	vectortest.Run(t, "sepa-amount.json", func(input json.RawMessage) (any, error) {
+		var s string
+		if err := json.Unmarshal(input, &s); err != nil {
+			return nil, err
+		}
+		return sepa.ParseAmount(s)
+	})
+}
+
 // The shared vectors (contracts/vectors/sepa-text.json). text is decoded into a *string, as a
 // request field is: absent and null both leave it nil.
 func TestTextVectors(t *testing.T) {

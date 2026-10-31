@@ -20,6 +20,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/guywillett/ledger-demo/go/internal/money"
 )
 
 // isSeparator reports whether r is one of decision 56's separators.
@@ -176,6 +178,27 @@ func IsBasicText(s string) bool {
 		}
 	}
 	return true
+}
+
+// MaxAmount is the SEPA Credit Transfer maximum, 999,999,999.99 EUR in minor units (slice 3
+// decision 60): EPC SCT Rulebook (EPC125-05, 2025 version 1.0), section 4.6.1, AT-T002 "The amount
+// of the SEPA Credit Transfer in euro": at most 999.999.999 euro and 99 euro cents. A scheme rule,
+// like the IBAN and text rules; money.Amount and balances keep int64's range.
+const MaxAmount money.Amount = 99_999_999_999
+
+// ErrAmountTooLarge: an amount above MaxAmount (Node's message).
+var ErrAmountTooLarge = errors.New("is larger than the SEPA Credit Transfer maximum (999999999.99 EUR)")
+
+// ParseAmount parses an amount that comes from outside under the SCT scheme (a withdrawal request,
+// a deposit notification), as Node's sepaAmountSchema: money.ParseAmount's rules (a string of
+// digits, positive, no leading zero), and at most MaxAmount. A larger amount is a request problem,
+// never left to overflow a balance (which would be a 500, not a shortage).
+func ParseAmount(s string) (money.Amount, error) {
+	amount, err := money.ParseAmount(s)
+	if errors.Is(err, money.ErrTooLarge) || (err == nil && amount > MaxAmount) {
+		return 0, ErrAmountTooLarge
+	}
+	return amount, err
 }
 
 // TrimText trims separators from both ends of s, as ParseText does first: the text whose length

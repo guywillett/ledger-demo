@@ -30,6 +30,7 @@ Each file is a JSON array of cases:
 | File | Rule | `input` | `value` |
 |---|---|---|---|
 | `money.json` | `amount_minor` | the field's raw value | the amount as a digit string |
+| `sepa-amount.json` | `amount_minor` in requests and notifications: at most the SEPA Credit Transfer maximum, 999,999,999.99 EUR (slice 3 decision 60; `money.json`'s int8 rule still holds for amounts we produce) | the field's raw value | the amount as a digit string |
 | `typeid.json` | TypeID fields, per prefix (`acct`, `dep`, `wd`, `evt`, `mov`) | `{"prefix", "text"}` | the UUID it holds |
 | `iban.json` | IBAN normalisation and validation; one registry example per SEPA country, which pins the country table | the raw IBAN | the normalised IBAN |
 | `sepa-text.json` | SEPA text (slice 2 decision 32), required or optional, with a maximum length | `{"max", "optional", "text"}`; `text` absent means the field is absent | the trimmed text, or `null` for none (optional only) |

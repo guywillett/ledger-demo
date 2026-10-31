@@ -333,6 +333,16 @@ components:
       pattern: '^[1-9][0-9]*$'
       maxLength: 19
       examples: ['1250']
+    SepaAmountMinor:
+      description: >-
+        An amount in a request or notification: integer minor units (cents) as a string of
+        digits, greater than zero and at most the SEPA Credit Transfer maximum, 999,999,999.99
+        EUR, so at most 11 digits (EPC SCT Rulebook EPC125-05, 2025 version 1.0, section 4.6.1,
+        AT-T002). A larger amount is a 400 (slice 3 decision 60). Amounts in responses use
+        AmountMinor.
+      type: string
+      pattern: '^[1-9][0-9]{0,10}$'
+      examples: ['1250']
     IncomingPaymentNotification:
       type: object
       description: Unknown fields are ignored (tolerant reader).
@@ -356,7 +366,7 @@ components:
           maxLength: 255
           description: Stored when sent; not used for matching or duplicate detection.
         amount_minor:
-          $ref: '#/components/schemas/AmountMinor'
+          $ref: '#/components/schemas/SepaAmountMinor'
         currency:
           const: EUR
         network:
@@ -494,7 +504,7 @@ components:
       required: [amount_minor, currency, creditor_iban, creditor_name]
       properties:
         amount_minor:
-          $ref: '#/components/schemas/AmountMinor'
+          $ref: '#/components/schemas/SepaAmountMinor'
         currency:
           const: EUR
         creditor_iban:

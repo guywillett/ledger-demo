@@ -418,6 +418,9 @@ func TestAnswers400StoringNothing(t *testing.T) {
 		{`amount_minor "0"`, map[string]any{"amount_minor": "0"}, "key", "amount_minor"},
 		{"amount_minor as a number", map[string]any{"amount_minor": 400}, "key", "amount_minor"},
 		{"another currency", map[string]any{"currency": "USD"}, "key", "currency"},
+		// Decision 60: above the SEPA Credit Transfer maximum (a 500 before, from an overflow).
+		{"amount_minor above the SEPA maximum", map[string]any{"amount_minor": "100000000000"}, "key", "amount_minor"},
+		{"the int8 maximum", map[string]any{"amount_minor": "9223372036854775807"}, "key", "amount_minor"},
 	}
 	for _, tt := range tests {
 		account := fundedAccount(t, a.pool, 1000)
