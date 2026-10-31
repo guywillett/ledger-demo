@@ -127,6 +127,12 @@ func run() error {
 		return fail(err)
 	case <-ctx.Done():
 	}
+	// Shutdown begins: from here a second SIGTERM or SIGINT has its default effect and ends the
+	// process at once, without waiting for the requests still in flight, as Node's handlers,
+	// registered with process.once, allow. stop unregisters the signal context, which would
+	// otherwise keep catching signals through the grace period; the deferred stop above is for the
+	// early returns, and calling it twice is harmless (TestASecondSignalEndsTheShutdownAtOnce).
+	stop()
 	logger.Info("shutting down", "reason", context.Cause(ctx).Error())
 
 	// Shutdown stops accepting connections and waits for in-flight requests, up to the grace
