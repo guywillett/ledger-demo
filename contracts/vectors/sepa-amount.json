@@ -1,0 +1,62 @@
+[
+  {
+    "name": "one",
+    "input": "1",
+    "ok": true,
+    "value": "1"
+  },
+  {
+    "name": "a typical amount",
+    "input": "1250",
+    "ok": true,
+    "value": "1250"
+  },
+  {
+    "name": "the SEPA Credit Transfer maximum",
+    "input": "99999999999",
+    "ok": true,
+    "value": "99999999999"
+  },
+  {
+    "name": "the maximum plus one minor unit",
+    "input": "100000000000",
+    "ok": false,
+    "why": "above the SEPA Credit Transfer maximum, 99999999999 minor units (999999999.99 EUR)"
+  },
+  {
+    "name": "12 digits",
+    "input": "999999999999",
+    "ok": false,
+    "why": "above the SEPA Credit Transfer maximum"
+  },
+  {
+    "name": "the int8 maximum",
+    "input": "9223372036854775807",
+    "ok": false,
+    "why": "above the SEPA Credit Transfer maximum, though a balance could hold it"
+  },
+  {
+    "name": "20 digits",
+    "input": "11111111111111111111",
+    "ok": false,
+    "why": "above the SEPA Credit Transfer maximum (and too long for any amount)"
+  },
+  {
+    "name": "zero",
+    "input": "0",
+    "ok": false,
+    "why": "must be positive (the rulebook: 0,00 euro is not allowed)"
+  },
+  {
+    "name": "a leading zero",
+    "input": "099999999999",
+    "ok": false,
+    "why": "no leading zero: one spelling per amount"
+  },
+  {
+    "name": "a JSON number",
+    "input": 1250,
+    "ok": false,
+    "why": "amounts are strings of digits, never JSON numbers"
+  }
+]

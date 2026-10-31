@@ -90,9 +90,10 @@ func decodeIBAN(f *fields, name string) sepa.IBAN {
 	return iban
 }
 
-// decodeAmount reads an amount field as Node's amountMinorSchema: a string, then its length (at
-// most money.MaxAmountLength) and its digits (no leading zero), both reported if both fail, as Zod does; only if both
-// pass, the maximum. money.ParseAmount decides acceptance (the shared vectors pin it); the checks
+// decodeAmount reads an amount field as Node's sepaAmountSchema (requests and notifications, slice 3
+// decision 60): a string, then its length (at most money.MaxAmountLength) and its digits (no
+// leading zero), both reported if both fail, as Zod does; only if both pass, the SEPA Credit
+// Transfer maximum. sepa.ParseAmount decides acceptance (the shared vectors pin it); the checks
 // before it only choose Zod's messages.
 func decodeAmount(f *fields, name string) money.Amount {
 	s, ok := f.rawString(name)
@@ -101,14 +102,15 @@ func decodeAmount(f *fields, name string) money.Amount {
 	}
 	tooLong := zodLen(s) > money.MaxAmountLength
 	if tooLong {
-		f.fail(name, "Too big: expected string to have <="+strconv.Itoa(money.MaxAmountLength)+" characters")
+		f.fail(name, "Too big: expected string to have <="+strconv.Itoa(money.MaxAmountLength)+
+			" characters")
 	}
-	amount, err := money.ParseAmount(s)
+	amount, err := sepa.ParseAmount(s)
 	switch {
 	case err == nil && !tooLong:
 		return amount
-	case errors.Is(err, money.ErrTooLarge) && !tooLong:
-		f.fail(name, "is larger than the maximum amount")
+	case errors.Is(err, sepa.ErrAmountTooLarge) && !tooLong:
+		f.fail(name, sepa.ErrAmountTooLarge.Error())
 	case errors.Is(err, money.ErrNotPositiveWholeNumber) && !isPositiveDigits(s):
 		f.fail(name, "must be a positive whole number of minor units, as a string")
 	}

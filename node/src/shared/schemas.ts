@@ -28,13 +28,20 @@ export const typeIdSchema = <P extends IdPrefix>(prefix: P): z.ZodType<Uuid<P>, 
     });
 
 // A positive amount of minor units as a string of digits, parsed into a BigInt. No leading zero
-// (so "0125" is not a second spelling of 125), and at most the int8 maximum.
-export const amountMinorSchema = z
+// (so "0125" is not a second spelling of 125). The maximum depends on where the amount comes from:
+// amountMinorSchema below (int8, what the database holds) or sepaAmountSchema (the SCT scheme's).
+const amountDigitsSchema = z
   .string()
   .max(19)
   .regex(/^[1-9][0-9]*$/, 'must be a positive whole number of minor units, as a string')
-  .transform((value) => BigInt(value))
-  .refine((value) => value <= INT8_MAX, 'is larger than the maximum amount');
+  .transform((value) => BigInt(value));
+
+// An amount at most the int8 maximum: for amounts we produce ourselves (events, which carry amounts
+// already validated where they entered), and the provider simulator.
+export const amountMinorSchema = amountDigitsSchema.refine(
+  (value) => value <= INT8_MAX,
+  'is larger than the maximum amount',
+);
 
 // A SEPA IBAN, normalised (separators removed, a-z upper-cased) and checked by parseIban. The
 // reason in the message is one of parseIban's fixed texts, never the input.
@@ -49,6 +56,20 @@ export const ibanSchema = z
     }
     return result.iban;
   });
+
+// The SEPA Credit Transfer maximum, 999,999,999.99 EUR in minor units (slice 3 decision 60): EPC
+// SCT Rulebook (EPC125-05, 2025 version 1.0), section 4.6.1, AT-T002 "The amount of the SEPA
+// Credit Transfer in euro": at most 999.999.999 euro and 99 euro cents. A scheme rule, like the
+// IBAN and text rules beside it; balances keep int8's range.
+export const SCT_MAX_AMOUNT_MINOR = 99_999_999_999n;
+
+// An amount that comes from outside under the SCT scheme (a withdrawal request, a deposit
+// notification): positive and at most the scheme's maximum. A larger amount is refused here as a
+// request problem, never left to overflow a balance (which would be a 500, not a shortage).
+export const sepaAmountSchema = amountDigitsSchema.refine(
+  (value) => value <= SCT_MAX_AMOUNT_MINOR,
+  'is larger than the SEPA Credit Transfer maximum (999999999.99 EUR)',
+);
 
 // The EPC's SEPA basic Latin character set: a-z A-Z 0-9 / - ? : ( ) . , ' + and space. Mirrors
 // the CHECKs on withdrawals.creditor_name and remittance_info (db/migrations/…_create_withdrawals

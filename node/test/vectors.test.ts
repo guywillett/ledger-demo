@@ -10,6 +10,7 @@ import {
   amountMinorSchema,
   ibanSchema,
   optionalSepaTextSchema,
+  sepaAmountSchema,
   sepaTextSchema,
   typeIdSchema,
 } from '../src/shared/schemas.ts';
@@ -56,6 +57,8 @@ function check(file: string, evaluate: (input: unknown) => Outcome): void {
 
 check('money.json', (input) => viaSchema(amountMinorSchema, input, String));
 
+check('sepa-amount.json', (input) => viaSchema(sepaAmountSchema, input, String));
+
 check('typeid.json', (input) => {
   const { prefix, text } = input as { prefix: IdPrefix; text: unknown };
   return viaSchema(typeIdSchema(prefix), text);
@@ -89,6 +92,15 @@ check('deposit-same-details.json', (input) => {
 // implementation rejects.
 describe('accepted inputs are valid against the contract', () => {
   const accepted = (file: string) => load(file).filter((c) => c.ok);
+
+  it.each(accepted('sepa-amount.json').map((c) => [c.name, c] as const))(
+    'sepa-amount: %s',
+    (_name, c) => {
+      for (const schema of ['WithdrawalRequest', 'IncomingPaymentNotification']) {
+        expect(contractPropertyErrors(schema, 'amount_minor', c.input)).toBeUndefined();
+      }
+    },
+  );
 
   it.each(accepted('iban.json').map((c) => [c.name, c] as const))('iban: %s', (_name, c) => {
     expect(contractPropertyErrors('WithdrawalRequest', 'creditor_iban', c.input)).toBeUndefined();

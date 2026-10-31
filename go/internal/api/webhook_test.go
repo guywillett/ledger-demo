@@ -80,12 +80,30 @@ func TestWorksWithoutAProviderAccountID(t *testing.T) {
 	}
 }
 
-func TestKeepsAmountsBeyond2To53Exact(t *testing.T) {
+// Decision 60: at most the SEPA Credit Transfer maximum, 999,999,999.99 EUR. (Amounts beyond 2^53
+// can't arrive in a notification any more; the ledger still moves them exactly, see
+// internal/ledger's TestMovesAmountsBeyond2To53Exactly.)
+func TestAcceptsTheSEPACreditTransferMaximumExactlyAndRefusesOneMinorUnitMore(t *testing.T) {
 	a := newTestAPI(t)
-	body := notificationBody(map[string]any{"amount_minor": "9007199254740993"})
-	a.postNotification(t, body, nil)
-	if d := mustDeposit(t, a.pool, body["network_transaction_id"]); d.Amount != 9007199254740993 {
+	body := notificationBody(map[string]any{"amount_minor": "99999999999"})
+	if r := a.postNotification(t, body, nil); r.status != 204 {
+		t.Fatalf("the maximum: %d %s", r.status, r.body)
+	}
+	if d := mustDeposit(t, a.pool, body["network_transaction_id"]); d.Amount != 99_999_999_999 {
 		t.Errorf("amount = %d", d.Amount)
+	}
+
+	over := notificationBody(map[string]any{"amount_minor": "100000000000"})
+	r := a.postNotification(t, over, nil)
+	want := []any{map[string]any{
+		"path":    "amount_minor",
+		"message": "is larger than the SEPA Credit Transfer maximum (999999999.99 EUR)",
+	}}
+	if r.status != 400 || !reflect.DeepEqual(r.json(t)["errors"], want) {
+		t.Errorf("one more: %d %s", r.status, r.body)
+	}
+	if _, stored := depositByNetworkID(t, a.pool, over["network_transaction_id"]); stored {
+		t.Error("the amount over the maximum was stored")
 	}
 }
 
@@ -447,7 +465,10 @@ func TestReportsFieldProblemsAsZodDoes(t *testing.T) {
 			{"amount_minor", "Too big: expected string to have <=19 characters"},
 		}},
 		{"an amount above int8", map[string]any{"amount_minor": "9223372036854775808"}, []issue{
-			{"amount_minor", "is larger than the maximum amount"},
+			{"amount_minor", "is larger than the SEPA Credit Transfer maximum (999999999.99 EUR)"},
+		}},
+		{"12 digits, above the SEPA maximum", map[string]any{"amount_minor": "999999999999"}, []issue{
+			{"amount_minor", "is larger than the SEPA Credit Transfer maximum (999999999.99 EUR)"},
 		}},
 		{"a boolean amount", map[string]any{"amount_minor": true}, []issue{
 			{"amount_minor", "Invalid input: expected string, received boolean"},
