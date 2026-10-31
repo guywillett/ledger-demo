@@ -134,11 +134,24 @@ services:
       nats-test:
         condition: service_healthy
 
+  # The four application services run either implementation (slice 3 decision 51): API_IMPL,
+  # RELAY_IMPL, DEPOSIT_WORKER_IMPL and SUBMITTER_IMPL, each node (the default) or go, choose the
+  # build directory and the image (ledger-demo-node or ledger-demo-go: one image per
+  # implementation, every process in it). Both images have the same commands (api, relay,
+  # deposit-worker, submitter), so the command, environment, ports and grace periods don't depend
+  # on the choice. Export the variables (or put them in .env, which compose reads) for every
+  # docker compose command, scripts/demo.sh's included: a command without them recreates the
+  # service as Node.
+  #
+  # init: true runs a minimal init as the container's PID 1, which passes signals on to the
+  # process. The kernel ignores a signal sent to PID 1 unless that process handles it, and both
+  # implementations stop handling SIGTERM once shutdown begins, so a second SIGTERM can end a slow
+  # shutdown at once, as it does outside a container: as PID 1 it would be ignored (measured).
   api:
-    build: ./node
-    # Named, and built the same way by every Node service: one image for all of them, and compose
-    # picks each service's command.
-    image: ledger-demo-node
+    build: ./${API_IMPL:-node}
+    image: ledger-demo-${API_IMPL:-node}
+    command: ["api"]
+    init: true
     # The API exits with a failing code if it can't start; restart it.
     restart: unless-stopped
     # Postgres only: the API stores events in the outbox and never talks to NATS (the relay
@@ -160,9 +173,10 @@ services:
   # Publishes the outbox to JetStream (src/relay/). Several instances can run at once
   # (docker compose up -d --scale relay=2): each claims its own batches of events.
   relay:
-    build: ./node
-    image: ledger-demo-node
-    command: ["node", "src/relay/main.ts"]
+    build: ./${RELAY_IMPL:-node}
+    image: ledger-demo-${RELAY_IMPL:-node}
+    command: ["relay"]
+    init: true
     # Exits with a failing code if it can't start or loses NATS for good; restart it.
     restart: unless-stopped
     # Graceful shutdown finishes the batch in progress first. If NATS is unreachable, each
@@ -182,11 +196,11 @@ services:
   # Books, reviews and posts deposits (src/deposit-worker/). Several instances can run at once
   # (docker compose up -d --scale deposit-worker=3): they share the durable consumer, and each
   # message goes to one of them.
-  deposit-worker:
-    # The same image as the api (one Dockerfile for the Node processes), with another command.
-    build: ./node
-    image: ledger-demo-node
-    command: ["node", "src/deposit-worker/main.ts"]
+  deposit-worker: &deposit-worker
+    build: ./${DEPOSIT_WORKER_IMPL:-node}
+    image: ledger-demo-${DEPOSIT_WORKER_IMPL:-node}
+    command: ["deposit-worker"]
+    init: true
     # Exits with a failing code if it can't start or loses NATS for good; restart it.
     restart: unless-stopped
     # Graceful shutdown can take just over Docker's default 10 s: a waiting fetch is closed at
@@ -210,9 +224,10 @@ services:
   # Sends each held withdrawal to the provider (src/submitter/). Several instances can run at once
   # (docker compose up -d --scale submitter=2): they share the durable consumer.
   submitter:
-    build: ./node
-    image: ledger-demo-node
-    command: ["node", "src/submitter/main.ts"]
+    build: ./${SUBMITTER_IMPL:-node}
+    image: ledger-demo-${SUBMITTER_IMPL:-node}
+    command: ["submitter"]
+    init: true
     # Exits with a failing code if it can't start or loses NATS for good; restart it.
     restart: unless-stopped
     # As the deposit-worker: 5 s grace for in-flight submissions, up to 5 s to drain NATS. An
@@ -230,6 +245,18 @@ services:
         condition: service_completed_successfully
       provider-sim:
         condition: service_started
+
+  # A second deposit-worker on the same durable consumer, in the other implementation, so a Node and
+  # a Go worker share the messages (scripts/shared-consumer.sh). The deposit-worker's settings (the
+  # YAML anchor above: environment, grace period, dependencies) with its own implementation:
+  # DEPOSIT_WORKER_OTHER_IMPL, go by default. Its own variable rather than "the opposite of
+  # DEPOSIT_WORKER_IMPL": compose's ${...} has defaults but no conditions, so the script works out
+  # the opposite and sets it. The "shared-consumer" profile keeps it out of docker compose up.
+  deposit-worker-other:
+    <<: *deposit-worker
+    build: ./${DEPOSIT_WORKER_OTHER_IMPL:-go}
+    image: ledger-demo-${DEPOSIT_WORKER_OTHER_IMPL:-go}
+    profiles: ["shared-consumer"]
 
   # A fake BaaS provider (src/provider-sim/): accepts SEPA transfers idempotently and reports
   # their results to a webhook. Test infrastructure, part of neither implementation (slice 2

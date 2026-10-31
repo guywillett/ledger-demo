@@ -243,7 +243,9 @@ before=$(balance "$CAROL" available)
 response=$(withdraw "$CAROL" "$RUN-wd-1" 700 "Rent October")
 expect "created" 201 "${response##*$'\n'}"
 withdrawal=$(field "${response%$'\n'*}" id)
-contains "with its Location" "location: /withdrawals/$withdrawal" "$(tr -d '\r' < "$headers")"
+# Header names are case-insensitive (RFC 9110 5.1): Node sends "location", Go "Location".
+# Lowercased whole (TypeIDs are lowercase already).
+contains "with its Location" "location: /withdrawals/$withdrawal" "$(tr -d '\r' < "$headers" | tr 'A-Z' 'a-z')"
 expect "ends executed" executed "$(field "$(wait_final "$withdrawal")" status)"
 expect "available down by the amount" $((before - 700)) "$(balance "$CAROL" available)"
 expect "nothing left held" 0 "$(balance "$CAROL" held)"
