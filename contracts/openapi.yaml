@@ -6,6 +6,7 @@ info:
     Hand-written contract, shared by the Node and Go implementations. Both are tested against
     it. Amounts are integer minor units as digit strings; IDs are TypeIDs.
     Errors are RFC 9457 problem details (application/problem+json).
+    A path with an empty segment (e.g. /withdrawals/, /accounts//balance) matches no route: 404.
 paths:
   /provider/incoming-payments:
     post:
