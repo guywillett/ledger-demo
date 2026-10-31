@@ -181,6 +181,44 @@ func TestAppliesExactlyOnceWhenCalledConcurrently(t *testing.T) {
 	}
 }
 
+// Decision 60's defence in depth: requests can't reach this (their amounts are capped at the SEPA
+// Credit Transfer maximum), so only corrupted data can, and it is an invariant violation.
+func TestABalanceBeyondTheBigintRangeIsABalanceOverflowErrorAnInvariantViolation(t *testing.T) {
+	pool := testdb.Pool(t)
+	account := testdb.NewAccount(t, pool).ID
+	_, err := pool.Exec(t.Context(),
+		`UPDATE account_balances SET available = 9223372036854775807 WHERE account_id = $1`, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deposit := ids.New[ids.Deposit]()
+	m := booking(account)
+	m.To, m.Amount = ledger.BucketAvailable, 1
+	m.Ref = ledger.DepositReference(deposit, ledger.StepBook)
+
+	_, err = move(pool, m)
+	overflow, ok := errors.AsType[*ledger.BalanceOverflowError](err)
+	if !ok {
+		t.Fatalf("error = %v, want a BalanceOverflowError", err)
+	}
+	if overflow.Account != account || overflow.Amount != 1 {
+		t.Errorf("BalanceOverflowError = %+v", overflow)
+	}
+	// The database's numeric_value_out_of_range is kept, and found through Unwrap.
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "22003" {
+		t.Errorf("wrapped error = %v, want numeric_value_out_of_range (22003)", err)
+	}
+	if !ledger.IsInvariantViolation(err) {
+		t.Error("not classified as an invariant violation")
+	}
+	if got := balancesOf(t, pool, account); got != (balances{0, 9223372036854775807, 0}) {
+		t.Errorf("balances = %+v", got)
+	}
+	if c := movementCount(t, pool, deposit, ledger.StepBook); c != 0 {
+		t.Errorf("%d movements, want 0: the transaction rolled back", c)
+	}
+}
+
 func TestCannotOverdrawABucket(t *testing.T) {
 	pool := testdb.Pool(t)
 	account := testdb.NewAccount(t, pool).ID
@@ -360,6 +398,9 @@ func TestIsInvariantViolation(t *testing.T) {
 		{"LedgerInconsistencyError", &ledger.LedgerInconsistencyError{}, true},
 		{"MovementConflictError", &ledger.MovementConflictError{}, true},
 		{"OverdraftError", &ledger.OverdraftError{}, true},
+		{"BalanceOverflowError", &ledger.BalanceOverflowError{}, true},
+		// Only move's own overflow is classified, as in Node: a bare 22003 from elsewhere isn't.
+		{"a numeric_value_out_of_range outside move", &pgconn.PgError{Code: "22003"}, false},
 		// A business outcome, though it wraps an OverdraftError (see InsufficientFundsError).
 		{"InsufficientFundsError", &ledger.InsufficientFundsError{}, false},
 		{"any check_violation", &pgconn.PgError{Code: "23514"}, true},

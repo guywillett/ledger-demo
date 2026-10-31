@@ -137,6 +137,27 @@ func (e *OverdraftError) Error() string {
 // the *pgconn.PgError inside: Node's `cause`, but followed automatically.
 func (e *OverdraftError) Unwrap() error { return e.err }
 
+// BalanceOverflowError: the movement would take a balance beyond Postgres bigint's range (SQLSTATE
+// 22003, numeric_value_out_of_range, on the balance update). Requests can't cause it: their amounts
+// are capped at the SEPA Credit Transfer maximum (slice 3 decision 60). So, like an overdraft, only
+// a bug or corrupted data gets here, and it is an invariant violation rather than a raw database
+// error that consumers would retry until max_deliver. Postgres doesn't say which column overflowed,
+// so no bucket is named.
+type BalanceOverflowError struct {
+	Account ids.AccountID
+	Amount  money.Amount
+	Ref     Reference
+	err     error // the database's numeric_value_out_of_range
+}
+
+func (e *BalanceOverflowError) Error() string {
+	return fmt.Sprintf("movement %s would take a balance of account %v beyond the bigint range",
+		e.Ref, e.Account)
+}
+
+// Unwrap returns the database's error, as OverdraftError's does.
+func (e *BalanceOverflowError) Unwrap() error { return e.err }
+
 // balanceChecks maps the balance columns' CHECK constraints to their buckets. Postgres names a
 // column's CHECK constraint <table>_<column>_check.
 var balanceChecks = map[string]Bucket{
@@ -145,13 +166,19 @@ var balanceChecks = map[string]Bucket{
 	"account_balances_held_check":       BucketHeld,
 }
 
-// checkViolation is Postgres's SQLSTATE for a CHECK constraint failing.
-const checkViolation = "23514"
+// Postgres's SQLSTATEs for a CHECK constraint failing and for a number out of its type's range.
+const (
+	checkViolation         = "23514"
+	numericValueOutOfRange = "22003"
+)
 
-// asOverdraft turns a check_violation on one of the balance CHECKs into an OverdraftError, and
-// returns any other error unchanged.
-func asOverdraft(err error, m Movement) error {
+// asBalanceError turns a check_violation on one of the balance CHECKs into an OverdraftError and a
+// numeric_value_out_of_range into a BalanceOverflowError, and returns any other error unchanged.
+func asBalanceError(err error, m Movement) error {
 	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if ok && pgErr.Code == numericValueOutOfRange {
+		return &BalanceOverflowError{Account: m.Account, Amount: m.Amount, Ref: m.Ref, err: err}
+	}
 	if !ok || pgErr.Code != checkViolation {
 		return err
 	}
@@ -179,7 +206,8 @@ WHERE reference_type = $1 AND reference_id = $2 AND reference_step = $3
 // One fixed statement for every movement: the change to each bucket is computed in Go (minus for
 // the source, plus for the destination, nothing for external), so the SQL never changes shape and
 // no column names are built from strings. CHECK (… >= 0) on each column rejects a movement that
-// would overdraw a bucket (reported as an OverdraftError).
+// would overdraw a bucket (reported as an OverdraftError), and bigint's range one that would
+// overflow a balance (a BalanceOverflowError).
 const applyToBalancesSQL = `
 UPDATE account_balances
 SET pending_in = pending_in + $2,
@@ -222,7 +250,7 @@ func Move(ctx context.Context, tx db.Tx, m Movement) (MoveResult, error) {
 	tag, err := tx.Exec(ctx, applyToBalancesSQL, m.Account,
 		change(BucketPendingIn, m), change(BucketAvailable, m), change(BucketHeld, m))
 	if err != nil {
-		return "", asOverdraft(fmt.Errorf("movement %s: %w", m.Ref, err), m)
+		return "", asBalanceError(fmt.Errorf("movement %s: %w", m.Ref, err), m)
 	}
 	if tag.RowsAffected() != 1 {
 		return "", fmt.Errorf("movement %s: no balance row for account %v", m.Ref, m.Account)

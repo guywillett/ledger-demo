@@ -1,5 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
+import { isInvariantViolation } from '../../src/ledger/invariants.ts';
 import {
+  BalanceOverflowError,
   LedgerInconsistencyError,
   move,
   moveOnce,
@@ -147,6 +149,31 @@ describe('move', () => {
       cause: { code: '23514' }, // check_violation, kept as the cause
     });
     expect(await balancesOf(pool, account.id)).toEqual({ pendingIn: 0n, available: 0n, held: 0n });
+    expect(await movementCount(m)).toBe(0);
+  });
+
+  // Decision 60's defence in depth: requests can't reach this (their amounts are capped at the
+  // SEPA Credit Transfer maximum), so only corrupted data can, and it is an invariant violation.
+  it('reports a balance beyond the bigint range as a BalanceOverflowError, an invariant violation, rolled back', async () => {
+    const account = await createTestAccount(pool);
+    await pool.query(
+      'UPDATE account_balances SET available = 9223372036854775807 WHERE account_id = $1',
+      [account.id],
+    );
+    const m = booking(account, { from: 'external', to: 'available', amountMinor: 1n });
+    const attempt = withTransaction(pool, (tx) => move(tx, m));
+    await expect(attempt).rejects.toThrow(BalanceOverflowError);
+    await expect(attempt).rejects.toMatchObject({
+      accountId: account.id,
+      amountMinor: 1n,
+      cause: { code: '22003' }, // numeric_value_out_of_range, kept as the cause
+    });
+    expect(isInvariantViolation(await attempt.catch((err: unknown) => err))).toBe(true);
+    expect(await balancesOf(pool, account.id)).toEqual({
+      pendingIn: 0n,
+      available: 9223372036854775807n,
+      held: 0n,
+    });
     expect(await movementCount(m)).toBe(0);
   });
 
