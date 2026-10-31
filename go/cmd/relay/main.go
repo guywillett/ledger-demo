@@ -145,6 +145,12 @@ func run() error {
 			stopPolling(errNATSClosed)
 		case <-polling.Done():
 		}
+		// Shutdown begins: from here a second SIGTERM or SIGINT has its default effect and ends
+		// the process at once (the batch in progress is then published again once its leases
+		// expire), as Node's handlers, registered with process.once, allow. stop unregisters the
+		// signal context, which would otherwise keep catching signals until run returns; the
+		// deferred stop above is for the early returns, and calling it twice is harmless.
+		stop()
 		logger.Info("shutting down", "reason", context.Cause(polling).Error())
 	})
 
