@@ -195,7 +195,10 @@ func step[T any](
 	f func(ctx context.Context, tx db.Tx) (T, error),
 ) {
 	t.Helper()
-	if _, err := inTx(context.Background(), pool, f); err != nil {
+	_, err := db.InTxValue(context.Background(), pool, func(tx db.Tx) (T, error) {
+		return f(context.Background(), tx)
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 }

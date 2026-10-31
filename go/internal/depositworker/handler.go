@@ -81,23 +81,6 @@ func Handle(ctx context.Context, d Deps, m consumer.Message) consumer.Outcome {
 	})
 }
 
-// inTx runs one step in its own transaction and returns its result: db.InTx with a value out. A
-// generic function, so each step keeps its own result type (ledger.Result, compliance.Result,
-// ledger.Posted).
-func inTx[T any](
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	step func(ctx context.Context, tx db.Tx) (T, error),
-) (T, error) {
-	var result T
-	err := db.InTx(ctx, pool, func(tx db.Tx) error {
-		var err error
-		result, err = step(ctx, tx)
-		return err
-	})
-	return result, err
-}
-
 // process runs the steps for one deposit and settles the message.
 func process(
 	ctx context.Context,
@@ -109,14 +92,14 @@ func process(
 
 	// Each result is "applied" (this delivery made the transition) or "skipped"; each step is a
 	// closure (a function literal using id from here) run in its own transaction.
-	booked, err := inTx(ctx, d.Pool, func(ctx context.Context, tx db.Tx) (ledger.Result, error) {
+	booked, err := db.InTxValue(ctx, d.Pool, func(tx db.Tx) (ledger.Result, error) {
 		return ledger.Book(ctx, tx, id)
 	})
 	if err != nil {
 		return consumer.Settled{}, err
 	}
-	reviewStarted, err := inTx(ctx, d.Pool,
-		func(ctx context.Context, tx db.Tx) (compliance.Result, error) {
+	reviewStarted, err := db.InTxValue(ctx, d.Pool,
+		func(tx db.Tx) (compliance.Result, error) {
 			return compliance.StartReview(ctx, tx, id)
 		})
 	if err != nil {
@@ -132,8 +115,8 @@ func process(
 		}
 	}
 	decision := d.Decide()
-	decided, err := inTx(ctx, d.Pool,
-		func(ctx context.Context, tx db.Tx) (compliance.Result, error) {
+	decided, err := db.InTxValue(ctx, d.Pool,
+		func(tx db.Tx) (compliance.Result, error) {
 			return compliance.Decide(ctx, tx, id, decision)
 		})
 	if err != nil {
@@ -141,7 +124,7 @@ func process(
 	}
 	// Which way to post comes from the recorded state, not from decision: on a redelivery after an
 	// earlier decision, the one just made was discarded by Tx 3.
-	posted, err := inTx(ctx, d.Pool, func(ctx context.Context, tx db.Tx) (ledger.Posted, error) {
+	posted, err := db.InTxValue(ctx, d.Pool, func(tx db.Tx) (ledger.Posted, error) {
 		return ledger.PostDecision(ctx, tx, id)
 	})
 	if err != nil {
