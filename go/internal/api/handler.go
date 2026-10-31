@@ -32,6 +32,7 @@ func newHandler(pool *pgxpool.Pool, logger *slog.Logger, webhooks webhookRoutes)
 	mux.Handle("POST /accounts/{account_id}/withdrawals", handle(withdrawalsAPI.create))
 	mux.Handle("GET /withdrawals/{withdrawal_id}", handle(withdrawalsAPI.get))
 	mux.Handle("POST /provider/incoming-payments", handle(webhooks.incomingPayment))
+	mux.Handle("POST /provider/transfer-updates", handle(webhooks.transferUpdate))
 	// Every other request, whatever its method or path: the most specific matching pattern wins, so
 	// this matches only what nothing else does. Registering it also keeps ServeMux from answering
 	// 405 for a known path with another method: something always matches.

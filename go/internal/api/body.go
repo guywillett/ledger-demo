@@ -306,6 +306,23 @@ func (f *fields) literal(name, want string) (string, bool) {
 	return "", false
 }
 
+// enum reads a field that must be one of allowed (Zod's z.enum): anything else, absent and other
+// types included, is the same problem, with Zod's message (measured: `Invalid option: expected one
+// of "executed"|"failed"`).
+func (f *fields) enum(name string, allowed ...string) (string, bool) {
+	var s string
+	if raw, present := f.object[name]; present && jsonKind(raw) == "string" &&
+		json.Unmarshal(raw, &s) == nil && slices.Contains(allowed, s) {
+		return s, true
+	}
+	quoted := make([]string, len(allowed))
+	for i, a := range allowed {
+		quoted[i] = `"` + a + `"`
+	}
+	f.fail(name, "Invalid option: expected one of "+strings.Join(quoted, "|"))
+	return "", false
+}
+
 // jsonKind names the JSON value's type as Zod's messages do (JSON true and false are "boolean"). A
 // number too large for a float64 is JavaScript's Infinity or -Infinity, and Zod names it so
 // (measured: "expected string, received Infinity"); one too small, such as 1e-400, is 0, a number.

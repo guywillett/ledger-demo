@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
-	"time"
 	"unicode/utf8"
 
 	"github.com/guywillett/ledger-demo/go/internal/ids"
@@ -164,21 +162,16 @@ func (r *reader) amount(name string) money.Amount {
 	return a
 }
 
-// zodDatetime is Zod's z.iso.datetime() with its defaults: a date, T, hours, minutes and seconds
-// with any fraction, and Z (no offset, seconds required). The calendar (a 30 February, a 24th
-// hour) is left to time.Parse, which rejects what Zod's regular expression does.
-var zodDatetime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$`)
-
-// datetime reads an ISO 8601 UTC timestamp, to millisecond precision as Node's Date holds it.
+// datetime reads an ISO 8601 UTC timestamp as Node's schemas accept one (timestamp.ParseISO).
 func (r *reader) datetime(name string) timestamp.Time {
 	s, ok := r.string(name)
 	if !ok {
 		return timestamp.Time{}
 	}
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if !zodDatetime.MatchString(s) || err != nil {
+	t, ok := timestamp.ParseISO(s)
+	if !ok {
 		r.fail(name, "must be an ISO 8601 UTC timestamp")
 		return timestamp.Time{}
 	}
-	return timestamp.Time(t.Truncate(time.Millisecond))
+	return timestamp.Time(t)
 }

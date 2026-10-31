@@ -27,18 +27,28 @@ type webhookRoutes struct {
 	// db.InTx. A field so a test can replace it, to reach the outcome the real database can't
 	// produce (Inconsistent), as Node's test stubs the pool.
 	record func(ctx context.Context, n ingestion.Notification) (ingestion.Result, error)
+	// recordUpdate records a transfer update in its own transaction: ingestion.RecordTransferUpdate
+	// in db.InTx.
+	recordUpdate func(
+		ctx context.Context,
+		u ingestion.TransferUpdate,
+	) (ingestion.UpdateResult, error)
 }
 
 func newWebhookRoutes(pool *pgxpool.Pool) webhookRoutes {
 	return webhookRoutes{
 		record: func(ctx context.Context, n ingestion.Notification) (ingestion.Result, error) {
-			var result ingestion.Result
-			err := db.InTx(ctx, pool, func(tx db.Tx) error {
-				var err error
-				result, err = ingestion.RecordNotification(ctx, tx, n)
-				return err
+			return db.InTxValue(ctx, pool, func(tx db.Tx) (ingestion.Result, error) {
+				return ingestion.RecordNotification(ctx, tx, n)
 			})
-			return result, err
+		},
+		recordUpdate: func(
+			ctx context.Context,
+			u ingestion.TransferUpdate,
+		) (ingestion.UpdateResult, error) {
+			return db.InTxValue(ctx, pool, func(tx db.Tx) (ingestion.UpdateResult, error) {
+				return ingestion.RecordTransferUpdate(ctx, tx, u)
+			})
 		},
 	}
 }
@@ -90,8 +100,8 @@ func decodeIBAN(f *fields, name string) sepa.IBAN {
 	return iban
 }
 
-// decodeAmount reads an amount field as Node's sepaAmountSchema (requests and notifications, slice 3
-// decision 60): a string, then its length (at most money.MaxAmountLength) and its digits (no
+// decodeAmount reads an amount field as Node's sepaAmountSchema (requests and notifications,
+// slice 3 decision 60): a string, then its length (at most money.MaxAmountLength) and its digits (no
 // leading zero), both reported if both fail, as Zod does; only if both pass, the SEPA Credit
 // Transfer maximum. sepa.ParseAmount decides acceptance (the shared vectors pin it); the checks
 // before it only choose Zod's messages.
