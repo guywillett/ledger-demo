@@ -48,15 +48,14 @@ var (
 	ErrIBANChecksum    = errors.New("checksum is invalid")
 )
 
-// maxIBANInput is the longest IBAN input accepted, before normalisation (Node's ibanSchema
+// MaxIBANInput is the longest IBAN input accepted, before normalisation (Node's ibanSchema
 // .max(64)): enough for any IBAN with separators, not unbounded work.
 //
-// Counted in code points (utf8.RuneCountInString), where Node counts UTF-16 code units. The two
-// can only differ for a character outside the Basic Multilingual Plane, and an input with any
-// non-ASCII character other than the two no-break spaces (each one code point and one UTF-16
-// unit) is rejected whatever its length, so the count can't change a decision. Bytes would: a
-// no-break space is 2 bytes in UTF-8, a narrow one 3.
-const maxIBANInput = 64
+// Counted in code points (utf8.RuneCountInString), as Zod counts .max() (measured with Zod 4.6.7;
+// not JavaScript's UTF-16 .length). And any count would decide alike here: an input with a
+// non-ASCII character other than the two no-break spaces is rejected whatever its length. Bytes
+// wouldn't: a no-break space is 2 bytes in UTF-8, a narrow one 3.
+const MaxIBANInput = 64
 
 // ibanLengths is the IBAN length per IBAN country code, for the countries in the SEPA schemes: the
 // same table as Node's SEPA_IBAN_LENGTHS (node/src/shared/iban.ts has the sources and the note
@@ -93,7 +92,7 @@ func normaliseIBAN(input string) string {
 // ParseIBAN normalises (separators removed, a-z upper-cased), then checks the format, the country's
 // length, the check digit range and the ISO 13616 mod-97 checksum, as Node's parseIban does.
 func ParseIBAN(input string) (IBAN, error) {
-	if utf8.RuneCountInString(input) > maxIBANInput {
+	if utf8.RuneCountInString(input) > MaxIBANInput {
 		return "", ErrIBANTooLong
 	}
 	value := normaliseIBAN(input)
@@ -133,6 +132,16 @@ func mod97(iban string) int {
 		}
 	}
 	return remainder
+}
+
+// Mask is the IBAN for logs: country, check digits and the last four characters, as Node's
+// maskIban ("FR76\u20260193"). Logs never hold a full IBAN.
+func (i IBAN) Mask() string {
+	s := string(i)
+	if len(s) < 8 { // never for a parsed IBAN (at least 15 characters)
+		return "\u2026"
+	}
+	return s[:4] + "\u2026" + s[len(s)-4:]
 }
 
 // UnmarshalText parses a JSON string into an IBAN (see ParseIBAN).
@@ -178,7 +187,7 @@ func ParseText(input string, maxLen int) (string, error) {
 	if text == "" {
 		return "", ErrBlank
 	}
-	// Code points: accepted text is ASCII, so any count gives the same decision (see maxIBANInput).
+	// Code points, as Zod counts (and accepted text is ASCII, so any count decides alike).
 	if utf8.RuneCountInString(text) > maxLen {
 		return "", fmt.Errorf("%w: at most %d characters", ErrTooLong, maxLen)
 	}

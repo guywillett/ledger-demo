@@ -27,10 +27,14 @@ var (
 	ErrTooLarge               = errors.New("is larger than the maximum amount")
 )
 
+// MaxAmountLength is the most characters an amount may have: the length of the largest bigint,
+// 9223372036854775807 (Node's amountMinorSchema .max(19)).
+const MaxAmountLength = 19
+
 // ParseAmount parses an amount from outside (a request or a notification), with the rules of
 // Node's amountMinorSchema (node/src/shared/schemas.ts):
 //
-//   - at most 19 characters (the length of the largest bigint, 9223372036854775807);
+//   - at most MaxAmountLength characters;
 //   - digits only, ASCII 0-9: no sign, no decimal point, no spaces, no exponent;
 //   - no leading zero, and so no zero: the amount must be positive;
 //   - at most the largest bigint.
@@ -40,7 +44,7 @@ var (
 // vectors (step 2): that Node rejects every non-ASCII digit (its regex [0-9] does), and that a
 // 19-digit value above the maximum fails as too large rather than as too long.
 func ParseAmount(s string) (Amount, error) {
-	if len(s) == 0 || len(s) > 19 || s[0] == '0' {
+	if len(s) == 0 || len(s) > MaxAmountLength || s[0] == '0' {
 		return 0, ErrNotPositiveWholeNumber
 	}
 	for i := 0; i < len(s); i++ {

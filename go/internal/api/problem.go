@@ -39,6 +39,16 @@ func invalidRequest(errs []ValidationError) Problem {
 	}
 }
 
+// invalidNotification: a deposit notification (the provider's webhook) whose body doesn't parse.
+func invalidNotification(errs []ValidationError) Problem {
+	return Problem{
+		Type:   "urn:ledger-demo:problem:invalid-notification",
+		Title:  "Invalid deposit notification",
+		Status: http.StatusBadRequest,
+		Errors: errs,
+	}
+}
+
 func accountNotFound() Problem {
 	return Problem{
 		Type:   "urn:ledger-demo:problem:account-not-found",
