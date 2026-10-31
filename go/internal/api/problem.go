@@ -32,6 +32,16 @@ type ValidationError struct {
 // title and status live here, and call sites pass only what varies. The contract
 // (contracts/openapi.yaml) documents the same set.
 
+// invalidTransferUpdate: a transfer update (the provider's webhook) whose body doesn't parse.
+func invalidTransferUpdate(errs []ValidationError) Problem {
+	return Problem{
+		Type:   "urn:ledger-demo:problem:invalid-transfer-update",
+		Title:  "Invalid transfer update",
+		Status: http.StatusBadRequest,
+		Errors: errs,
+	}
+}
+
 func invalidRequest(errs []ValidationError) Problem {
 	return Problem{
 		Type:   "urn:ledger-demo:problem:invalid-request",
