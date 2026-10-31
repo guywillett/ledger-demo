@@ -147,7 +147,7 @@ services:
   # process. The kernel ignores a signal sent to PID 1 unless that process handles it, and both
   # implementations stop handling SIGTERM once shutdown begins, so a second SIGTERM can end a slow
   # shutdown at once, as it does outside a container: as PID 1 it would be ignored (measured).
-  api:
+  api: &api
     build: ./${API_IMPL:-node}
     image: ledger-demo-${API_IMPL:-node}
     command: ["api"]
@@ -169,6 +169,18 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  # A second API on the same database, in the implementation API_OTHER_IMPL (go by default;
+  # scripts/differential.sh sets it to the opposite of API_IMPL), on host port 3001: only for the
+  # differential check of the read endpoints (slice 3 decision 61), so under its own profile;
+  # nothing else starts it. The api's settings otherwise (the anchor), port 3000 inside.
+  api-other:
+    <<: *api
+    build: ./${API_OTHER_IMPL:-go}
+    image: ledger-demo-${API_OTHER_IMPL:-go}
+    ports:
+      - "3001:3000"
+    profiles: ["differential"]
 
   # Publishes the outbox to JetStream (src/relay/). Several instances can run at once
   # (docker compose up -d --scale relay=2): each claims its own batches of events.
