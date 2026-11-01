@@ -113,7 +113,7 @@ One commit per step on `slice-3`, reviewed before the next.
 
 - [x] Go passes every shared test vector, and so does Node
 - [x] Every Go API test response and every published event matches `contracts/`
-- [ ] Go's integration tests cover the cases of the Node suites for the ledger, the API, the relay, the deposit-worker and the submitter (cases, not code)
+- [x] Go's integration tests cover the cases of the Node suites for the ledger, the API, the relay, the deposit-worker and the submitter (cases, not code): [slice-3-test-map.md](slice-3-test-map.md)
 - [x] The same `scripts/demo.sh` passes against an all-Go stack, and Node reconciliation finds the books consistent
 - [x] `scripts/demo.sh` passes against a mixed stack (e.g. Go API and relay, Node deposit-worker and submitter)
 - [x] A Node and a Go deposit-worker share one durable consumer during a burst: every deposit processed once, both implementations visible in the logs, books consistent

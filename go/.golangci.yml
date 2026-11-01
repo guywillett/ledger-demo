@@ -12,7 +12,7 @@ linters:
   # standard: errcheck (an unchecked error), govet, ineffassign, staticcheck, unused.
   default: standard
   enable:
-    # An HTTP response body never closed leaks the connection (the provider client, step 7).
+    # An HTTP response body never closed leaks the connection (the provider client).
     - bodyclose
     # Errors compared with == or type-asserted instead of errors.Is / errors.As, which miss
     # wrapped errors (fmt.Errorf with %w).

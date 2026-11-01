@@ -334,6 +334,8 @@ func TestTreatsInvalidAndKeyConflictAsOurBug(t *testing.T) {
 			Kind: Invalid, Fields: []string{"creditor_name"}, BodyBytes: 120,
 		},
 		"key conflict (409)": {Kind: KeyConflict},
+		// Go-specific: an outcome of no kind (an adapter bug) is ours too, not a transient failure.
+		"no kind": {},
 	} {
 		d := testDeps(t, scripted(outcome))
 		logger, logs := consumertest.NewLogger(t)

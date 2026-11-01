@@ -17,9 +17,10 @@ import (
 )
 
 // The deposit lifecycle through the postings and the compliance transitions: the cases of
-// node/test/ledger/lifecycle.test.ts. Go has no compliance package yet (step 6), so the review and
-// decision are deposits.TransitionStatus with the compliance transitions, which is all Node's
-// startReview and decide do. Each test has its own account and deposit.
+// node/test/ledger/lifecycle.test.ts. The review and the decision are deposits.TransitionStatus
+// with the compliance transitions, which is all compliance.StartReview and Decide do (and Node's
+// startReview and decide): the ledger's tests stay within its own layer and below (decision 57)
+// rather than import compliance, a layer above it. Each test has its own account and deposit.
 
 type historyRow struct {
 	from, to, reason string // "" for NULL

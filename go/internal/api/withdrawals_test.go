@@ -661,8 +661,8 @@ func TestGetAnswers404ForAnUnknownWithdrawalAnd400ForAnInvalidID(t *testing.T) {
 	}
 }
 
-// Node runs its reconciliation here (Node only, decision 50). The Go test checks what it would for
-// this account: every bucket equal to its movements, and held equal to the withdrawals still held.
+// Node runs its reconciliation here (Node only, decision 50); the Go test checks what it would for
+// this account (expectConsistent).
 func TestTheAccountStaysConsistentAfterWithdrawalsThroughTheAPI(t *testing.T) {
 	a := newTestAPI(t)
 	account := fundedAccount(t, a.pool, 1000)
@@ -671,8 +671,18 @@ func TestTheAccountStaysConsistentAfterWithdrawalsThroughTheAPI(t *testing.T) {
 	a.withdraw(t, account, map[string]any{"amount_minor": "200"}, "b")
 	a.withdraw(t, account, map[string]any{"amount_minor": "900"}, "c") // 422
 
-	var mismatches int
-	err := a.pool.QueryRow(t.Context(), `
+	expectConsistent(t, a.pool, account)
+	if n := withdrawalsOf(t, a.pool, account); n != 2 {
+		t.Errorf("%d withdrawals, want 2", n)
+	}
+}
+
+// expectConsistent checks one account the way Node's reconciliation does (Node only, decision 50):
+// every bucket equal to its movements; held equal to the withdrawals still held or submitted; and
+// each withdrawal's movements matching its status (hold, then execute or release once final).
+func expectConsistent(t *testing.T, pool *pgxpool.Pool, account testdb.Account) {
+	t.Helper()
+	buckets := count(t, pool, `
 WITH moved AS (
   SELECT b.bucket,
          COALESCE(sum(m.amount_minor) FILTER (WHERE m.to_bucket = b.bucket), 0)
@@ -684,17 +694,29 @@ WITH moved AS (
 SELECT count(*)::int FROM moved, account_balances ab
 WHERE ab.account_id = $1
   AND net <> CASE bucket WHEN 'pending_in' THEN ab.pending_in WHEN 'available' THEN ab.available
-                         ELSE ab.held END`, account.ID).Scan(&mismatches)
-	if err != nil || mismatches != 0 {
-		t.Errorf("%d buckets differ from their movements (%v)", mismatches, err)
+                         ELSE ab.held END`, account.ID)
+	if buckets != 0 {
+		t.Errorf("%s: %d buckets differ from their movements", account.ID.TypeID(), buckets)
 	}
-	held := count(t, a.pool, `
+	held := count(t, pool, `
 SELECT (SELECT held FROM account_balances WHERE account_id = $1)::int
      - COALESCE((SELECT sum(amount_minor) FROM withdrawals
                  WHERE account_id = $1 AND status IN ('held', 'submitted')), 0)::int`,
 		account.ID)
-	if held != 0 || withdrawalsOf(t, a.pool, account) != 2 {
-		t.Errorf("held differs from the held withdrawals by %d; %d withdrawals",
-			held, withdrawalsOf(t, a.pool, account))
+	if held != 0 {
+		t.Errorf("%s: held differs from the held withdrawals by %d", account.ID.TypeID(), held)
+	}
+	mismatched := count(t, pool, `
+SELECT count(*)::int FROM withdrawals w
+WHERE w.account_id = $1
+  AND (SELECT string_agg(m.reference_step, ',' ORDER BY m.reference_step)
+       FROM balance_movements m
+       WHERE m.reference_type = 'withdrawal' AND m.reference_id = w.id)
+      IS DISTINCT FROM CASE w.status WHEN 'executed' THEN 'execute,hold'
+                                     WHEN 'failed' THEN 'hold,release' ELSE 'hold' END`,
+		account.ID)
+	if mismatched != 0 {
+		t.Errorf("%s: %d withdrawals' movements don't match their status", account.ID.TypeID(),
+			mismatched)
 	}
 }

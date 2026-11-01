@@ -1,4 +1,4 @@
-// Package consumertest is what the consumers' handler tests share (the deposit-worker's, later the
+// Package consumertest is what the consumers' handler tests share (the deposit-worker's and the
 // submitter's): a fake message that records its signals, and a logger whose lines a test can read
 // back. Node: the fake message and capturingLogger in test/helpers.ts. Imported only by tests,
 // like testdb (and the standard library's httptest).

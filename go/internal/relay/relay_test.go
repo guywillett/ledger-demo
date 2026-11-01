@@ -372,7 +372,8 @@ func fund(t *testing.T, pool *pgxpool.Pool, deposit ids.DepositID) {
 }
 
 // newHeldWithdrawal creates a withdrawal and stores its withdrawal.held event in the same
-// transaction, as the withdrawal request will (step 7; Node's createTestWithdrawal).
+// transaction, as a withdrawal request does (requests.RequestWithdrawal; Node's
+// createTestWithdrawal).
 func newHeldWithdrawal(
 	t *testing.T,
 	pool *pgxpool.Pool,

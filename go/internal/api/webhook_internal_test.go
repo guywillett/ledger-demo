@@ -36,7 +36,7 @@ func TestDepositSameDetailsVectors(t *testing.T) {
 	})
 }
 
-// The strict mode client bodies will use (step 7): unknown keys are problems, in the body's order,
+// The strict mode of client bodies (withdrawals): unknown keys are problems, in the body's order,
 // with Zod's strictObject messages.
 func TestRejectUnknown(t *testing.T) {
 	tests := []struct{ body, want string }{

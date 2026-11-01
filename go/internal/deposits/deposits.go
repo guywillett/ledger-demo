@@ -2,8 +2,8 @@
 // Node: node/src/deposits/status.ts.
 //
 // The entity layer (decision 57): it imports no ledger. The ledger's postings (book, credit,
-// return) and, later, compliance's transitions (review, decision) use the transitions defined
-// here; only the ledger's change balances.
+// return) and compliance's transitions (review, decision) use the transitions defined here; only
+// the ledger's change balances.
 //
 // The lifecycle:
 //

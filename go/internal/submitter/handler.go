@@ -182,7 +182,9 @@ func submit(
 			"provider reports our idempotency key reused with another request",
 			"provider_status", 409)
 	}
-	return consumer.Settled{}, errors.New("unexpected provider outcome")
+	// An outcome of no kind above (the zero Outcome, say): a bug in the provider adapter, which the
+	// exhaustive linter can't see. Our bug, as invalid and key_conflict are: retrying can't fix it.
+	return bug(ctx, delivery, "unexpected provider outcome", "provider_outcome_kind", int(result.Kind))
 }
 
 // bug is our bug, not a transient failure: retrying can't fix it, and nothing may move money on it.

@@ -19,10 +19,15 @@ import (
 )
 
 // POST /provider/incoming-payments: the cases of node/test/api/incoming-payments.test.ts, the
-// outbox half of deposit-events.test.ts (the relay half comes with the relay, step 5), and the
+// outbox half of deposit-events.test.ts (the relay half is in relay's tests), and the
 // webhook rows of body-errors.test.ts. Every notification it can parse gets 204 with no body,
 // whatever it did, so each test asserts the recorded effects. Every response is checked against the
 // contract (postNotification), and every outbox payload against its event contract.
+//
+// Not ported: Node's "refuses … (the database CHECK)" cases (deposits_unmatched_check: an
+// unmatched deposit has no account, a matched one has one). They test the shared schema, not
+// Node's code, and run in Node's suite against the same migrations; repeating them here would
+// test Postgres twice (as for the withdrawals CHECKs, ledger/withdrawals_test.go).
 
 func TestRecordsADepositAsCreatedWithItsEvent(t *testing.T) {
 	a := newTestAPI(t)

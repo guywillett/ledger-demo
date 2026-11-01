@@ -272,6 +272,10 @@ func (c *Consuming) consumerMissing() bool {
 // database that stops answering is a known gap, with compose's SIGKILL as the backstop).
 func (c *Consuming) Stop() {
 	c.stopOnce.Do(func() {
+		// Releases the handlers' context on every path, a clean stop included (a context's
+		// resources go only when it is cancelled). The timeout path below also cancels explicitly,
+		// before waiting: a defer runs only on return, too late for that. Cancelling twice is fine.
+		defer c.cancelHandlers()
 		c.stopPulling()
 		<-c.done // no more dispatches after this, so waiting on handlers is safe
 		finished := make(chan struct{})

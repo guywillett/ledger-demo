@@ -1,4 +1,4 @@
-// Package backoff is the retry timing shared by the long-running processes (the relay; later the
+// Package backoff is the retry timing shared by the long-running processes (the relay, the
 // deposit-worker and the submitter). Node: node/src/shared/backoff.ts.
 //
 // A foundation package (decision 57): it depends on nothing of ours.

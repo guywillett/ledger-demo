@@ -1,5 +1,5 @@
 // Package consumer is what every process that consumes a durable JetStream consumer shares (the
-// deposit-worker, later the submitter): the delivery log, the delivery lifecycle that settles each
+// deposit-worker and the submitter): the delivery log, the delivery lifecycle that settles each
 // message exactly once, the pull loop, and the process runner. Each process supplies only its
 // event's decoding and its handler. Node: node/src/consumer/.
 //

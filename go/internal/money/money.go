@@ -21,7 +21,8 @@ import (
 type Amount int64
 
 // The reasons ParseAmount gives. Problem details may word them differently from Node (decision
-// 42); the shared vectors (step 2) pin which inputs are rejected, not the wording.
+// 42); the shared vectors (contracts/vectors/money.json) pin which inputs are rejected, not the
+// wording.
 var (
 	ErrNotPositiveWholeNumber = errors.New("must be a positive whole number of minor units, as a string")
 	ErrTooLarge               = errors.New("is larger than the maximum amount")
@@ -40,9 +41,9 @@ const MaxAmountLength = 19
 //   - at most the largest bigint.
 //
 // Node checks the length and the pattern before converting to a BigInt; checking each character
-// here gives the same accept/reject decision for every input. Rules to confirm with the shared
-// vectors (step 2): that Node rejects every non-ASCII digit (its regex [0-9] does), and that a
-// 19-digit value above the maximum fails as too large rather than as too long.
+// here gives the same accept/reject decision for every input. The shared vectors pin the two rules
+// that could differ: Node rejects every non-ASCII digit (its regex [0-9] does), and a 19-digit
+// value above the maximum fails as too large rather than as too long.
 func ParseAmount(s string) (Amount, error) {
 	if len(s) == 0 || len(s) > MaxAmountLength || s[0] == '0' {
 		return 0, ErrNotPositiveWholeNumber

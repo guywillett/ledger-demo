@@ -233,13 +233,18 @@ func TestStopWaitsForInFlightMessagesWithinTheGracePeriod(t *testing.T) {
 	tc.publish(t, 1)
 	logs, logger := newCapture(t)
 	var started atomic.Bool
+	handlerCtx := make(chan context.Context, 1)
 	c := tc.start(t, consumer.ConsumeOptions{
 		Concurrency:   2,
 		Logger:        logger,
 		ShutdownGrace: 3 * time.Second,
-		Handle: func(_ context.Context, m consumer.Message) {
+		Handle: func(ctx context.Context, m consumer.Message) {
+			handlerCtx <- ctx
 			started.Store(true)
 			time.Sleep(300 * time.Millisecond)
+			if ctx.Err() != nil {
+				t.Error("the handler's context was cancelled while it ran")
+			}
 			_ = m.Ack()
 		},
 	})
@@ -247,6 +252,10 @@ func TestStopWaitsForInFlightMessagesWithinTheGracePeriod(t *testing.T) {
 	c.Stop()
 	if c.InFlight() != 0 {
 		t.Errorf("in flight after Stop: %d", c.InFlight())
+	}
+	// Released once the handlers have finished, on a clean stop too.
+	if ctx := <-handlerCtx; ctx.Err() == nil {
+		t.Error("the handlers' context is still live after Stop")
 	}
 	eventually(t, 5*time.Second, "the ack", func() bool { return tc.info(t).NumAckPending == 0 })
 	if lines := logs.lines(t, "unfinished messages will be redelivered"); len(lines) != 0 {

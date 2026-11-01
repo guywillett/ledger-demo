@@ -422,3 +422,33 @@ func TestAnswers500ForAnInvariantViolationRollingEverythingBackAndAlerts(t *test
 		t.Errorf("line %v", line)
 	}
 }
+
+// Node reconciles every account whose updates applied, at the end of its file (Node only, decision
+// 50). Here one account per kind of update, each checked as reconciliation would
+// (expectConsistent): executed, failed, overtaking the submitter, resent, and contradicted.
+func TestLeavesTheBooksConsistentForEveryAccountWhoseUpdatesApplied(t *testing.T) {
+	a := newTestAPI(t)
+	post := func(u map[string]any) {
+		t.Helper()
+		if status := a.postUpdate(t, u); status != 204 {
+			t.Fatalf("status %d for %v", status, u)
+		}
+	}
+	executed := a.newWithdrawal(t, true)
+	post(update(executed, nil))
+	failed := a.newWithdrawal(t, true)
+	post(update(failed, map[string]any{"status": "failed", "reason": "beneficiary account closed"}))
+	overtaking := a.newWithdrawal(t, false) // still held
+	post(update(overtaking, nil))
+	resent := a.newWithdrawal(t, true)
+	u := update(resent, nil)
+	post(u)
+	post(u)
+	contradicted := a.newWithdrawal(t, true)
+	post(update(contradicted, nil))
+	post(update(contradicted, map[string]any{"status": "failed", "reason": "too late"}))
+
+	for _, w := range []testWithdrawal{executed, failed, overtaking, resent, contradicted} {
+		expectConsistent(t, a.pool, w.account)
+	}
+}

@@ -119,6 +119,19 @@ func TestAnswers404AsNodeDoes(t *testing.T) {
 			t.Errorf("%s %s: the body echoes the URL", tt.method, tt.target)
 		}
 	}
+
+	// An empty path parameter with a malformed JSON body: 404 before the body is read (Node's
+	// not-found.test.ts), since onlyCleanPaths answers before routing; parsing it first would be a
+	// 400.
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/accounts//withdrawals",
+		strings.NewReader(`{"amount_minor": `))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "k1")
+	rec := httptest.NewRecorder()
+	a.handler.ServeHTTP(rec, req)
+	if rec.Code != 404 || rec.Body.String() != noSuchRoute {
+		t.Errorf("POST /accounts//withdrawals with a malformed body: got %d %s", rec.Code, rec.Body)
+	}
 }
 
 // %-escapes in the path are decoded before matching, as in Node: %61 is "a", so this is the same

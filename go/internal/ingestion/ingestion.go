@@ -211,6 +211,11 @@ func RecordNotification(ctx context.Context, tx db.Tx, n Notification) (Result, 
 	}
 	differing := DifferingFields(stored.Details, n.details())
 	if len(differing) == 0 {
+		// Defensive: the statement's rule (refuse unless the details are the same) and this
+		// comparison disagree, our bug (see Inconsistent). Unreachable against the real database
+		// unless they drift apart; the rule they share is pinned by the shared vectors
+		// (deposit-same-details.json). Untested in Go: Node reaches it with a stub pool, and Go has
+		// no fake db.Tx (the API's 500 for it is tested with a stubbed record function).
 		return Result{Kind: Inconsistent, Deposit: stored.ID}, nil
 	}
 	// As text: pgx encodes a []string as text[], but not a slice of the named type ComparedField.

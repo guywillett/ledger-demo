@@ -5,7 +5,10 @@
 //
 //   - Main, ledger_go_test (compose service migrate-go-test), for every package's tests but two.
 //     `go test ./...` runs packages in parallel, as separate processes, all against it; they don't
-//     conflict, since each test creates its own rows with fresh IDs.
+//     conflict, since each test creates its own rows with fresh IDs. Within a package, tests run
+//     one at a time, Go's default, kept on purpose (no t.Parallel): they share the database's
+//     tables, and most assert on rows they read back, so running them side by side would only
+//     buy speed by making each test's reads depend on what others are writing.
 //   - Relay, ledger_go_relay_test (migrate-go-relay-test), for the outbox and relay tests only.
 //     Claiming takes the oldest unpublished events in the whole table, so those tests must see no
 //     other package's events (the webhook tests leave deposit.created rows behind in Main on every
@@ -129,8 +132,9 @@ func NewAccount(t testing.TB, pool *pgxpool.Pool) Account {
 }
 
 // NewDeposit inserts a deposit in status created for the account, with its first history row
-// (null -> created), as ingestion records one. Inserted directly with SQL: Go has no ingestion
-// yet (step 4). No outbox row: nothing in these tests publishes.
+// (null -> created), as ingestion records one. Inserted directly with SQL rather than through
+// ingestion, so the packages below it (deposits, ledger) can use it without depending on a layer
+// above them (decision 57). No outbox row: nothing in these tests publishes.
 func NewDeposit(
 	t testing.TB,
 	pool *pgxpool.Pool,

@@ -16,7 +16,8 @@ import (
 
 // Deposit is a stored deposit matched to an account (any status but unmatched). Node:
 // node/src/deposits/deposits.ts. A deposit in suspense has no account and its own type in Node;
-// Go gets it with ingestion (step 4b). Nullable columns are pointers, as in withdrawals.
+// Go never reads one back (ingestion only writes them, and reconciliation, which lists them, is
+// Node's), so it has none. Nullable columns are pointers, as in withdrawals.
 type Deposit struct {
 	ID                   ids.DepositID
 	Account              ids.AccountID

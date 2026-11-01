@@ -2,7 +2,7 @@
 // buckets of one account, recorded in balance_movements (append-only) and applied to
 // account_balances in the caller's transaction. Node: node/src/ledger/.
 //
-// The ledger layer (decision 57): it uses the entities (deposits; withdrawals from step 3b) and is
+// The ledger layer (decision 57): it uses the entities (deposits, withdrawals) and is
 // used by orchestration (ingestion, compliance, requests) and the processes. Balances change only
 // through its posting functions (postings.go), which pair each entity transition with its
 // movement.

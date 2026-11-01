@@ -224,8 +224,8 @@ func (f *fields) fail(path, message string) {
 // valid reports whether the body was an object; if not, no field is read (or reported).
 func (f *fields) valid() bool { return f.object != nil }
 
-// rejectUnknown reports every key not in known, as Zod's strictObject does: for client bodies (step
-// 7, withdrawals), where a misspelt optional field must fail rather than be dropped (slice 2
+// rejectUnknown reports every key not in known, as Zod's strictObject does: for client bodies
+// (withdrawals), where a misspelt optional field must fail rather than be dropped (slice 2
 // decision 33). Webhook bodies don't call it: providers add fields over time (tolerant reader).
 func (f *fields) rejectUnknown(known ...string) {
 	var unknown []string
