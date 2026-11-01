@@ -84,6 +84,12 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /accounts/{account_id}/transactions:
     get:
       summary: The account's deposits, newest first, a page at a time
@@ -128,6 +134,12 @@ paths:
                 $ref: '#/components/schemas/Problem'
         '404':
           description: No such account
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
           content:
             application/problem+json:
               schema:
@@ -271,6 +283,12 @@ paths:
                 $ref: '#/components/schemas/Problem'
         '404':
           description: No such withdrawal
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
           content:
             application/problem+json:
               schema:

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/guywillett/ledger-demo/go/internal/api"
+	"github.com/guywillett/ledger-demo/go/internal/contracttest"
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/logging"
 	"github.com/guywillett/ledger-demo/go/internal/testdb"
@@ -47,8 +48,11 @@ func TestReplacesABadRequestID(t *testing.T) {
 func TestLogsOneAccessLinePerRequest(t *testing.T) {
 	a := newTestAPI(t)
 	account := testdb.NewAccount(t, a.pool)
-	a.do(t, http.MethodGet, transactionsPath(account.ID, "iban=FR7612345000010000000000193&limit=1"),
+	req, r := a.do(t, http.MethodGet, transactionsPath(account.ID, "iban=FR7612345000010000000000193&limit=1"),
 		http.Header{"X-Request-Id": {"req-1"}})
+	contracttest.Check(t, req, &http.Response{
+		StatusCode: r.status, Header: r.header, Body: io.NopCloser(strings.NewReader(r.body)),
+	})
 
 	lines := a.logLines(t)
 	if len(lines) != 1 {
@@ -187,9 +191,8 @@ func TestAnswersAnUnexpectedErrorWith500(t *testing.T) {
 	a := testAPI{handler: api.NewHandler(unreachable, logger), logs: &logs}
 	account := testdb.NewAccount(t, testdb.Pool(t))
 
-	// Not contract-checked: the contract documents no 500 for the GET operations (only the POSTs
-	// have one), a gap to raise (decision 41), not to fix here.
-	_, r := a.do(t, http.MethodGet, balancePath(account.ID), nil)
+	r := a.get(t, balancePath(account.ID)) // contract-checked: the GETs document their 500
+
 	want := `{"type":"about:blank","title":"Internal Server Error","status":500}`
 	if r.status != 500 || r.body != want {
 		t.Errorf("got %d %s", r.status, r.body)
