@@ -22,7 +22,7 @@ import (
 // The provider client over real HTTP, against httptest servers: every answer maps to its outcome,
 // an unknown outcome resolves on the next call with the same key, and the request is byte for byte
 // Node's. Node's tests (test/submitter/provider.test.ts) run against provider-sim; that, the real
-// fake provider, is exercised end to end by the demo (step 8), against either implementation.
+// fake provider, is exercised end to end by the demo, against either implementation (in CI).
 //
 // httptest.NewServer starts a real HTTP server on a local port, its handler a plain function; its
 // URL is the base URL, and Close stops it (t.Cleanup).

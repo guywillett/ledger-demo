@@ -5,8 +5,8 @@
 A small, simplified payment ledger built to show one thing: **money moves exactly once,
 whatever goes wrong.** Deposits are booked through a (pseudo) compliance review; client
 withdrawals are held, sent to a (fake) payment provider and settled from its webhooks.
-Implemented in Node.js/TypeScript; a Go implementation against the same schema, contracts and
-demo is next.
+Implemented twice, in Node.js/TypeScript and in Go, against the same schema, contracts and
+demo: each service runs either implementation, in any mix.
 
 ## The problem
 
@@ -87,9 +87,11 @@ provider ──POST /provider/transfer-updates (webhook)──► API ──► 
 | The books agree | reconciliation checks balances against deposit and withdrawal statuses and against the movement journal; reports stuck deposits, withdrawals and events, suspense and conflicts | `test/reconciliation/reconcile.test.ts`; the last test of each e2e file; `scripts/demo.sh` |
 | One contract for every implementation | hand-written `contracts/openapi.yaml` and `contracts/events/`; every test response and published event is checked against them | `test/contract.ts`, `test/shared/events.test.ts` |
 
+The test paths are Node's (under `node/`); Go's tests cover the same cases, beside the code they test (`go/internal/<package>/*_test.go`).
+
 ## Design principles
 
-The decisions a reviewer should see first; each is argued in the [slice 1](docs/slices/slice-1-incoming-payments.md) and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) specs, and the numbers refer to their Decisions sections.
+The decisions a reviewer should see first; each is argued in the [slice 1](docs/slices/slice-1-incoming-payments.md) and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) specs, and the numbers refer to their Decisions sections. The Go implementation's own decisions are in the [slice 3](docs/slices/slice-3-go.md) spec.
 
 - **The database decides, never check-then-act** (slice 1 decision 8): every state change is a conditional `UPDATE … WHERE status = $expected`, an `INSERT … ON CONFLICT`, or a CHECK (the balance CHECK *is* the insufficient-funds check), and the code acts on `rowCount` and `RETURNING`. Two racing requests or redeliveries can't both win.
 - **Balances change only through `move()`** (slice 1 decision 10): each movement is recorded in an append-only journal and applied to the balance in the same transaction, under a unique reference, so replaying the journal gives the balances, and reconciliation proves it.
@@ -100,6 +102,12 @@ The decisions a reviewer should see first; each is argued in the [slice 1](docs/
 - **A provider answer that signals our bug moves no money** (slice 2 decision 35): alert, terminate, leave it for a person.
 - **Status codes follow the caller** (slice 2 decision 38): conventional REST codes for our client; for provider webhooks, `2xx` for anything recorded, because a provider retries everything else, and non-`2xx` only when a retry can help.
 - **Events carry no personal data** (slice 2, *`withdrawal.held` v1*): IDs and amounts only, no IBANs, names or remittance text; consumers read details from the database. A stream keeps messages beyond the database's control.
+
+## Two implementations
+
+Node (`node/`) is the reference; Go (`go/`) is a port of the design, not the code: the same SQL, guarantees and contracts, with Go's own structure, errors and concurrency. Both run against one database, one set of streams and one contract, so any service (API, relay, deposit-worker, submitter) can run either, and a mixed stack works: a Go API's outbox events are published by a Node relay and consumed by a Go deposit-worker, or any other combination. Provider-sim (the fake provider) and reconciliation are Node only: test infrastructure, and an auditor that shares none of Go's code checks Go's books ([slice 3](docs/slices/slice-3-go.md) decision 50).
+
+Equivalence is checked at three levels ([slice 3, *Equivalence*](docs/slices/slice-3-go.md#equivalence)): every rule that decides an outcome (IBANs, amounts, idempotency) passes the same shared test vectors in both test suites; everything observable matches the contract, and the demo passes on all-Node, all-Go and mixed stacks in CI; and, beyond what's required, the two APIs answer the same reads with the same bytes (`scripts/differential.sh`).
 
 ## Where to look
 
@@ -119,13 +127,18 @@ With ten minutes to spare:
 ## Repository layout
 
 ```text
-node/             the Node.js/TypeScript implementation: API, relay, deposit-worker, submitter, provider-sim
+node/             the Node.js/TypeScript implementation (the reference): API, relay, deposit-worker, submitter,
+                  and the Node-only provider-sim and reconciliation
   src/            one folder per concern (api, ledger, outbox, relay, consumer, deposit-worker, submitter, …)
   test/           integration tests against the compose services; e2e tests kill real processes
-db/migrations/    plain SQL run by dbmate, shared by every implementation
-contracts/        OpenAPI and event schemas; every test response and event is checked against them
+go/               the Go implementation: API, relay, deposit-worker, submitter
+  cmd/            one binary per process
+  internal/       packages by concern, layered (ledger, outbox, consumer, …), each with its tests
+db/migrations/    plain SQL run by dbmate, shared by both implementations
+contracts/        OpenAPI and event schemas, and the shared test vectors (vectors/)
 nats/             JetStream stream and consumer definitions
-scripts/demo.sh   the end-to-end demo; HTTP and compose only, so it runs against any implementation
+scripts/          the end-to-end demo (HTTP and compose only, so it runs against any stack), the
+                  shared-consumer and differential checks
 docs/             slice specs with their decisions; decisions/ for cross-cutting ones
 ```
 
@@ -138,13 +151,22 @@ scripts/demo.sh                  # deposits: duplicates, conflicts, suspense, a 
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance    # alice
 ```
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) does the same from a clean checkout on every push: `npm run check`, the stack built from scratch, the integration and e2e tests, then `scripts/demo.sh`.
+Each service runs Node unless its variable says `go`: `API_IMPL`, `RELAY_IMPL`, `DEPOSIT_WORKER_IMPL`, `SUBMITTER_IMPL`. Export them, or put them in `.env` (git-ignored), so every compose command, the demo's included, sees the same choice. A mixed stack:
 
-`scripts/demo.sh` exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (deposits, withdrawals held or submitted, unpublished events). That last check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so it will work unchanged against the Go implementation. It takes about a minute.
+```sh
+export API_IMPL=go RELAY_IMPL=go     # Go API and relay; Node deposit-worker and submitter
+docker compose up -d --build && scripts/demo.sh
+```
+
+Every log line names its implementation (`"implementation":"go"` or `"node"`), so a mixed stack's logs say who did what.
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push, from a clean checkout: each implementation's checks and tests; the stack built from scratch and `scripts/demo.sh` on four stacks (all-Node, all-Go, and the two mixes that cross every boundary both ways), with a Node and a Go deposit-worker sharing one consumer in one of them; and the differential check of the two APIs.
+
+`scripts/demo.sh` exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (deposits, withdrawals held or submitted, unpublished events). That last check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so the same script runs against any stack: CI runs it on four. It takes about a minute.
 
 ## Known gaps
 
-Deliberate, and described with their evolution path under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md) and [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) specs. The most important:
+Deliberate, and described with their evolution path under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md), [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) and [slice 3](docs/slices/slice-3-go.md) specs. The most important:
 
 - **Security:** no HMAC signature check on the provider webhooks, no authentication on the client API, no rate limiting (beyond Fastify's 1 MiB body limit), NATS without credentials, and one database user for everything (append-only enforced by triggers rather than per-service roles). Nothing is encrypted in transit (Postgres with `sslmode=disable`, NATS without TLS) or at rest (the JetStream file store, the Postgres volume). Mitigated by design: events carry no personal data, and consumers act only on rows already in the database, through conditional transitions, so a forged event can't create a deposit or move money; at most it starts idempotent processing that would happen anyway.
 - **A customer ledger, not a general ledger:** each movement moves an amount between buckets of one customer account (`external` for money entering or leaving), so the books explain customer balances but not the bank balance. There are no company-side accounts (bank, suspense, fees, treasury), and unmatched money is a deposit status rather than a booking into a suspense account. In production: cash at the bank = customer balances + suspense + treasury, with each flow kept separate behind an intake table.
@@ -154,6 +176,7 @@ Deliberate, and described with their evolution path under *Known gaps* in the [s
 - **One provider, one scheme, one currency:** the webhooks speak provider-sim's format; with several providers each gets an adapter under `src/api/webhooks/<provider>/` mapping onto the same provider-neutral ingestion functions. Validation is SEPA-specific (lengths, the basic character set, partly in database CHECKs; the SEPA country list in `node/src/shared/iban.ts` is not yet verified against the EPC's), and every amount is EUR.
 - **Housekeeping:** published outbox rows are kept (pruning or partitioning is the evolution); the relay polls, so an event can wait up to 1 s (`LISTEN/NOTIFY`); idempotency keys never expire (real APIs often expire them after 24 h).
 - **Simplifications:** approve/reject is random; one IBAN per account; no compliance checks on withdrawals; no health endpoint.
+- **Where the implementations differ on purpose:** the Go API gives each request a 30 s deadline, where Node has none (slice 3 decision 58, a known gap for Node); Go cancels a consumer's handlers still running when shutdown's grace period ends, where Node's run on as the process exits (decision 59). Go has no process-level e2e tests of its own: the demo kills its processes through compose. Both are released together; implementations deployed at different times would need versioned contracts.
 
 ## How this was built
 
@@ -163,7 +186,7 @@ and I make the decisions. The slice is then built in small steps. Claude Code im
 step from a brief. I review the diff myself, with Claude Code's `/code-review` for the complex
 steps. A second Claude session then reviews it with me, I push back where needed and commit.
 [`CLAUDE.md`](CLAUDE.md) holds the conventions they all work to. Learning idiomatic
-Node/TypeScript (and next, Go) was half the point, so no step was accepted until I understood
+Node/TypeScript and Go was half the point, so no step was accepted until I understood
 it.
 
 For running it locally, the tests and the tooling, see [`docs/development.md`](docs/development.md).

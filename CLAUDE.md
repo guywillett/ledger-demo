@@ -1,6 +1,6 @@
 # ledger-demo
 
-Portfolio project: a small payment event-processing system (deposits with a pseudo compliance review, withdrawals sent to a provider, ledger balances) built to demonstrate correctness under duplicates, retries, crashes and concurrency. Implemented first in Node.js/TypeScript, later in Go against the same database schema and contracts.
+Portfolio project: a small payment event-processing system (deposits with a pseudo compliance review, withdrawals sent to a provider, ledger balances) built to demonstrate correctness under duplicates, retries, crashes and concurrency. Implemented in Node.js/TypeScript (the reference) and in Go, against the same database schema and contracts; each service can run either.
 
 ## Specs
 
@@ -37,21 +37,22 @@ Portfolio project: a small payment event-processing system (deposits with a pseu
 
 ## Go (`go/`)
 
-The Go implementation (slice 3) follows the conventions above (SQL, no check-then-act, result vocabularies, balances, transactions, IDs, money, status codes) and these Go-specific ones. The spec's *Go conventions* and decisions 39–55 are the reasoning.
+The Go implementation (slice 3) follows the conventions above (SQL, no check-then-act, result vocabularies, balances, transactions, IDs, money, status codes) and these Go-specific ones. The spec's *Go conventions* and decisions 39–62 are the reasoning.
 
 - **Explain Go idioms on first use,** and where a Go idiom answers the same need as a Node one in this repo, name it (e.g. `defer` for `finally`, an interface satisfied implicitly for a TypeScript structural type, `errors.Is` for `instanceof`).
-- **Layout:** module `github.com/guywillett/ledger-demo/go` in `go/`; one binary per process in `cmd/<process>/`; packages by concern in `internal/` (`config`, `db`, `ids`, `money`, `logging`, later `ledger`, `outbox`, …). No `shared`, `util` or `common` packages.
+- **Layout:** module `github.com/guywillett/ledger-demo/go` in `go/`; one binary per process in `cmd/<process>/`; packages by concern in `internal/`, layered (decision 57): foundations (`config`, `db`, `ids`, `money`, `sepa`, `logging`, …) ← entities (`deposits`, `withdrawals`, `outbox`) ← `ledger` ← orchestration (`ingestion`, `compliance`, `requests`, `consumer`) ← processes and `api`. No `shared`, `util` or `common` packages.
 - **Standard library first:** `net/http` (method and path patterns, no framework), `encoding/json`, `log/slog`, `context`, `testing`. Third-party only where the standard library has no equivalent (`pgx` v5, nats.go's `jetstream`, `google/uuid`, `typeid-go`), each pinned in `go.mod`.
 - **Errors are values:** return `error`, wrap with `fmt.Errorf("…: %w", err)`, match with `errors.Is` / `errors.As`. Panic only for programmer errors at start-up.
 - **`context.Context` first** in anything that does I/O; cancellation drives shutdown.
 - **SQL:** raw, parameterised, hand-mapped with `pgx`, in data-access functions; no ORM, query builder or code generation. `db.InTx` is `withTransaction`; a `db.Tx` (only `InTx` creates one) or a `db.Querier` (pool or `Tx`) as in Node.
 - **Validation is hand-written:** decode into validated types (`ids.DepositID`, `money.Amount` validate themselves when decoded); client bodies with `DisallowUnknownFields`, webhook bodies tolerantly.
-- **Same observable behaviour as Node** (spec, *Equivalence*): environment variables and defaults, routes, status codes, JSON, events, database writes, log field names. Logs carry `implementation: "go"`.
+- **Same observable behaviour as Node** (spec, *Equivalence*): environment variables and defaults, routes, status codes, JSON, events, database writes, log field names. Logs carry `implementation: "go"` (Node's `"node"`). The spec's *Equivalence* names three levels: shared vectors, the contract, and (opt-in) byte-identical responses.
 - **Anything that isn't the usual Go way is documented where it's made, with its reason** (a comment; a spec decision if it shapes the structure).
 - **Line length:** no line-length linter; wrap code over about 100 characters where it reads better (signatures one parameter per line, long calls); strings and test names may run long.
 - **Commands** (in `go/`): `gofmt -l .` (lists unformatted files; `gofmt -w .` fixes them), `go vet ./...`, `golangci-lint run` (version pinned in `.golangci-lint-version`; install in `docs/development.md`), `govulncheck ./...` (pinned in `.govulncheck-version`), `go test -race ./...` (against `ledger_go_test`, and `ledger_go_relay_test` for the outbox and relay tests; needs `docker compose up -d`).
 
 ## Running
 
-- `docker compose up` starts Postgres, NATS (JetStream), migrations and stream setup, the API, relay, deposit-worker, submitter and provider-sim (the fake BaaS); `reconcile` runs on demand (`docker compose run --rm reconcile`).
+- `docker compose up` starts Postgres, NATS (JetStream), migrations and stream setup, the API, relay, deposit-worker, submitter and provider-sim (the fake BaaS); `reconcile` runs on demand (`docker compose run --rm reconcile`). The API, relay, deposit-worker and submitter each run Node unless `API_IMPL`, `RELAY_IMPL`, `DEPOSIT_WORKER_IMPL` or `SUBMITTER_IMPL` is `go` (decision 51); every compose command needs the same variables (export them, or `.env`). Provider-sim and reconciliation are Node only.
+- `scripts/demo.sh` runs against any stack; `scripts/shared-consumer.sh` and `scripts/differential.sh` (after the demo) check the two implementations together.
 - Integration tests (Vitest for Node, `go test` for Go) run against the compose services, each in its own test database (`ledger_test`, `ledger_go_test`; the Go outbox and relay tests in `ledger_go_relay_test`).

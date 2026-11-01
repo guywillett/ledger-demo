@@ -259,17 +259,17 @@ func (c *Consuming) consumerMissing() bool {
 // grace period for in-flight handlers. Safe to call more than once, and from several goroutines:
 // sync.Once runs stop once, and later callers wait for it to finish.
 //
-// When the grace period runs out, the handlers still running have their context cancelled, and
-// Stop waits for them to return. Node can't do this (a promise can't be cancelled from outside),
-// so its unfinished handlers run on while the process exits around them. Here a cancelled handler's
-// query is cancelled and its transaction rolls back: the same state a crash leaves, reached
-// cleanly, with the connection returned to the pool before it closes. The handler then settles as
-// any transient failure (a nak with the retry delay, recorded), so the message is redelivered
-// after that delay rather than after its ack_wait. Handlers must return once their context is
-// cancelled: every one of their I/O calls takes it, and the lifecycle's own writes of the outcome
-// are bounded (recordTimeout). There is no second limit on this wait: pgxpool's Close waits for
-// every connection to come back anyway, so a limit here would only move a hang there (a database
-// that stops answering is a known gap, with compose's SIGKILL as the backstop).
+// When the grace period runs out, the handlers still running have their context cancelled, and Stop
+// waits for them to return (slice 3 decision 59). Node can't do this (a promise can't be cancelled
+// from outside), so its unfinished handlers run on while the process exits around them. Here a
+// cancelled handler's query is cancelled and its transaction rolls back: the same state a crash
+// leaves, reached cleanly, with the connection returned to the pool before it closes. The handler
+// then settles as any transient failure (a nak with the retry delay, recorded), so the message is
+// redelivered after that delay rather than after its ack_wait. Handlers must return once their
+// context is cancelled: every one of their I/O calls takes it, and the lifecycle's own writes of
+// the outcome are bounded (recordTimeout). There is no second limit on this wait: pgxpool's Close
+// waits for every connection to come back anyway, so a limit here would only move a hang there (a
+// database that stops answering is a known gap, with compose's SIGKILL as the backstop).
 func (c *Consuming) Stop() {
 	c.stopOnce.Do(func() {
 		c.stopPulling()
