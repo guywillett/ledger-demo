@@ -8,3 +8,5 @@
   two money flows).
 - [`development.md`](development.md): the reference for running and testing the system, and the
   tooling.
+- [`guarantees.md`](guarantees.md): each guarantee, how it is kept, and the Node and Go tests
+  that show it.

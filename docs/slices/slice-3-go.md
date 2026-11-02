@@ -1,6 +1,6 @@
 # Slice 3 — Go implementation
 
-Status: in progress
+Status: done (Go); every item under *Done when* is met, except the tag, which follows the review and merge
 Implementation: Go, against the tag `v0.2-node-reference` (schema, contracts, NATS definitions, demo)
 Go target: `v0.2` plus decision 56 (IBAN and SEPA text normalisation defined over ASCII, changed in Node too).
 Builds on: [slice 1](slice-1-incoming-payments.md), [slice 2](slice-2-outbox-and-withdrawals.md) and [ADR 0002](../decisions/0002-deposits-and-withdrawals.md) (vocabulary). Their decisions hold for Go unless this spec says otherwise.
@@ -121,7 +121,7 @@ One commit per step on `slice-3`, reviewed before the next.
 - [x] CI runs Go's checks and tests, and the demo against Node, Go and mixed stacks
 - [x] Every non-Go-like choice is documented with its reason (decision 54)
 - [x] README and `docs/development.md` describe running either implementation and mixing them
-- [ ] Tag `v0.3-go` on the merge commit
+- [x] Tag `v0.3-go` on the merge commit
 
 ## Known gaps (deliberate)
 
