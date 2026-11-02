@@ -201,6 +201,10 @@ docker compose run --rm reconcile --stuck-after 0                       # from c
 
 Exit code `0` means the books agree, `1` that they disagree, `2` stuck deposits, withdrawals or events with `--fail-on-stuck`, `3` that it couldn't run. Suspense and conflicts never fail it: they are a person's job, not inconsistent books. Run against `ledger_test` it reports differences by design: some tests leave deliberate inconsistencies behind.
 
+## The demo
+
+`scripts/demo.sh` exercises the running stack the way the slices' *Done when* lists describe (duplicates, conflicts, suspense, a deposit-worker killed mid-review, two workers; withdrawal repeats, insufficient funds, provider failures, the submitter killed mid-call), then reconciles. Its header comment lists each step. It exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (deposits, withdrawals held or submitted, unpublished events); `1` if an expectation failed or the books disagree, `2` if something didn't finish within the wait, or carol (the account the withdrawals use) couldn't be funded; `3` if it couldn't run. The final check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so the same script runs against any stack. It takes about a minute.
+
 ## Checks across implementations
 
 Two scripts beside the demo, each against the running stack, with the demo's exit codes (`0` all good, `1` an expectation failed, `3` couldn't run; `shared-consumer.sh` also `2`, deposits unfinished after the wait). Each works out the other implementation from the running service's variable, starts its extra service under its own profile, and removes it however it ends.
