@@ -197,8 +197,8 @@ done
 [ "$multi_page" -gt 0 ] || too_little "no account has more than $PAGE deposits, so no list takes several pages"
 
 # Withdrawals can't be listed through the API: their IDs are read from the database (as
-# reconciliation reads it), which depends on neither API under test. Not from provider-sim's log,
-# as demo.sh finds them: that holds only what the current provider-sim container has seen.
+# reconciliation reads it), which depends on neither API under test. (demo.sh knows its
+# withdrawals' IDs from its POST responses; this script, run after it, has no record of them.)
 withdrawals=$(docker compose exec -T postgres psql -U ledger -d ledger -Atc \
   "SELECT status, id FROM withdrawals ORDER BY id" 2>/dev/null | tr '|' ' ') ||
   { echo "Couldn't read the withdrawals from the database (is postgres up?)"; exit 3; }
