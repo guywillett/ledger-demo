@@ -81,6 +81,19 @@ describe('createLogger', () => {
     ]);
   });
 
+  // Slice 3 decision 51: every line names its implementation, child loggers' included, as the Go
+  // implementation's lines say "go".
+  it('names the implementation on every line', () => {
+    const { destination, lines } = capture();
+    const logger = createLogger({ service: 'test', level: 'info' }, destination);
+    logger.info('parent');
+    logger.child({ request_id: 'r1' }).warn('child');
+    expect(lines().map((l) => [l.msg, l.service, l.implementation])).toEqual([
+      ['parent', 'test', 'node'],
+      ['child', 'test', 'node'],
+    ]);
+  });
+
   it('writes BigInt values in log objects as digit strings', () => {
     const { destination, lines } = capture();
     const logger = createLogger({ service: 'test', level: 'info' }, destination);

@@ -108,6 +108,24 @@ export function contractRequestExample(method: string, path: string): unknown {
   return operation?.requestBody?.content['application/json']?.example;
 }
 
+// Validation errors for `value` against one property of a component schema, e.g.
+// ('WithdrawalRequest', 'creditor_iban'), or undefined if it's valid. For checking that what the
+// implementation accepts, the contract accepts too (test/vectors.test.ts).
+export function contractPropertyErrors(
+  schemaName: string,
+  property: string,
+  value: unknown,
+): string | undefined {
+  const schema = contract.components.schemas[schemaName] as
+    { properties?: Record<string, unknown> } | undefined;
+  const propertySchema = schema?.properties?.[property];
+  if (propertySchema === undefined) {
+    throw new Error(`contract has no ${schemaName}.${property}`);
+  }
+  const validate = validatorFor(`${schemaName}.${property}`, propertySchema);
+  return validate(value) ? undefined : ajv.errorsText(validate.errors);
+}
+
 // Event contracts: contracts/events/<event_type>.v<version>.json, plain JSON Schema 2020-12.
 const eventValidators = new Map<string, ValidateFunction>();
 

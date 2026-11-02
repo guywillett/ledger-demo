@@ -1,0 +1,375 @@
+[
+  {
+    "name": "the same body",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "the IBAN in paper format and lower case",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "de75 5121 0800 1245 1261 99",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "the IBAN with no-break spaces",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75\u00a05121\u00a00800\u00a01245\u00a01261\u00a099",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "creditor_name with spaces around it",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "  Jane Doe  ",
+        "remittance_info": "Rent October"
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "remittance_info with spaces around it",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": " Rent October "
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "remittance_info absent and null",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": null
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "remittance_info absent and empty",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": ""
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "remittance_info null and only spaces",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": null
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "   "
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "remittance_info empty and only spaces",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": ""
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "  "
+      }
+    },
+    "ok": true,
+    "value": []
+  },
+  {
+    "name": "a different amount",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2501",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      }
+    },
+    "ok": true,
+    "value": [
+      "amount_minor"
+    ]
+  },
+  {
+    "name": "a different IBAN",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "FR7630006000011234567890189",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      }
+    },
+    "ok": true,
+    "value": [
+      "creditor_iban"
+    ]
+  },
+  {
+    "name": "a different creditor_name",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "John Doe",
+        "remittance_info": "Rent October"
+      }
+    },
+    "ok": true,
+    "value": [
+      "creditor_name"
+    ]
+  },
+  {
+    "name": "creditor_name differing only in case",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "jane doe",
+        "remittance_info": "Rent October"
+      }
+    },
+    "ok": true,
+    "value": [
+      "creditor_name"
+    ]
+  },
+  {
+    "name": "creditor_name differing only in inner spaces",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane  Doe",
+        "remittance_info": "Rent October"
+      }
+    },
+    "ok": true,
+    "value": [
+      "creditor_name"
+    ]
+  },
+  {
+    "name": "a different remittance_info",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent November"
+      }
+    },
+    "ok": true,
+    "value": [
+      "remittance_info"
+    ]
+  },
+  {
+    "name": "remittance_info given and absent",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe"
+      }
+    },
+    "ok": true,
+    "value": [
+      "remittance_info"
+    ]
+  },
+  {
+    "name": "every field but currency differing (fields in compare order)",
+    "input": {
+      "a": {
+        "amount_minor": "2500",
+        "currency": "EUR",
+        "creditor_iban": "DE75512108001245126199",
+        "creditor_name": "Jane Doe",
+        "remittance_info": "Rent October"
+      },
+      "b": {
+        "amount_minor": "1",
+        "currency": "EUR",
+        "creditor_iban": "FR7630006000011234567890189",
+        "creditor_name": "John Doe",
+        "remittance_info": null
+      }
+    },
+    "ok": true,
+    "value": [
+      "amount_minor",
+      "creditor_iban",
+      "creditor_name",
+      "remittance_info"
+    ]
+  }
+]

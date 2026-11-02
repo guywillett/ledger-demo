@@ -1,0 +1,8 @@
+# Only what the build needs goes into the context: the sources, go.mod and go.sum.
+.golangci.yml
+.golangci-lint-version
+.govulncheck-version
+*_test.go
+internal/*test/
+Dockerfile
+.dockerignore

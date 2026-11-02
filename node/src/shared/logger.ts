@@ -16,7 +16,9 @@ export function createLogger(
 ): Logger {
   const pinoOptions: pino.LoggerOptions = {
     level: options.level,
-    base: { service: options.service },
+    // implementation: which implementation wrote the line (slice 3 decision 51), as the Go
+    // implementation's lines say "go", so a mixed stack's logs say who did what.
+    base: { service: options.service, implementation: 'node' },
     timestamp: pino.stdTimeFunctions.isoTime,
     // Errors are left alone by the log formatter below (it walks plain objects only), and
     // pino's err serializer runs after it, copying the error's own properties: a BigInt

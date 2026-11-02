@@ -144,7 +144,7 @@ export async function recordNotification(
       `notification ${notification.networkTransactionId} was refused, but no deposit holds it`,
     );
   }
-  const differingFields = compare(stored, notification);
+  const differingFields = differingDepositFields(stored, notification);
   if (differingFields.length === 0) {
     return { kind: 'inconsistent', stored };
   }
@@ -181,8 +181,14 @@ async function readStoredDetails(
   };
 }
 
-// Must compare exactly the fields the upsert's ON CONFLICT … WHERE compares.
-function compare(stored: StoredDetails, notification: Notification): ComparedField[] {
+// The fields in which a repeated notification differs from the stored deposit ([] = a duplicate).
+// Must compare exactly the fields the upsert's ON CONFLICT … WHERE compares. Exported for the
+// tests and the shared vectors (contracts/vectors/deposit-same-details.json), which pin the rule
+// for both implementations.
+export function differingDepositFields(
+  stored: Pick<StoredDetails, 'creditorIban' | 'amountMinor' | 'currency'>,
+  notification: Pick<Notification, 'creditorIban' | 'amountMinor' | 'currency'>,
+): ComparedField[] {
   const fields: ComparedField[] = [];
   if (stored.creditorIban !== notification.creditorIban) fields.push('creditor_iban');
   if (stored.amountMinor !== notification.amountMinor) fields.push('amount_minor');

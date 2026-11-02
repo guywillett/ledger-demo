@@ -19,7 +19,8 @@
 # 10. more than available                      -> 422, nothing stored
 # 11. SIM FAIL (the provider fails it)          -> ends failed, funds back in available
 # 12. SIM EARLY (the result overtakes us)       -> ends executed, applied once
-# 13. SIM SLOW with the submitter killed mid-call and restarted -> ends executed, applied once
+# 13. SIM SLOW with the submitter killed mid-call and restarted -> ends executed, applied once,
+#     and the restarted submitter makes no second call
 # and finally reconciles: exit 0 only if the books agree and nothing is stuck (deposits,
 # withdrawals held or submitted, unpublished events).
 #
@@ -113,6 +114,31 @@ wait_transfer_created() {
     sleep 0.5
   done
   return 1
+}
+
+# submitter_found_executed <withdrawal id>: waits (60 s at most: ack_wait, 30 s, and more) until
+# the submitter has logged finding the withdrawal executed (the line with its withdrawal_id and
+# status executed), and prints that line's delivery_attempt; nothing if it never did. By log
+# fields, the same in both implementations, not by message text.
+submitter_found_executed() {
+  local deadline=$((SECONDS + 60)) line
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    line=$(docker compose logs --no-log-prefix submitter 2>/dev/null |
+      grep "\"withdrawal_id\":\"$1\"" | grep '"status":"executed"' | head -1 || true)
+    if [ -n "$line" ]; then
+      printf '%s' "$line" | grep -o '"delivery_attempt":[0-9]*' | sed 's/.*://'
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+# provider_calls <withdrawal id>: how many transfer requests provider-sim has logged for the
+# withdrawal (its reference): the first ("transfer created") and any repeat ("repeated transfer
+# request"). Its whole history only while it is the same container.
+provider_calls() {
+  docker compose logs --no-log-prefix provider-sim 2>/dev/null | grep "\"reference\":\"$1\"" |
+    grep -cE '"msg":"(transfer created|repeated transfer request)"' || true
 }
 
 # fund <account> <iban> <minimum>: posts deposits of 2000 to the account, each waited on until the
@@ -211,13 +237,18 @@ sleep 1
 docker compose kill -s SIGKILL deposit-worker > /dev/null 2>&1
 echo "   deposit-worker killed (SIGKILL): unacknowledged messages are redelivered after ack_wait (10 s)"
 sleep 2
-docker compose up -d deposit-worker > /dev/null 2>&1
+# --no-deps here and on every up below: start this one service, never its dependencies. Without it
+# compose may recreate a dependency, and provider-sim keeps its transfers in memory (step 13). It
+# does so after an up --build whose parallel builds of the shared ledger-demo-node image leave
+# each container's com.docker.compose.image label naming a build other than the tagged one: the
+# next up sees a changed image (seen with Compose v2.18).
+docker compose up -d --no-deps deposit-worker > /dev/null 2>&1
 echo "   deposit-worker restarted"
 
 say "6. A burst of deposits shared by two workers"
 # Back to one deposit-worker however the script ends (set -e can stop it anywhere from here).
-trap 'docker compose up -d --scale deposit-worker=1 deposit-worker > /dev/null 2>&1' EXIT
-docker compose up -d --scale deposit-worker=2 --no-recreate deposit-worker > /dev/null 2>&1
+trap 'docker compose up -d --no-deps --scale deposit-worker=1 deposit-worker > /dev/null 2>&1' EXIT
+docker compose up -d --no-deps --scale deposit-worker=2 --no-recreate deposit-worker > /dev/null 2>&1
 for i in $(seq 1 20); do post "$RUN-scaled-$i" "$BOB_IBAN" $((10 * i)) > /dev/null; done
 echo "   20 deposits posted to two workers"
 
@@ -243,7 +274,9 @@ before=$(balance "$CAROL" available)
 response=$(withdraw "$CAROL" "$RUN-wd-1" 700 "Rent October")
 expect "created" 201 "${response##*$'\n'}"
 withdrawal=$(field "${response%$'\n'*}" id)
-contains "with its Location" "location: /withdrawals/$withdrawal" "$(tr -d '\r' < "$headers")"
+# Header names are case-insensitive (RFC 9110 5.1): Node sends "location", Go "Location".
+# Lowercased whole (TypeIDs are lowercase already).
+contains "with its Location" "location: /withdrawals/$withdrawal" "$(tr -d '\r' < "$headers" | tr 'A-Z' 'a-z')"
 expect "ends executed" executed "$(field "$(wait_final "$withdrawal")" status)"
 expect "available down by the amount" $((before - 700)) "$(balance "$CAROL" available)"
 expect "nothing left held" 0 "$(balance "$CAROL" held)"
@@ -283,15 +316,18 @@ say "13. The submitter killed during a slow provider call (SIM SLOW), then resta
 # the webhook (after SIM_EXECUTION_DELAY_MS, 2 s) before the killed submitter's message is
 # redelivered (after ack_wait, 30 s), so the withdrawal is executed while the submitter is down,
 # and the restarted submitter finds it executed and makes no call. Nothing is lost and nothing is
-# applied twice. The same-key retry of an unknown outcome is proven elsewhere:
-# test/submitter/provider.test.ts ("maps a timeout to unknown, and the next call with the same key
-# gets the same, single transfer") and test/e2e/submitter.e2e.ts ("retries a 503 with the same
-# key and executes it (SIM ERROR)").
+# applied twice. Checked: the restarted submitter's first delivery (attempt 2, after the killed
+# attempt 1) finds it executed, so it made no call; and provider-sim, the same container
+# throughout (so its log is its whole history), logged one call for it. The same-key retry of an
+# unknown outcome is proven elsewhere: test/submitter/provider.test.ts ("maps a timeout to
+# unknown, and the next call with the same key gets the same, single transfer") and
+# test/e2e/submitter.e2e.ts ("retries a 503 with the same key and executes it (SIM ERROR)").
 #
 # The kill waits for provider-sim to have created the transfer, rather than a fixed delay: on a
 # slow machine the submitter may not have made the call yet, and killing it before the call shows
 # something else (a redelivery after ack_wait). wait_final allows more than ack_wait anyway.
 before=$(balance "$CAROL" available)
+provider_sim=$(docker compose ps -q provider-sim)
 response=$(withdraw "$CAROL" "$RUN-wd-5" 400 "SIM SLOW")
 expect "created" 201 "${response##*$'\n'}"
 withdrawal=$(field "${response%$'\n'*}" id)
@@ -303,10 +339,15 @@ else
 fi
 docker compose kill -s SIGKILL submitter > /dev/null 2>&1
 echo "   submitter killed (SIGKILL) during the call"
-docker compose up -d submitter > /dev/null 2>&1
+docker compose up -d --no-deps submitter > /dev/null 2>&1
 echo "   submitter restarted"
 expect "ends executed" executed "$(field "$(wait_final "$withdrawal" 60)" status)"
 expect "applied once" "$((before - 400))/0" "$(balance "$CAROL" available)/$(balance "$CAROL" held)"
+expect "the restarted submitter's first delivery found it executed (attempt)" 2 \
+  "$(submitter_found_executed "$withdrawal")"
+expect "provider-sim kept its transfers (the same container)" "$provider_sim" \
+  "$(docker compose ps -q provider-sim)"
+expect "one call to the provider" 1 "$(provider_calls "$withdrawal")"
 
 say "Reconciliation"
 echo "   (deliveries left in_progress are the trace of the killed deposit-worker and submitter: each redelivery got its own row)"

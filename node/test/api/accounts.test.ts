@@ -3,9 +3,11 @@ import { decide, startReview } from '../../src/compliance/transitions.ts';
 import type { Decision } from '../../src/compliance/decision.ts';
 import type { Deposit } from '../../src/deposits/deposits.ts';
 import { book, postDecision } from '../../src/ledger/posting.ts';
-import { withTransaction } from '../../src/shared/db.ts';
+import { buildApp } from '../../src/api/app.ts';
+import { createPool, withTransaction } from '../../src/shared/db.ts';
 import { newUuid, toTypeId } from '../../src/shared/ids.ts';
 import {
+  capturingLogger,
   createTestAccount,
   createTestApp,
   createTestDeposit,
@@ -206,5 +208,34 @@ describe('GET /accounts/:id/transactions', () => {
       TRANSACTIONS,
     );
     expect(response.statusCode).toBe(200);
+  });
+});
+
+describe('an unexpected error on a GET', () => {
+  // The database unreachable (a pool on a port nothing listens on): the error handler's 500
+  // problem, which the contract documents for the GET operations too (getJson checks it).
+  it('answers 500 with a problem', async () => {
+    const own = capturingLogger();
+    const pool = createPool({
+      databaseUrl: 'postgres://ledger:ledger@127.0.0.1:1/none_test',
+      logger: own.logger,
+    });
+    const broken = buildApp({ pool, logger: own.logger });
+    try {
+      const response = await getJson(
+        broken,
+        `/accounts/${toTypeId('acct', newUuid('acct'))}/balance`,
+        BALANCE,
+      );
+      expect(response.statusCode).toBe(500);
+      expect(response.json).toEqual({
+        type: 'about:blank',
+        title: 'Internal Server Error',
+        status: 500,
+      });
+    } finally {
+      await broken.close();
+      await pool.end();
+    }
   });
 });

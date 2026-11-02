@@ -1,0 +1,151 @@
+// Package config reads each process's configuration from environment variables, with the same
+// names and defaults as the Node implementation (node/src/shared/config.ts), so either
+// implementation runs from the same compose file.
+//
+// Every problem is collected and reported together at start-up, as Node's Zod parse does,
+// rather than stopping at the first. A process builds its own struct from the shared parts:
+//
+//	p := config.NewParser(os.LookupEnv)
+//	cfg := depositWorkerConfig{Shared: config.ParseShared(p), NATS: config.ParseNATS(p), ...}
+//	if err := p.Err(); err != nil { ... }
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+// LogLevels are the accepted values of LOG_LEVEL: pino's level names, as in Node.
+var LogLevels = []string{"fatal", "error", "warn", "info", "debug", "trace", "silent"}
+
+// Shared is the configuration of every long-running process that uses the database (the API,
+// the relay, the deposit-worker and the submitter).
+type Shared struct {
+	DatabaseURL string
+	LogLevel    string
+}
+
+// NATS is the configuration of every process that connects to NATS (the relay, the
+// deposit-worker and the submitter).
+type NATS struct {
+	URL string
+}
+
+// ParseShared reads DATABASE_URL (required) and LOG_LEVEL (default info).
+func ParseShared(p *Parser) Shared {
+	return Shared{
+		DatabaseURL: p.URL("DATABASE_URL"),
+		LogLevel:    p.OneOf("LOG_LEVEL", "info", LogLevels),
+	}
+}
+
+// ParseNATS reads NATS_URL (required).
+func ParseNATS(p *Parser) NATS {
+	return NATS{URL: p.URL("NATS_URL")}
+}
+
+// Lookup reads one environment variable, reporting whether it is set at all: os.LookupEnv in
+// a process, a map's lookup in tests. Set-but-empty is not the same as unset: as in Node, a
+// default applies only to an unset variable, and an empty value is checked like any other.
+type Lookup func(name string) (value string, ok bool)
+
+// Parser reads variables one at a time and remembers every problem; Err reports them all.
+// Each method returns the zero value for a variable it rejects, so parsing carries on.
+type Parser struct {
+	lookup Lookup
+	errs   []error
+}
+
+// NewParser returns a Parser reading from lookup (usually os.LookupEnv).
+func NewParser(lookup Lookup) *Parser {
+	return &Parser{lookup: lookup}
+}
+
+// URL reads a required absolute URL (it must have a scheme, e.g. postgres:// or nats://).
+//
+// Node's z.url() parses with the WHATWG URL parser, Go's net/url is more lenient; both accept
+// every URL compose and the docs use. The value is never echoed in the error: a database URL
+// carries a password.
+func (p *Parser) URL(name string) string {
+	value, ok := p.lookup(name)
+	if !ok {
+		p.Fail(name, "is required")
+		return ""
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" {
+		p.Fail(name, "must be an absolute URL")
+		return ""
+	}
+	return value
+}
+
+// OneOf reads a variable that must be one of allowed, or def when it is unset.
+func (p *Parser) OneOf(name, def string, allowed []string) string {
+	value, ok := p.lookup(name)
+	if !ok {
+		return def
+	}
+	if !slices.Contains(allowed, value) {
+		p.Fail(name, "must be one of "+strings.Join(allowed, ", "))
+		return ""
+	}
+	return value
+}
+
+// Int reads a whole number in [lo, hi], or def when the variable is unset.
+//
+// Stricter than Node, which coerces with JavaScript's Number() (z.coerce.number()), so PORT="3e3"
+// or "0xBB8" would mean 3000 there: here only decimal digits (with an optional sign) are a number.
+// Operators set these in compose and the docs, always in decimal.
+func (p *Parser) Int(name string, def, lo, hi int) int {
+	value, ok := p.lookup(name)
+	if !ok {
+		return def
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < lo || n > hi {
+		p.Fail(name, fmt.Sprintf("must be a whole number from %d to %d", lo, hi))
+		return 0
+	}
+	return n
+}
+
+// decimal is what Float accepts: decimal digits, optionally a fraction, optionally a sign.
+var decimal = regexp.MustCompile(`^[+-]?[0-9]+(\.[0-9]+)?$`)
+
+// Float reads a number in [lo, hi], or def when the variable is unset. As strict as Int: only a
+// decimal number (0.8, 1, 0.25) is one; Node's Number() would also take ".5", "8e-1" or "0x0".
+func (p *Parser) Float(name string, def, lo, hi float64) float64 {
+	value, ok := p.lookup(name)
+	if !ok {
+		return def
+	}
+	f, err := strconv.ParseFloat(value, 64)
+	if !decimal.MatchString(value) || err != nil || f < lo || f > hi {
+		p.Fail(name, fmt.Sprintf("must be a number from %g to %g", lo, hi))
+		return 0
+	}
+	return f
+}
+
+// Fail records a problem found by the process itself, for a rule across variables (Zod's .refine
+// in Node): call it only when Err is still nil, as Zod runs a refinement only on values that
+// passed. The message is the variable's name followed by problem, like every other.
+func (p *Parser) Fail(name, problem string) {
+	p.errs = append(p.errs, fmt.Errorf("%s %s", name, problem))
+}
+
+// Err returns nil if every variable read so far was valid, or one error listing every problem,
+// one per line.
+func (p *Parser) Err() error {
+	if len(p.errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("invalid configuration:\n%w", errors.Join(p.errs...))
+}

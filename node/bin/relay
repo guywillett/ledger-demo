@@ -1,0 +1,5 @@
+#!/usr/bin/env node
+// The relay, as the image's command: the Go binary's name too, so compose runs either
+// implementation with command: ["relay"]. No shell: the kernel runs this file with node (the
+// shebang), so node is the process compose starts, and gets SIGTERM itself.
+import '../src/relay/main.ts';

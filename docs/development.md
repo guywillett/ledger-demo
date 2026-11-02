@@ -12,15 +12,19 @@ Everything runs under Docker Compose. Requires Docker with Compose v2 (`docker c
 | `nats` | NATS with JetStream | `4222` (clients), `8222` (monitoring) |
 | `migrate` | dbmate: applies `db/migrations/` and exits | — |
 | `migrate-test` | the same migrations against the test database `ledger_test` | — |
+| `migrate-go-test` | the same migrations against the Go tests' database `ledger_go_test` | — |
+| `migrate-go-relay-test` | the same again against `ledger_go_relay_test`, the Go outbox and relay tests' own database | — |
 | `nats-setup` | nats-box: applies the stream and consumer definitions in `nats/` and exits | — |
-| `api` | the Node API (`node/`, image `ledger-demo-node`); Postgres only, no NATS | `3000` |
-| `relay` | the Node relay (same image): publishes the outbox to JetStream (`DEPOSITS`, `WITHDRAWALS`) | — |
-| `deposit-worker` | the Node deposit-worker (same image): books, reviews and posts deposits | — |
-| `submitter` | the Node submitter (same image): sends each held withdrawal to the provider | — |
+| `api` | the API, Node or Go (`API_IMPL`; image `ledger-demo-node` or `ledger-demo-go`, see *Mixing implementations*); Postgres only, no NATS | `3000` |
+| `relay` | the relay, Node or Go (`RELAY_IMPL`): publishes the outbox to JetStream (`DEPOSITS`, `WITHDRAWALS`) | — |
+| `deposit-worker` | the deposit-worker, Node or Go (`DEPOSIT_WORKER_IMPL`): books, reviews and posts deposits | — |
+| `submitter` | the submitter, Node or Go (`SUBMITTER_IMPL`): sends each held withdrawal to the provider | — |
 | `nats-test` | a separate NATS for the tests, so test events never reach the development stream | `4223`, `8223` |
 | `nats-setup-test` | the same definitions applied to `nats-test` | — |
 | `provider-sim` | a fake BaaS provider (same image): accepts SEPA transfers, reports their results by webhook; failures by trigger (see *Fake provider*) | `4000` |
 | `reconcile` | reconciliation on demand (`docker compose run --rm reconcile`); not started by `up` (profile `tools`) | — |
+| `deposit-worker-other` | a second deposit-worker on the same durable consumer, in `DEPOSIT_WORKER_OTHER_IMPL` (go by default); profile `shared-consumer`, started by `scripts/shared-consumer.sh` | — |
+| `api-other` | a second API on the same database, in `API_OTHER_IMPL` (go by default); profile `differential`, started by `scripts/differential.sh` | `3001` |
 
 Connection details from the host:
 
@@ -35,7 +39,7 @@ Compose prefixes everything with the project name `ledger-demo`, so containers a
 
 ```sh
 docker compose up -d            # start everything in the background (migrations and streams set up automatically)
-docker compose up -d --build    # the same, rebuilding the Node image after code changes
+docker compose up -d --build    # the same, rebuilding the images after code changes
 docker compose ps -a            # status; `migrate` and `nats-setup` should show "Exited (0)"
 docker compose logs -f          # follow all logs (or: docker compose logs -f nats)
 docker compose stop             # stop containers, keep them and their data
@@ -45,6 +49,29 @@ docker compose down             # remove containers and network; data volumes ar
 `migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits; `nats-setup` does the same for the JetStream streams once NATS is healthy. It's normal for both to show as exited. The `api` starts only after `migrate` has succeeded; the `relay`, `deposit-worker` and `submitter` after both (the `submitter` also after `provider-sim` has started).
 
 There's no health endpoint yet (see *Known gaps* in the slice spec); `docker compose logs api` shows "Server listening" once it's up.
+
+## Mixing implementations
+
+Each of the four services runs Node unless its variable says `go` (slice 3 decision 51):
+
+| Variable | Service |
+|---|---|
+| `API_IMPL` | `api` |
+| `RELAY_IMPL` | `relay` |
+| `DEPOSIT_WORKER_IMPL` | `deposit-worker` |
+| `SUBMITTER_IMPL` | `submitter` |
+
+The variable picks the build directory (`node/` or `go/`) and the image (`ledger-demo-node` or `ledger-demo-go`); the command, environment, ports and grace periods are the same either way, and provider-sim and reconciliation are always Node.
+
+```sh
+export API_IMPL=go RELAY_IMPL=go     # or put them in .env (git-ignored), which compose reads
+docker compose up -d --build         # --build when switching: builds the image a service now needs
+scripts/wait-for-stack.sh migrate nats-setup   # optional: until the setup has run and the API answers
+scripts/demo.sh
+docker compose logs relay | grep -o '"implementation":"[a-z]*"' | sort -u   # which one ran
+```
+
+Every compose command needs the same variables, the scripts' own included (`demo.sh` restarts services with `docker compose up -d`): a command run without them recreates the service it touches as Node. Exporting them in the shell, or `.env`, keeps them consistent. Every log line has an `implementation` field, `node` or `go`.
 
 ## Streams and consumers
 
@@ -174,6 +201,17 @@ docker compose run --rm reconcile --stuck-after 0                       # from c
 
 Exit code `0` means the books agree, `1` that they disagree, `2` stuck deposits, withdrawals or events with `--fail-on-stuck`, `3` that it couldn't run. Suspense and conflicts never fail it: they are a person's job, not inconsistent books. Run against `ledger_test` it reports differences by design: some tests leave deliberate inconsistencies behind.
 
+## The demo
+
+`scripts/demo.sh` exercises the running stack the way the slices' *Done when* lists describe (duplicates, conflicts, suspense, a deposit-worker killed mid-review, two workers; withdrawal repeats, insufficient funds, provider failures, the submitter killed mid-call), then reconciles. Its header comment lists each step. It exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (deposits, withdrawals held or submitted, unpublished events); `1` if an expectation failed or the books disagree, `2` if something didn't finish within the wait, or carol (the account the withdrawals use) couldn't be funded; `3` if it couldn't run. The final check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so the same script runs against any stack. It takes about a minute.
+
+## Checks across implementations
+
+Two scripts beside the demo, each against the running stack, with the demo's exit codes (`0` all good, `1` an expectation failed, `3` couldn't run; `shared-consumer.sh` also `2`, deposits unfinished after the wait). Each works out the other implementation from the running service's variable, starts its extra service under its own profile, and removes it however it ends.
+
+- **`scripts/shared-consumer.sh`:** starts `deposit-worker-other` (the opposite of `DEPOSIT_WORKER_IMPL`) on the same durable consumer, posts a burst of 30 deposits, and checks from the two workers' logs that both processed some and none was processed twice; then reconciles. Run it on any stack, after `up -d`; it adds its own deposits.
+- **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: balances, every page of each demo account's transactions (each cursor used on the other implementation too), query-parameter edge cases, withdrawals in each final status, unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
+
 ## Node
 
 The Node.js implementation lives in `node/`. The Node version is in `.nvmrc` (major version only); `package.json` `engines` and `engine-strict` in `node/.npmrc` make npm refuse other majors.
@@ -278,6 +316,32 @@ npm run lint                    # oxlint, including type-aware rules
 - Exported functions must declare parameter and return types (`explicit-module-boundary-types`; not enforced in tests).
 - A `switch` over a union type must list every member (`switch-exhaustiveness-check`); a `default:` alone doesn't count, so adding a new status flags every switch that misses it.
 - Editor: install the Prettier and oxc extensions; `.editorconfig` at the repo root covers indentation and line endings for all languages.
+
+## Go
+
+The Go implementation lives in `go/` (slice 3; the conventions are in `CLAUDE.md`). Install any Go 1.21 or later: `go.mod` pins the toolchain (`toolchain go1.27.3`), and with `GOTOOLCHAIN=auto`, the default, `go` downloads and uses that version by itself. Check with `go env GOTOOLCHAIN` (it should print `auto`) and, in `go/`, `go version` (it should print go1.27.3).
+
+golangci-lint is installed as a release binary, at the version pinned in `go/.golangci-lint-version` (the same file CI reads); golangci-lint's docs advise against `go install` and the `tool` directive (see `go/.golangci.yml`):
+
+```sh
+cd go
+curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b "$(go env GOPATH)/bin" "$(cat .golangci-lint-version)"
+```
+
+The install script itself is fetched unpinned (golangci-lint's documented method), but the version it installs is pinned; CI uses the SHA-pinned golangci-lint action instead.
+
+```sh
+cd go
+gofmt -l .                      # list files gofmt would change (gofmt -w . rewrites them)
+go vet ./...                    # the compiler's own static checks
+golangci-lint run               # the linters in .golangci.yml
+go test -race ./...             # every package's tests, with the race detector (needs `docker compose up -d`)
+go test -run TestCommits ./internal/db/   # one test
+```
+
+govulncheck reports known vulnerabilities that the code can actually reach (in the toolchain or a dependency), and CI fails on any. It has no release binaries; `go install` builds it at the version in `go/.govulncheck-version`, outside this module (it doesn't touch `go.mod`): `go install "golang.org/x/vuln/cmd/govulncheck@$(cat .govulncheck-version)"`, then `govulncheck ./...` in `go/`.
+
+The tests run against their own database, `ledger_go_test` (migrated by `migrate-go-test`), never `ledger` or Node's `ledger_test`. The outbox and relay tests have one of their own, `ledger_go_relay_test` (migrated by `migrate-go-relay-test`): claiming takes the oldest unpublished events in the whole table, so they mustn't see the events other packages' tests leave behind, and the two packages take turns on it (a Postgres advisory lock held for each package's run; see `internal/testdb`). `TEST_DATABASE_URL` and `TEST_RELAY_DATABASE_URL` point them elsewhere, `TEST_NATS_URL` the NATS (default the compose `nats-test`); as in Node, the database names must end in `_test`. The Node and Go suites share the test NATS, so don't run them at the same time.
 
 ## Troubleshooting
 

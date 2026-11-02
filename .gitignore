@@ -1,0 +1,2 @@
+# Local compose settings (e.g. the *_IMPL variables, see docker-compose.yml): per machine.
+.env

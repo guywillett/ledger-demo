@@ -267,6 +267,14 @@ describe('POST /accounts/:account_id/withdrawals', () => {
       ['a misspelt (unknown) field', { remitance_info: 'Rent' }, 'key', ''],
       ['amount_minor "0"', { amount_minor: '0' }, 'key', 'amount_minor'],
       ['amount_minor as a number', { amount_minor: 400 }, 'key', 'amount_minor'],
+      // Decision 60: above the SEPA Credit Transfer maximum (a 500 before, from an overflow).
+      [
+        'amount_minor above the SEPA maximum',
+        { amount_minor: '100000000000' },
+        'key',
+        'amount_minor',
+      ],
+      ['the int8 maximum', { amount_minor: '9223372036854775807' }, 'key', 'amount_minor'],
       ['another currency', { currency: 'USD' }, 'key', 'currency'],
     ] as const)('for %s, storing nothing', async (_case, overrides, key, path) => {
       const account = await fundedAccount(1000n);

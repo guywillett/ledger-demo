@@ -1,6 +1,8 @@
 # Runs on every push (any branch) and on demand. Everything a reviewer would check by hand on
-# a clean clone: format, lint and types; the whole compose stack built from scratch; the
-# integration and e2e tests; and the demo, which ends by reconciling the books.
+# a clean clone: each implementation's format, lint, types and tests (jobs node and go); the whole
+# compose stack built from scratch and the demo, which ends by reconciling the books, on four
+# stacks mixing the implementations per service (job stack); and the opt-in byte-level comparison
+# of the two APIs (job differential).
 name: CI
 
 on:
@@ -16,7 +18,9 @@ permissions:
   contents: read
 
 jobs:
-  ci:
+  # The Node implementation: format, lint and types, then its integration and e2e tests against the
+  # test services (ledger_test and the test NATS).
+  node:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
@@ -40,24 +44,14 @@ jobs:
       - name: Check
         run: npm run check
 
-      # The whole stack from scratch, as from a clean clone: images built, migrations and stream
-      # definitions applied to both the development and the test services.
-      - name: Start the stack
+      # What the tests need: Postgres with the test database (ledger_test), and the test NATS with
+      # its streams. The e2e tests run their own provider-sim, relay and submitter as child
+      # processes; the images and the development stack are the stack jobs' work.
+      - name: Start the test services
         working-directory: .
         run: |
-          docker compose up -d --build
-          # The one-shot setup services must have finished successfully before anything runs.
-          # docker wait (not docker compose wait, which only sees running containers) returns the
-          # exit code whether the container is still running or has already exited.
-          for service in migrate migrate-test nats-setup nats-setup-test; do
-            code=$(docker wait "$(docker compose ps -a -q "$service")")
-            if [ "$code" != "0" ]; then
-              echo "$service exited with $code"
-              exit 1
-            fi
-          done
-          # The API is the last service to start; wait until it answers.
-          timeout 60 bash -c 'until curl -sf -o /dev/null localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance; do sleep 1; done'
+          docker compose up -d postgres nats-test migrate-test nats-setup-test
+          scripts/wait-for-stack.sh migrate-test nats-setup-test
 
       - name: Integration tests
         run: npm test
@@ -66,13 +60,200 @@ jobs:
       - name: End-to-end tests
         run: npm run test:e2e
 
-      # Against the development services: duplicates, conflicts, a killed deposit-worker, two
-      # workers, then reconciliation of the whole (fresh) database.
-      - name: Demo
+      - name: Service logs
+        if: failure()
         working-directory: .
-        run: scripts/demo.sh
+        run: docker compose logs --no-color --timestamps
+
+  # The Go implementation (slice 3): format, vet, lint and its tests against its own test database
+  # (ledger_go_test). A separate job, so it runs alongside the Node job without sharing the test
+  # NATS with it (decision 52).
+  go:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # go.mod's go and toolchain lines pick the Go version, as .nvmrc does for Node.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      # gofmt -l lists the files it would change; any at all fails the job.
+      - name: Format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Not formatted with gofmt (run gofmt -w .):"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # The release binary of the version in .golangci-lint-version (the same file the local
+      # install reads).
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          working-directory: go
+          version-file: .golangci-lint-version
+
+      # Known vulnerabilities in the Go toolchain and the dependencies, reported only when our code
+      # can reach the vulnerable function (its default, symbol-level scan): then it exits non-zero
+      # and fails the job. It has no release binaries, so it is built with go install at the
+      # version in .govulncheck-version (the same file the local command reads).
+      - name: Vulnerabilities
+        run: |
+          go install "golang.org/x/vuln/cmd/govulncheck@$(cat .govulncheck-version)"
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+      # What the tests need: Postgres with the Go test databases (ledger_go_test, and
+      # ledger_go_relay_test for the outbox and relay tests), and the test NATS with its streams.
+      - name: Start the test services
+        working-directory: .
+        run: |
+          docker compose up -d postgres nats-test migrate-go-test migrate-go-relay-test nats-setup-test
+          scripts/wait-for-stack.sh migrate-go-test migrate-go-relay-test nats-setup-test
+
+      # -race: the race detector, which fails a test when two goroutines touch the same memory
+      # without synchronisation.
+      - name: Test
+        run: go test -race ./...
 
       - name: Service logs
         if: failure()
         working-directory: .
         run: docker compose logs --no-color --timestamps
+
+  # The whole stack from scratch on each mix of implementations (slice 3 decision 51), then the
+  # demo: duplicates, conflicts, a killed deposit-worker, two workers, withdrawals through the
+  # submitter and provider-sim, and reconciliation of the whole (fresh) database. The two mixed
+  # legs cross every boundary (API -> outbox -> relay -> stream -> consumers) both ways.
+  stack:
+    name: demo (${{ matrix.label }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      # Every leg runs to the end: which stacks fail is the information.
+      fail-fast: false
+      matrix:
+        include:
+          - label: node
+            api: node
+            relay: node
+            deposit-worker: node
+            submitter: node
+          - label: go
+            api: go
+            relay: go
+            deposit-worker: go
+            submitter: go
+          # Also runs scripts/shared-consumer.sh (below): its Go relay feeds the Node
+          # deposit-worker and the Go deposit-worker-other the script adds, so the burst crosses
+          # Go -> Node and Go -> Go in one run. One leg is enough: the script always pairs a Node
+          # and a Go worker, whichever leg runs it.
+          - label: "mixed: go api, relay"
+            api: go
+            relay: go
+            deposit-worker: node
+            submitter: node
+            shared-consumer: true
+          - label: "mixed: go deposit-worker, submitter"
+            api: node
+            relay: node
+            deposit-worker: go
+            submitter: go
+    # Every docker compose command in the job (the demo's included) reads these, so each service
+    # keeps its implementation when a script restarts it.
+    env:
+      API_IMPL: ${{ matrix.api }}
+      RELAY_IMPL: ${{ matrix.relay }}
+      DEPOSIT_WORKER_IMPL: ${{ matrix.deposit-worker }}
+      SUBMITTER_IMPL: ${{ matrix.submitter }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Start the stack
+        run: |
+          docker compose up -d --build
+          scripts/wait-for-stack.sh migrate nats-setup
+
+      # The leg proves it runs what its label says. A typo in a matrix key or in the env above gives
+      # an empty variable (a missing matrix property is an empty string, not an error), which
+      # compose's ${…:-node} quietly turns into Node: the leg would pass, testing the wrong stack.
+      # The expected values come from the matrix directly, not from the job's env, so a typo on
+      # either side is caught; an expected value that isn't node or go fails too. Each service's
+      # first log line names its implementation (the workers log theirs just after starting, hence
+      # the retry), and the step prints what ran.
+      - name: Check each service's implementation
+        env:
+          EXPECTED: >-
+            api=${{ matrix.api }} relay=${{ matrix.relay }}
+            deposit-worker=${{ matrix.deposit-worker }} submitter=${{ matrix.submitter }}
+        run: |
+          summary=""
+          for pair in $EXPECTED; do
+            service=${pair%%=*}
+            want=${pair#*=}
+            case "$want" in
+              node | go) ;;
+              *) echo "$service: the expected implementation is '$want', not node or go"; exit 1 ;;
+            esac
+            got=""
+            for _ in $(seq 1 30); do
+              got=$(docker compose logs --no-log-prefix "$service" 2>/dev/null |
+                grep -m1 -o '"implementation":"[a-z]*"' | sed 's/.*:"//; s/"//' || true)
+              [ -n "$got" ] && break
+              sleep 1
+            done
+            if [ "$got" != "$want" ]; then
+              echo "$service runs ${got:-nothing logged}, expected $want"
+              exit 1
+            fi
+            summary="$summary${summary:+, }$service: $got"
+          done
+          echo "$summary"
+
+      - name: Demo
+        run: scripts/demo.sh
+
+      # A Node and a Go deposit-worker sharing one durable consumer during a burst.
+      - name: Shared consumer
+        if: matrix.shared-consumer
+        run: scripts/shared-consumer.sh
+
+      - name: Service logs
+        if: failure()
+        run: docker compose --profile shared-consumer logs --no-color --timestamps
+
+  # Opt-in (slice 3 decision 61): the byte-level comparison of the two APIs (equivalence level 3,
+  # not required). Delete this job to stop running it; nothing else depends on it.
+  #
+  # The all-Node stack and the demo (for data in every final status), then scripts/differential.sh
+  # with api-other in Go. One direction is enough: each request goes to both APIs and is compared
+  # both ways; the other direction would only swap which one serves the demo.
+  differential:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Start the stack
+        run: |
+          docker compose up -d --build
+          scripts/wait-for-stack.sh migrate nats-setup
+
+      - name: Demo
+        run: scripts/demo.sh
+
+      - name: Differential check
+        run: scripts/differential.sh
+
+      - name: Service logs
+        if: failure()
+        run: docker compose --profile differential logs --no-color --timestamps

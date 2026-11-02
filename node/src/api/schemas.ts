@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import { toTypeId, type TypeIdString } from '../shared/ids.ts';
 import {
-  amountMinorSchema,
   ibanSchema,
   optionalSepaTextSchema,
+  sepaAmountSchema,
   sepaTextSchema,
   typeIdSchema,
 } from '../shared/schemas.ts';
@@ -113,7 +113,8 @@ export const idempotencyKeyHeadersSchema = z.object({
 // own client's request to move money, so a misspelt optional field (remitance_info) must fail
 // rather than be silently dropped (slice 2 decision 33).
 export const withdrawalBodySchema = z.strictObject({
-  amount_minor: amountMinorSchema,
+  // At most the SEPA Credit Transfer maximum (decision 60).
+  amount_minor: sepaAmountSchema,
   currency: z.literal('EUR'),
   creditor_iban: ibanSchema,
   // SEPA: required, at most 70 characters, the basic character set (decision 32).
