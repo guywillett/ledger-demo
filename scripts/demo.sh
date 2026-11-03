@@ -190,8 +190,8 @@ reconcile() {
   docker compose run --rm --no-deps reconcile "$@"
 }
 
-curl -sf -o /dev/null "$API/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance" ||
-  { echo "The API isn't answering at $API: run docker compose up -d --build first."; exit 3; }
+curl -sf -o /dev/null "$API/health" ||
+  { echo "The API isn't ready at $API: run docker compose up -d --build first."; exit 3; }
 
 say "1. The same notification 5 times"
 codes=""

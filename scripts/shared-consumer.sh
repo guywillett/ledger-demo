@@ -62,8 +62,8 @@ expect() {
   fi
 }
 
-curl -sf -o /dev/null "$API/accounts/$ALICE/balance" ||
-  { echo "The API isn't answering at $API: run docker compose up -d --build first."; exit 3; }
+curl -sf -o /dev/null "$API/health" ||
+  { echo "The API isn't ready at $API: run docker compose up -d --build first."; exit 3; }
 
 say "Starting a $other_impl deposit-worker beside the $main_impl one, on the same consumer"
 # However the script ends, stop and remove it again: the stack is left as it was found.

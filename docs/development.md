@@ -48,7 +48,11 @@ docker compose down             # remove containers and network; data volumes ar
 
 `migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits; `nats-setup` does the same for the JetStream streams once NATS is healthy. It's normal for both to show as exited. The `api` starts only after `migrate` has succeeded; the `relay`, `deposit-worker` and `submitter` after both (the `submitter` also after `provider-sim` has started).
 
-There's no health endpoint yet (see *Known gaps* in the slice spec); `docker compose logs api` shows "Server listening" once it's up.
+The API is ready when `GET /health` answers `200` with `{"status":"ok"}`: it runs `SELECT 1` on the database and answers `503` with a problem (`urn:ledger-demo:problem:not-ready`) if the database doesn't answer within 1 s (slice 4 decision 72). The scripts (`wait-for-stack.sh`, the demo and the cross-implementation checks) wait on it. Only a failing check is logged (an error line with its cause, then the access line), so probes don't fill the access log. The workers have no HTTP surface: `docker compose logs <service>` shows each one's "started" line.
+
+```sh
+curl -i localhost:3000/health
+```
 
 ## Mixing implementations
 
@@ -210,7 +214,7 @@ Exit code `0` means the books agree, `1` that they disagree, `2` stuck deposits,
 Two scripts beside the demo, each against the running stack, with the demo's exit codes (`0` all good, `1` an expectation failed, `3` couldn't run; `shared-consumer.sh` also `2`, deposits unfinished after the wait). Each works out the other implementation from the running service's variable, starts its extra service under its own profile, and removes it however it ends.
 
 - **`scripts/shared-consumer.sh`:** starts `deposit-worker-other` (the opposite of `DEPOSIT_WORKER_IMPL`) on the same durable consumer, posts a burst of 30 deposits, and checks from the two workers' logs that both processed some and none was processed twice; then reconciles. Run it on any stack, after `up -d`; it adds its own deposits.
-- **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: balances, every page of each demo account's transactions (each cursor used on the other implementation too), query-parameter edge cases, withdrawals in each final status, unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
+- **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: the health check, balances, every page of each demo account's transactions (each cursor used on the other implementation too), query-parameter edge cases, withdrawals in each final status, unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
 
 ## Node
 

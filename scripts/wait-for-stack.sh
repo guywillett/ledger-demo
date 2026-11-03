@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Waits until a just-started compose stack is ready: each named one-shot setup service (migrate,
-# nats-setup, …) has exited successfully, then, if the api service is running, until it answers.
+# nats-setup, …) has exited successfully, then, if the api service is running, until it is ready
+# (GET /health).
 #
 #   docker compose up -d --build && scripts/wait-for-stack.sh migrate nats-setup
 #
 # Used by CI's jobs (each names the setup services it started) and usable locally. Exit codes: 0
-# ready; 1 a setup service failed, or the API didn't answer within 60 s.
+# ready; 1 a setup service failed, or the API wasn't ready within 60 s.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,8 +22,9 @@ for service in "$@"; do
   fi
 done
 
-# The API is the last service to start; wait until it answers (only if this stack runs it).
+# The API is the last service to start; wait until it is ready, its database answering (only if
+# this stack runs it).
 if [ -n "$(docker compose ps -q api)" ]; then
-  timeout 60 bash -c "until curl -sf -o /dev/null $API/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance; do sleep 1; done" ||
-    { echo "The API didn't answer at $API within 60 s"; exit 1; }
+  timeout 60 bash -c "until curl -sf -o /dev/null $API/health; do sleep 1; done" ||
+    { echo "The API wasn't ready at $API within 60 s"; exit 1; }
 fi

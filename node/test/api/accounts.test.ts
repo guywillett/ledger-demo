@@ -200,6 +200,41 @@ describe('GET /accounts/:id/transactions', () => {
     expect(response.json.errors).toEqual([expect.objectContaining({ path })]);
   });
 
+  // Slice 4 decision 68: every problem at once, the path first, then the query in the
+  // contract's parameter order (limit, before, include), whatever order the query sends them in.
+  it("reports every problem at once: the path, then the query in the contract's order", async () => {
+    const response = await getJson(
+      app,
+      '/accounts/nope/transactions?include=everything&before=nope&limit=0',
+      TRANSACTIONS,
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json).toEqual({
+      type: 'urn:ledger-demo:problem:invalid-request',
+      title: 'Invalid request',
+      status: 400,
+      errors: [
+        { path: 'account_id', message: 'must be a acct_ ID' },
+        { path: 'limit', message: 'Too small: expected number to be >=1' },
+        { path: 'before', message: 'must be a dep_ ID' },
+        { path: 'include', message: 'Invalid input: expected "history"' },
+      ],
+    });
+  });
+
+  it("reports the query's problems in the contract's order for a valid account too", async () => {
+    const account = await createTestAccount(pool);
+    const response = await getJson(
+      app,
+      `/accounts/${account.typeId}/transactions?include=x&limit=0`,
+      TRANSACTIONS,
+    );
+    expect(response.json.errors).toEqual([
+      expect.objectContaining({ path: 'limit' }),
+      expect.objectContaining({ path: 'include' }),
+    ]);
+  });
+
   it('ignores unknown query parameters', async () => {
     const account = await createTestAccount(pool);
     const response = await getJson(

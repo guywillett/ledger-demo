@@ -6,7 +6,7 @@ import { toTypeId } from '../shared/ids.ts';
 import { requestWithdrawal, type RequestResult } from '../withdrawals/requests.ts';
 import { withdrawalStatusHistory } from '../withdrawals/status.ts';
 import { AccountNotFoundError, getWithdrawal } from '../withdrawals/withdrawals.ts';
-import { problems, sendProblem, validationErrors, type ValidationError } from './problem.ts';
+import { problems, requestErrors, sendProblem } from './problem.ts';
 import {
   accountParamsSchema,
   idempotencyKeyHeadersSchema,
@@ -27,16 +27,12 @@ import type { App } from './types.ts';
 // Logs never contain the creditor name or remittance text, and the IBAN only masked.
 export function registerWithdrawalRoutes(app: App, deps: { pool: pg.Pool }): void {
   app.post('/accounts/:account_id/withdrawals', async (request, reply) => {
-    // Every problem with the request at once: path, header and body.
+    // Every problem with the request at once: path, header and body (slice 4 decision 68).
     const params = accountParamsSchema.safeParse(request.params);
     const headers = idempotencyKeyHeadersSchema.safeParse(request.headers);
     const body = withdrawalBodySchema.safeParse(request.body);
     if (!params.success || !headers.success || !body.success) {
-      const errors: ValidationError[] = [
-        ...(params.success ? [] : validationErrors(params.error)),
-        ...(headers.success ? [] : validationErrors(headers.error)),
-        ...(body.success ? [] : validationErrors(body.error)),
-      ];
+      const errors = requestErrors(params, headers, body);
       request.log.warn({ errors }, 'invalid withdrawal request');
       return sendProblem(reply, problems.invalidRequest(errors));
     }
@@ -118,13 +114,11 @@ export function registerWithdrawalRoutes(app: App, deps: { pool: pg.Pool }): voi
 
   // The withdrawal in its current status; ?include=history adds its status history.
   app.get('/withdrawals/:withdrawal_id', async (request, reply) => {
+    // Every problem at once, path then query (slice 4 decision 68).
     const params = withdrawalParamsSchema.safeParse(request.params);
-    if (!params.success) {
-      return sendProblem(reply, problems.invalidRequest(validationErrors(params.error)));
-    }
     const query = withdrawalQuerySchema.safeParse(request.query);
-    if (!query.success) {
-      return sendProblem(reply, problems.invalidRequest(validationErrors(query.error)));
+    if (!params.success || !query.success) {
+      return sendProblem(reply, problems.invalidRequest(requestErrors(params, query)));
     }
 
     const withdrawal = await getWithdrawal(deps.pool, params.data.withdrawal_id);

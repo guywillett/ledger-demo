@@ -427,6 +427,25 @@ describe('GET /withdrawals/:withdrawal_id', () => {
     );
     expect(invalid.statusCode).toBe(400);
   });
+
+  // Slice 4 decision 68: the path's problem and the query's together, path first.
+  it('reports an invalid ID and an invalid include at once', async () => {
+    const response = await getJson(
+      app,
+      '/withdrawals/nope?include=everything',
+      '/withdrawals/{withdrawal_id}',
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json).toEqual({
+      type: 'urn:ledger-demo:problem:invalid-request',
+      title: 'Invalid request',
+      status: 400,
+      errors: [
+        { path: 'withdrawal_id', message: 'must be a wd_ ID' },
+        { path: 'include', message: 'Invalid input: expected "history"' },
+      ],
+    });
+  });
 });
 
 describe('reconciliation after withdrawals through the API', () => {

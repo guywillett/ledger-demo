@@ -1,6 +1,8 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, describe, expect, it } from 'vitest';
 import { loadSharedConfig } from '../../src/shared/config.ts';
-import { createPool, withTransaction, type Tx } from '../../src/shared/db.ts';
+import type pg from 'pg';
+import { createPool, ping, withTransaction, type Tx } from '../../src/shared/db.ts';
 import { createLogger } from '../../src/shared/logger.ts';
 import { balancesOf, createTestAccount } from '../helpers.ts';
 
@@ -105,5 +107,61 @@ describe('database', () => {
 
     const result = await pool.query('SELECT 1 FROM accounts WHERE name = $1', [name]);
     expect(result.rowCount).toBe(0);
+  });
+});
+
+// ping (slice 4 decision 72): through the pool, and after its deadline it ends what pg lets it end.
+// The timing cases use a stub pool: a connection handed over late, or a query that never answers,
+// are hard to arrange on a real database.
+describe('ping', () => {
+  // A stub pool whose connect resolves after connectMs with a client whose query never answers
+  // (queryHangs) or answers at once; it records what was done with the client.
+  function stubPool(options: { connectMs: number; queryHangs: boolean }) {
+    const record = { queries: 0, releases: [] as (Error | boolean | undefined)[] };
+    const client = {
+      query: () => {
+        record.queries++;
+        return options.queryHangs ? new Promise(() => undefined) : Promise.resolve({ rows: [] });
+      },
+      release: (err?: Error | boolean) => {
+        record.releases.push(err);
+      },
+    };
+    const stub = {
+      connect: async () => {
+        await sleep(options.connectMs);
+        return client;
+      },
+    };
+    return { pool: stub as unknown as pg.Pool, record };
+  }
+
+  it('resolves when the database answers', async () => {
+    await expect(ping(pool, 1000)).resolves.toBeUndefined();
+  });
+
+  it('gives a connection that arrives after the deadline straight back, unused', async () => {
+    const { pool: slow, record } = stubPool({ connectMs: 100, queryHangs: false });
+    await expect(ping(slow, 20)).rejects.toThrow('did not answer within 20 ms');
+    await sleep(150);
+    expect(record).toEqual({ queries: 0, releases: [undefined] });
+  });
+
+  it('destroys a connection whose query outlives the deadline', async () => {
+    const { pool: hung, record } = stubPool({ connectMs: 0, queryHangs: true });
+    await expect(ping(hung, 20)).rejects.toThrow('did not answer within 20 ms');
+    // Released with an error: the pool destroys the connection instead of reusing it.
+    expect(record.queries).toBe(1);
+    expect(record.releases).toEqual([expect.any(Error)]);
+  });
+
+  it('rejects at once while an earlier ping on the pool is unfinished, then runs again', async () => {
+    const { pool: slow, record } = stubPool({ connectMs: 100, queryHangs: false });
+    await expect(ping(slow, 20)).rejects.toThrow('did not answer');
+    // The first one's connection hasn't arrived yet: no second attempt.
+    await expect(ping(slow, 20)).rejects.toThrow('the previous check has not finished');
+    await sleep(150); // the late connection arrives and goes back
+    await expect(ping(slow, 500)).resolves.toBeUndefined();
+    expect(record).toEqual({ queries: 1, releases: [undefined, undefined] });
   });
 });

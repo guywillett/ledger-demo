@@ -1,14 +1,64 @@
 openapi: 3.1.1
 info:
   title: ledger-demo API
-  version: 0.1.0
+  # Matches the release tag's minor version (slice 4 decision 65).
+  version: 0.4.0
   description: |
     Hand-written contract, shared by the Node and Go implementations. Both are tested against
     it. Amounts are integer minor units as digit strings; IDs are TypeIDs.
-    Errors are RFC 9457 problem details (application/problem+json).
-    A path with an empty segment (e.g. /withdrawals/, /accounts//balance) matches no route: 404.
+    Errors are RFC 9457 problem details (application/problem+json): a URN type
+    (urn:ledger-demo:problem:…) for this API's own problems, `about:blank` for plain HTTP errors,
+    whose title is the status's phrase (413's is "Payload Too Large").
+
+    Rules for every operation, stated here once:
+
+    - Request IDs: a request may send `x-request-id`. It is reused as the request's ID if it is
+      sent once and is 1-64 characters from A-Z a-z 0-9 . _ : -; otherwise one is generated.
+      Every response carries the ID in `x-request-id`: successes, errors and unknown routes alike.
+    - HEAD is answered on every GET path: the GET's status and headers (Content-Length included),
+      without the body.
+    - Unknown routes: a path matching no operation, a known path with another method, or a path
+      that isn't in its clean form (an empty segment such as /accounts//balance or /withdrawals/,
+      a trailing slash, a `.` or `..` segment) answers 404 with an `about:blank` problem, whatever
+      the body.
+    - Query parameters: unknown ones are ignored; a documented one given more than once is
+      invalid (400).
+    - Validation reports every problem at once (slice 4 decision 68): one 400 `invalid-request`
+      problem, its `errors` in a defined order: the path parameters, then the headers, then the
+      query parameters, each in the order the operation lists them, then the body. Each entry
+      names where the problem is (`path`) and what is wrong (`message`), never the value sent.
 paths:
+  /health:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: Readiness of the API
+      description: |
+        Runs `SELECT 1` on the database: 200 if it answers within 1 s, 503 if it doesn't (an error,
+        or no answer in time; slice 4 decision 72). For probes (scripts, a load balancer, an
+        orchestrator), outside the account scope. Only a failure is logged.
+      responses:
+        '200':
+          description: Ready
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: Not ready, the database didn't answer within 1 s (type urn:ledger-demo:problem:not-ready)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /provider/incoming-payments:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     post:
       summary: The provider's notification of an incoming payment (its webhook)
       description: |
@@ -22,13 +72,6 @@ paths:
         IBAN included; 500 when a retry can help. The response never says what the
         notification did, so the endpoint can't be used to probe accounts or deposits. Unknown
         fields are ignored (tolerant reader).
-      parameters:
-        - name: x-request-id
-          in: header
-          required: false
-          description: Reused as the request ID if it matches the pattern; otherwise one is generated.
-          schema:
-            type: string
       requestBody:
         required: true
         content:
@@ -50,17 +93,25 @@ paths:
               $ref: '#/components/headers/RequestId'
         '400':
           description: The body can't be used (malformed, oversized or not JSON) or doesn't parse (an invalid IBAN included)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Not recorded; a retry can help (e.g. once a bug is fixed)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
   /accounts/{account_id}/balance:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     get:
       summary: The account's balances
       parameters:
@@ -68,29 +119,43 @@ paths:
       responses:
         '200':
           description: Balances in integer minor units, as digit strings
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Balance'
         '400':
           description: account_id is not an acct_ ID
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
           description: No such account
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
   /accounts/{account_id}/transactions:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     get:
       summary: The account's deposits, newest first, a page at a time
       description: |
@@ -98,14 +163,7 @@ paths:
         previous page's next_before as `before` to get the next, older page.
       parameters:
         - $ref: '#/components/parameters/AccountId'
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 200
-            default: 50
+        - $ref: '#/components/parameters/Limit'
         - name: before
           in: query
           required: false
@@ -122,29 +180,43 @@ paths:
       responses:
         '200':
           description: A page of deposits
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/TransactionList'
         '400':
           description: Invalid account_id or query parameter
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
           description: No such account
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
   /accounts/{account_id}/withdrawals:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     post:
       summary: Request a withdrawal (a SEPA transfer out of the account)
       description: |
@@ -169,12 +241,6 @@ paths:
           schema:
             type: string
             pattern: '^[A-Za-z0-9._:-]{1,255}$'
-        - name: x-request-id
-          in: header
-          required: false
-          description: Reused as the request ID if it matches the pattern; otherwise one is generated.
-          schema:
-            type: string
       requestBody:
         required: true
         content:
@@ -212,47 +278,70 @@ paths:
                 $ref: '#/components/schemas/Withdrawal'
         '400':
           description: Invalid Idempotency-Key, account_id or body (including an unknown field)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
           description: No such account
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '409':
           description: The Idempotency-Key was used for a withdrawal with other details
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/IdempotencyKeyConflictProblem'
         '413':
           description: Body too large
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '415':
           description: Unsupported content type
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '422':
           description: Insufficient available funds; nothing stored
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Unexpected failure; nothing stored
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
   /withdrawals/{withdrawal_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     get:
       summary: A withdrawal in its current status
       parameters:
@@ -271,29 +360,43 @@ paths:
       responses:
         '200':
           description: The withdrawal
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Withdrawal'
         '400':
           description: withdrawal_id is not a wd_ ID, or an invalid query parameter
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
           description: No such withdrawal
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
   /provider/transfer-updates:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     post:
       summary: The provider's result for a transfer we sent (its webhook)
       description: |
@@ -319,20 +422,51 @@ paths:
       responses:
         '204':
           description: Recorded or deliberately handled (whatever it did)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
         '400':
           description: The body can't be used (malformed, oversized or not JSON) or doesn't parse
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Not recorded; a retry can help (e.g. once a bug is fixed)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
 components:
   parameters:
+    RequestId:
+      name: x-request-id
+      in: header
+      required: false
+      description: Reused as the request's ID if usable (see the rules above); otherwise one is generated.
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        The page size: a whole number from 1 to 200. The value is read as JavaScript's Number()
+        reads a string, in both implementations (slice 3 decision 54): surrounding whitespace is
+        ignored; a decimal may have a sign, a fraction and an exponent (+2, 2.0, 1e2, .5e1);
+        0x, 0o and 0b prefixes are hexadecimal, octal and binary; Infinity is a number; an empty
+        value is 0. Whatever it reads as must then be a whole number from 1 to 200, else 400.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
     AccountId:
       name: account_id
       in: path
@@ -342,10 +476,17 @@ components:
         pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
   headers:
     RequestId:
-      description: The request ID used in logs
+      description: The request's ID, used in every log line about it
       schema:
         type: string
   schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          const: ok
     AmountMinor:
       description: Integer minor units (cents) as a string of digits, greater than zero.
       type: string

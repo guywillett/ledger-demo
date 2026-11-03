@@ -3,7 +3,7 @@ import { getBalance } from '../ledger/balances.ts';
 import type { Queryable } from '../shared/db.ts';
 import { toTypeId } from '../shared/ids.ts';
 import { statusHistories } from '../deposits/status.ts';
-import { problems, sendProblem, validationErrors } from './problem.ts';
+import { problems, requestErrors, sendProblem, validationErrors } from './problem.ts';
 import {
   accountParamsSchema,
   toBalanceResponse,
@@ -32,13 +32,11 @@ export function registerAccountRoutes(app: App, deps: { db: Queryable }): void {
   // ?before=<next_before from the previous page>. ?include=history adds each deposit's
   // status history, fetched for the whole page in one query.
   app.get('/accounts/:account_id/transactions', async (request, reply) => {
+    // Every problem at once, path then query (slice 4 decision 68).
     const params = accountParamsSchema.safeParse(request.params);
-    if (!params.success) {
-      return sendProblem(reply, problems.invalidRequest(validationErrors(params.error)));
-    }
     const query = transactionsQuerySchema.safeParse(request.query);
-    if (!query.success) {
-      return sendProblem(reply, problems.invalidRequest(validationErrors(query.error)));
+    if (!params.success || !query.success) {
+      return sendProblem(reply, problems.invalidRequest(requestErrors(params, query)));
     }
 
     const page = await listDeposits(deps.db, params.data.account_id, {

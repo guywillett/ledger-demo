@@ -10,14 +10,14 @@
 #
 # Starts api-other (the compose profile "differential", host port 3001) in the implementation
 # opposite to the running api's (API_IMPL, node by default), and sends each request to both:
-# balances, every page of each demo account's transactions (each page's cursor used on the other
-# implementation too), the query parameters' edge cases, withdrawals in each final status, unknown
-# and malformed IDs, unknown routes and wrong methods, and replays of the demo's withdrawal requests
-# (the same key and body, then the same key and another amount: writes that change nothing). It
-# compares the status code, the body byte for byte, and the headers: names case-insensitively,
-# ignoring date, x-request-id and the transport headers. A difference is printed (the request, the
-# headers side by side, a diff of the bodies) and the check carries on. Stops api-other however it
-# ends.
+# the health check, balances, every page of each demo account's transactions (each page's cursor
+# used on the other implementation too), the query parameters' edge cases, withdrawals in each final
+# status, unknown and malformed IDs, unknown routes and wrong methods, and replays of the demo's
+# withdrawal requests (the same key and body, then the same key and another amount: writes that
+# change nothing). It compares the status code, the body byte for byte, and the headers: names
+# case-insensitively, ignoring date, x-request-id and the transport headers. A difference is
+# printed (the request, the headers side by side, a diff of the bodies) and the check carries on.
+# Stops api-other however it ends.
 #
 # Exit codes, as the other scripts': 0 every response the same; 1 a difference, or a request there
 # to succeed (a page, a replay) that didn't; 3 couldn't run (an API isn't up, or too little data:
@@ -165,8 +165,8 @@ unknown_id() {
   case "$1" in *0) printf '%s1' "${1%?}" ;; *) printf '%s0' "${1%?}" ;; esac
 }
 
-curl -sf -o /dev/null "$API/accounts/$ALICE/balance" ||
-  { echo "The API isn't answering at $API: run docker compose up -d --build first."; exit 3; }
+curl -sf -o /dev/null "$API/health" ||
+  { echo "The API isn't ready at $API: run docker compose up -d --build first."; exit 3; }
 
 say "What there is to compare"
 # Every deposit of the demo accounts, read from the api a page of 200 at a time.
@@ -221,11 +221,17 @@ echo "   deposits:$deposit_statuses; withdrawals: executed $executed, failed $fa
 say "Starting a $other_impl API beside the $main_impl one, on port ${API_OTHER##*:}"
 docker compose --profile differential up -d --no-deps api-other > /dev/null 2>&1
 deadline=$((SECONDS + 60))
-until curl -sf -o /dev/null "$API_OTHER/accounts/$ALICE/balance"; do
-  [ "$SECONDS" -lt "$deadline" ] || { echo "   api-other isn't answering at $API_OTHER"; exit 3; }
+until curl -sf -o /dev/null "$API_OTHER/health"; do
+  [ "$SECONDS" -lt "$deadline" ] || { echo "   api-other isn't ready at $API_OTHER"; exit 3; }
   sleep 1
 done
 echo "   started"
+
+say "Health"
+# Ready only: a 503 needs a database that doesn't answer, which this stack can't arrange.
+compare GET /health
+expect_status 200
+compare HEAD /health
 
 say "Balances"
 for account in $ACCOUNTS; do

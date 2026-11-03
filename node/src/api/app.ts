@@ -4,6 +4,7 @@ import type pg from 'pg';
 import type { Logger } from '../shared/logger.ts';
 import { registerAccountRoutes } from './accounts.ts';
 import { problemErrorHandler } from './errors.ts';
+import { registerHealthRoute } from './health.ts';
 import { problems, sendProblem } from './problem.ts';
 import { registerWebhookRoutes } from './webhooks/index.ts';
 import { registerWithdrawalRoutes } from './withdrawals.ts';
@@ -27,6 +28,10 @@ class AccessLog extends LogController {
     request: FastifyRequest,
     reply: FastifyReply,
   ): void {
+    // A route can ask for its successes to go unlogged (GET /health, api/health.ts).
+    if (request.routeOptions.config.accessLog === 'failures' && reply.statusCode < 400 && !error) {
+      return;
+    }
     const fields = {
       method: request.method,
       // The path only: a query string is caller input and could carry anything (an IBAN, a name).
@@ -86,6 +91,7 @@ export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
   // provider webhooks, whose plugin inherits this and answers every client error with 400).
   app.removeContentTypeParser('text/plain');
 
+  registerHealthRoute(app, { pool: deps.pool });
   registerAccountRoutes(app, { db: deps.pool });
   registerWithdrawalRoutes(app, { pool: deps.pool });
   registerWebhookRoutes(app, { pool: deps.pool });

@@ -51,11 +51,13 @@ export function toDepositResponse(deposit: Deposit): DepositResponse {
 export const accountParamsSchema = z.object({ account_id: typeIdSchema('acct') });
 
 // Unknown query parameters are ignored (z.object strips them), like unknown body fields.
-// z.coerce: query parameters arrive as strings.
+// z.coerce: query parameters arrive as strings. The keys are in the contract's parameter order:
+// Zod reports problems in the order of the shape's keys, and the API reports them in the
+// contract's order (slice 4 decision 68).
 export const transactionsQuerySchema = z.object({
-  include: z.literal('history').optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   before: typeIdSchema('dep').optional(),
+  include: z.literal('history').optional(),
 });
 
 export type BalanceResponse = {
