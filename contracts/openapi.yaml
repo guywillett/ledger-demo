@@ -200,14 +200,17 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
-  /accounts/{account_id}/transactions:
+  /accounts/{account_id}/deposits:
     parameters:
       - $ref: '#/components/parameters/RequestId'
     get:
       summary: The account's deposits, newest first, a page at a time
       description: |
-        Paginated by seeking on the deposit ID (UUIDv7 IDs sort by creation time): pass the
-        previous page's next_before as `before` to get the next, older page.
+        A list (slice 4 decision 66): `data` holds the page, `next_before` the cursor for the next,
+        older page (null on the last). Paginated by seeking on the deposit ID (UUIDv7 IDs sort by
+        creation time). A `before` naming another account's deposit, or none, is a position in
+        time, not a reference: accepted, never looked up. An unknown account is a 404; an account
+        without deposits an empty list.
       parameters:
         - $ref: '#/components/parameters/AccountId'
         - $ref: '#/components/parameters/Limit'
@@ -218,12 +221,7 @@ paths:
           schema:
             type: string
             pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
-        - name: include
-          in: query
-          required: false
-          description: '`history` adds each deposit''s status history.'
-          schema:
-            const: history
+        - $ref: '#/components/parameters/IncludeHistory'
       responses:
         '200':
           description: A page of deposits
@@ -233,7 +231,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TransactionList'
+                $ref: '#/components/schemas/DepositList'
         '400':
           description: Invalid account_id or query parameter
           headers:
@@ -244,7 +242,61 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
-          description: No such account
+          description: No such account (type urn:ledger-demo:problem:account-not-found)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /accounts/{account_id}/deposits/{deposit_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: One of the account's deposits
+      description: |
+        Read within the account (slice 4 decision 64): a deposit of another account answers as
+        one that doesn't exist, whether or not the account in the path exists.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - name: deposit_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        - $ref: '#/components/parameters/IncludeHistory'
+      responses:
+        '200':
+          description: The deposit
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deposit'
+        '400':
+          description: Invalid account_id, deposit_id or query parameter
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such deposit in this account (type urn:ledger-demo:problem:deposit-not-found)
           headers:
             x-request-id:
               $ref: '#/components/headers/RequestId'
@@ -499,6 +551,13 @@ components:
       description: Reused as the request's ID if usable (see the rules above); otherwise one is generated.
       schema:
         type: string
+    IncludeHistory:
+      name: include
+      in: query
+      required: false
+      description: '`history` adds the status history (each item''s, in a list).'
+      schema:
+        const: history
     Limit:
       name: limit
       in: query
@@ -578,25 +637,27 @@ components:
           const: EUR
         network:
           const: SEPA
-    # The fields of a deposit in an account's transaction list. Transaction closes itself with
-    # unevaluatedProperties: false, which (unlike additionalProperties) also counts the
-    # properties described through allOf.
-    DepositFields:
+    Deposit:
       type: object
+      additionalProperties: false
       required:
+        - type
         - id
         - account_id
         - creditor_iban
-        - provider_account_id
         - amount_minor
         - currency
         - network
         - network_transaction_id
         - status
+        - failure_reason
         - notification_count
         - created_at
         - updated_at
       properties:
+        type:
+          description: What the object is (slice 4 decision 67).
+          const: deposit
         id:
           type: string
           pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
@@ -607,8 +668,6 @@ components:
           type: string
           description: Normalised (no separators, upper case).
           pattern: '^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$'
-        provider_account_id:
-          type: [string, 'null']
         amount_minor:
           $ref: '#/components/schemas/AmountMinor'
         currency:
@@ -616,9 +675,16 @@ components:
         network:
           const: SEPA
         network_transaction_id:
+          description: The payment's reference, the one identifier payer and payee both know (slice 4 decision 69).
           type: string
         status:
           $ref: '#/components/schemas/DepositStatus'
+        failure_reason:
+          description: |
+            One fixed, non-disclosing text while the deposit is rejected or returned
+            ("returned to the sender"); null otherwise. Never the internal reason (slice 4
+            decision 76).
+          type: [string, 'null']
         notification_count:
           type: integer
           minimum: 1
@@ -628,19 +694,12 @@ components:
         updated_at:
           type: string
           format: date-time
-    Transaction:
-      description: A deposit in an account's transaction list.
-      type: object
-      allOf:
-        - $ref: '#/components/schemas/DepositFields'
-      properties:
         history:
           description: Present with include=history. Oldest change first.
           type: array
           items:
-            $ref: '#/components/schemas/StatusChange'
-      unevaluatedProperties: false
-    StatusChange:
+            $ref: '#/components/schemas/DepositStatusChange'
+    DepositStatusChange:
       type: object
       additionalProperties: false
       required: [from_status, to_status, reason, at]
@@ -653,19 +712,22 @@ components:
         to_status:
           $ref: '#/components/schemas/DepositStatus'
         reason:
+          description: |
+            A client-facing reason for the change. A deposit's transitions have none (the
+            compliance decision's reason is internal: slice 4 decision 76), so it is null.
           type: [string, 'null']
         at:
           type: string
           format: date-time
-    TransactionList:
+    DepositList:
       type: object
       additionalProperties: false
-      required: [deposits, next_before]
+      required: [data, next_before]
       properties:
-        deposits:
+        data:
           type: array
           items:
-            $ref: '#/components/schemas/Transaction'
+            $ref: '#/components/schemas/Deposit'
         next_before:
           description: Pass as `before` for the next page; null on the last page.
           oneOf:

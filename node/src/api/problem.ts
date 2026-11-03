@@ -47,6 +47,12 @@ export const problems = {
     title: 'Account not found',
     status: 404,
   }),
+  // Also for another account's deposit (slice 4 decision 64: the account in the path is a scope).
+  depositNotFound: () => ({
+    type: 'urn:ledger-demo:problem:deposit-not-found',
+    title: 'Deposit not found',
+    status: 404,
+  }),
   withdrawalNotFound: () => ({
     type: 'urn:ledger-demo:problem:withdrawal-not-found',
     title: 'Withdrawal not found',

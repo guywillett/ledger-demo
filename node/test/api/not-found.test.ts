@@ -20,7 +20,8 @@ describe('an empty path parameter', () => {
   it.each([
     ['GET', '/withdrawals/', '/withdrawals/{withdrawal_id}'],
     ['GET', '/accounts//balance', '/accounts/{account_id}/balance'],
-    ['GET', '/accounts//transactions?limit=1', '/accounts/{account_id}/transactions'],
+    ['GET', '/accounts//deposits?limit=1', '/accounts/{account_id}/deposits'],
+    ['GET', '/accounts//deposits/x', '/accounts/{account_id}/deposits/{deposit_id}'],
   ] as const)('%s %s answers 404, as an unknown route', async (method, url, contractPath) => {
     const response = await app.inject({ method, url });
     expect(response.statusCode).toBe(404);

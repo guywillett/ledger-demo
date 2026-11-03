@@ -190,7 +190,7 @@ export type JsonResponse = {
 // POSTs a notification to the incoming-payment webhook and checks the response against
 // contracts/openapi.yaml. A string payload is sent as-is (e.g. malformed JSON); anything else is
 // JSON-encoded. A handled notification gets 204 with no body (json is then {}): read what it did
-// from the database (depositByNetworkId) or the transactions endpoint.
+// from the database (depositByNetworkId) or the account's deposits.
 export async function postIncomingPayment(
   app: App,
   payload: unknown,

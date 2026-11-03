@@ -214,7 +214,7 @@ Exit code `0` means the books agree, `1` that they disagree, `2` stuck deposits,
 Two scripts beside the demo, each against the running stack, with the demo's exit codes (`0` all good, `1` an expectation failed, `3` couldn't run; `shared-consumer.sh` also `2`, deposits unfinished after the wait). Each works out the other implementation from the running service's variable, starts its extra service under its own profile, and removes it however it ends.
 
 - **`scripts/shared-consumer.sh`:** starts `deposit-worker-other` (the opposite of `DEPOSIT_WORKER_IMPL`) on the same durable consumer, posts a burst of 30 deposits, and checks from the two workers' logs that both processed some and none was processed twice; then reconciles. Run it on any stack, after `up -d`; it adds its own deposits.
-- **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: the health check, the accounts, balances, every page of each demo account's transactions (each cursor used on the other implementation too), query-parameter edge cases, withdrawals in each final status, unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
+- **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: the health check, the accounts, balances, every page of each demo account's deposits (each cursor used on the other implementation too), query-parameter edge cases, single deposits (found, another account's, unknown, malformed IDs), withdrawals in each final status, unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
 
 ## Node
 
@@ -260,7 +260,7 @@ npm run start:api               # without watching
 docker compose start api        # afterwards, back to the container
 ```
 
-The same curl works against either. Send an incoming payment notification for alice to the provider webhook. It answers `204` with no body whatever the notification did (the webhook contract), so look at the effect in alice's transactions: a new deposit (`created`, then booked and reviewed by the deposit-worker), a rising `notification_count` when you repeat it, an unchanged deposit when you change the amount (recorded as a conflict), and nothing in any account for an IBAN that isn't ours (recorded in suspense; `docker compose run --rm reconcile` lists it). Each new deposit's `deposit.created` event goes to the outbox, and the relay publishes it (see *Streams* above to read it back):
+The same curl works against either. Send an incoming payment notification for alice to the provider webhook. It answers `204` with no body whatever the notification did (the webhook contract), so look at the effect in alice's deposits: a new deposit (`created`, then booked and reviewed by the deposit-worker), a rising `notification_count` when you repeat it, an unchanged deposit when you change the amount (recorded as a conflict), and nothing in any account for an IBAN that isn't ours (recorded in suspense; `docker compose run --rm reconcile` lists it). Each new deposit's `deposit.created` event goes to the outbox, and the relay publishes it (see *Streams* above to read it back):
 
 ```sh
 curl -i -X POST localhost:3000/provider/incoming-payments -H 'content-type: application/json' -d '{
@@ -270,7 +270,7 @@ curl -i -X POST localhost:3000/provider/incoming-payments -H 'content-type: appl
   "currency": "EUR",
   "network": "SEPA"
 }'
-curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=1'   # the effect
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits?limit=1'   # the effect
 ```
 
 Read an account (alice here; TypeIDs of the demo accounts are listed under *Demo accounts*):
@@ -278,8 +278,9 @@ Read an account (alice here; TypeIDs of the demo accounts are listed under *Demo
 ```sh
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx           # id, name, iban, created_at
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance
-curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=10&include=history'
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits?limit=10&include=history'
 # next page: add &before=<next_before from the previous response>
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits/dep_…?include=history'   # one deposit
 ```
 
 Request a withdrawal from alice (repeat it with the same key to get `200` and the same withdrawal; change the amount to see a `409`; ask for more than `available` to see a `422`), then read it back with the `Location` it returns. Within a few seconds the submitter sends it to provider-sim (`submitted`) and the provider's result settles it: `executed`, with its amount gone from `held`; put `SIM FAIL` in `remittance_info` to see it `failed` with the funds back in `available`:

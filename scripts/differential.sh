@@ -10,8 +10,9 @@
 #
 # Starts api-other (the compose profile "differential", host port 3001) in the implementation
 # opposite to the running api's (API_IMPL, node by default), and sends each request to both:
-# the health check, the accounts, balances, every page of each demo account's transactions (each
-# page's cursor used on the other implementation too), the query parameters' edge cases,
+# the health check, the accounts, balances, every page of each demo account's deposits (each
+# page's cursor used on the other implementation too), the query parameters' edge cases, single
+# deposits (found, another account's, unknown, malformed IDs),
 # withdrawals in each final status, unknown and malformed IDs, unknown routes and wrong methods,
 # and replays of the demo's withdrawal requests (the same key and body, then the same key and
 # another amount: writes that change nothing). It compares the status code, the body byte for
@@ -168,16 +169,30 @@ unknown_id() {
 curl -sf -o /dev/null "$API/health" ||
   { echo "The API isn't ready at $API: run docker compose up -d --build first."; exit 3; }
 
+# deposit_with <status> <account> <list body>: "<account> <deposit id>" for the list's first
+# deposit in that status, or nothing. A deposit object has no nested braces without history.
+deposit_with() {
+  local id
+  id=$(printf '%s' "$3" | grep -o "{[^{}]*\"status\":\"$1\"[^{}]*}" | head -1 |
+    grep -o '"id":"dep_[0-9a-z]*"' | sed 's/.*:"//; s/"//' || true)
+  [ -z "$id" ] || printf '%s %s' "$2" "$id"
+}
+
 say "What there is to compare"
 # Every deposit of the demo accounts, read from the api a page of 200 at a time.
 statuses=""
 deposit_ids=""
 multi_page=0
+credited_deposit=""
+returned_deposit=""
 for account in $ACCOUNTS; do
   before=""
   count=0
   while :; do
-    body=$(curl -s "$API/accounts/$account/transactions?limit=200${before:+&before=$before}")
+    body=$(curl -s "$API/accounts/$account/deposits?limit=200${before:+&before=$before}")
+    # One credited and one returned deposit, as "<account> <deposit>", for the single reads.
+    [ -n "$credited_deposit" ] || credited_deposit=$(deposit_with credited "$account" "$body")
+    [ -n "$returned_deposit" ] || returned_deposit=$(deposit_with returned "$account" "$body")
     statuses="$statuses $(printf '%s' "$body" | grep -o '"status":"[a-z_]*"' | sed 's/.*:"//; s/"//' | tr '\n' ' ')"
     ids=$(printf '%s' "$body" | grep -o '"id":"dep_[0-9a-z]*"' | sed 's/.*:"//; s/"//' | tr '\n' ' ')
     deposit_ids="$deposit_ids $ids"
@@ -259,13 +274,13 @@ for id in nope acct_123 "acct_${ALICE#acct_}x" "$(printf '%s' "$ALICE" | tr 'a-z
   compare GET "/accounts/$id/balance"
 done
 
-say "Transactions: every page, each cursor used on both implementations"
+say "Deposits: every page, each cursor used on both implementations"
 # walk <account> <query> <first side: a|b>: every page, taking the next page's cursor alternately
 # from one implementation's answer and the other's (both receive every page's request).
 walk() {
   local before="" side=$3 pages=0
   while [ "$pages" -lt 500 ]; do
-    compare GET "/accounts/$1/transactions?$2${before:+&before=$before}"
+    compare GET "/accounts/$1/deposits?$2${before:+&before=$before}"
     expect_status 200
     pages=$((pages + 1))
     before=$(field "$(cat "$work/$side.body")" next_before)
@@ -281,8 +296,8 @@ for account in $ACCOUNTS; do
   walk "$account" "" a
 done
 
-say "Transactions: query parameters"
-T="/accounts/$ALICE/transactions"
+say "Deposits: query parameters"
+T="/accounts/$ALICE/deposits"
 for q in limit=0 limit=1 limit=200 limit=201 limit=abc limit=-1 limit=1.5 limit= limit=01 \
   "limit=1&limit=2" limit=%31 limit=99999999999999999999 \
   before=nope "before=wd_${first_deposit#dep_}" "before=dep_8${first_deposit#dep_?}" \
@@ -292,9 +307,34 @@ for q in limit=0 limit=1 limit=200 limit=201 limit=abc limit=-1 limit=1.5 limit=
   compare GET "$T?$q"
 done
 compare HEAD "$T?limit=1"
-compare GET "/accounts/$(unknown_id "$ALICE")/transactions"
-compare GET "/accounts/nope/transactions"
-compare GET "/accounts/dep_${ALICE#acct_}/transactions"
+compare GET "/accounts/$(unknown_id "$ALICE")/deposits"
+compare GET "/accounts/nope/deposits"
+compare GET "/accounts/dep_${ALICE#acct_}/deposits"
+
+say "Single deposits"
+for pair in "$credited_deposit" "$returned_deposit"; do
+  read -r account id <<< "$pair"
+  compare GET "/accounts/$account/deposits/$id"
+  expect_status 200
+  compare GET "/accounts/$account/deposits/$id?include=history"
+  expect_status 200
+  for q in include=nope include= "include=history&include=history" foo=bar limit=0 before=nope; do
+    compare GET "/accounts/$account/deposits/$id?$q"
+  done
+done
+read -r account id <<< "$credited_deposit"
+compare HEAD "/accounts/$account/deposits/$id"
+# Another account's deposit, a real deposit under an unknown account, an unknown deposit.
+for other in $ACCOUNTS; do
+  [ "$other" = "$account" ] || compare GET "/accounts/$other/deposits/$id"
+done
+compare GET "/accounts/$(unknown_id "$account")/deposits/$id"
+compare GET "/accounts/$account/deposits/$(unknown_id "$id")"
+for bad in nope dep_123 "dep_${id#dep_}x" "$(printf '%s' "$id" | tr 'a-z' 'A-Z')" "dep_8${id#dep_?}" \
+  "wd_${id#dep_}" "acct_${id#dep_}" "${id#dep_}" "dep_" "dep%5F${id#dep_}"; do
+  compare GET "/accounts/$account/deposits/$bad"
+done
+compare GET "/accounts/nope/deposits/nope?include=nope"
 
 say "Withdrawals"
 for id in "$executed" "$failed"; do
@@ -321,7 +361,8 @@ done
 for m in POST PUT PATCH DELETE OPTIONS; do
   compare "$m" "/accounts/$ALICE/balance"
 done
-compare POST "/accounts/$ALICE/transactions"
+compare POST "/accounts/$ALICE/deposits"
+compare GET "/accounts/$ALICE/transactions" # removed in slice 4 step 3; back in step 5
 compare DELETE "/withdrawals/$executed"
 compare PUT "/withdrawals/$executed"
 compare GET "/accounts/$ALICE/withdrawals"

@@ -4,7 +4,7 @@
 #   docker compose up -d --build && scripts/demo.sh
 #
 # The provider webhook answers 204 for every notification it handles (the webhook contract), so
-# steps 1-4 check the effect through the API's transactions list, not the status code:
+# steps 1-4 check the effect through the account's deposits list, not the status code:
 # 1. the same notification 5 times          -> one deposit, notification_count 5
 # 2. 10 concurrent identical notifications  -> one deposit
 # 3. the same network ID, another amount    -> recorded as a conflict, the deposit unchanged
@@ -61,10 +61,10 @@ post() {
 }
 
 # deposit <account> <network_transaction_id>: prints the deposit's JSON from the account's
-# transactions list (the newest 200; a demo deposit is always among them), or nothing. The API's
+# deposits list (the newest 200; a demo deposit is always among them), or nothing. The API's
 # JSON has no spaces and a deposit object no nested braces, so grep finds it (no jq needed).
 deposit() {
-  curl -s "$API/accounts/$1/transactions?limit=200" |
+  curl -s "$API/accounts/$1/deposits?limit=200" |
     grep -o "{[^{}]*\"network_transaction_id\":\"$2\"[^{}]*}" || true
 }
 
@@ -227,7 +227,7 @@ contains "the conflicting notification wasn't counted" '"notification_count":5' 
 say "4. A valid IBAN that isn't one of our accounts"
 expect "recorded, not refused" 204 "$(post "$RUN-unknown" "$FOREIGN_IBAN" 500)"
 for account in "$ALICE" "$BOB" "$CAROL"; do
-  expect "not in $account's transactions" "" "$(deposit "$account" "$RUN-unknown")"
+  expect "not in $account's deposits" "" "$(deposit "$account" "$RUN-unknown")"
 done
 # Recorded in suspense instead: the whole-database reconciliation report lists it.
 contains "listed in the reconciliation report's suspense section" "$RUN-unknown" \

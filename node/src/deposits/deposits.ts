@@ -148,6 +148,21 @@ export async function listDeposits(
   return { deposits, nextBefore: hasMore ? (deposits.at(-1)?.id ?? null) : null };
 }
 
+// The deposit within its account (slice 4 decision 64): one statement, so "no such deposit" and
+// "another account's deposit" are the same answer, decided by the database.
+const GET_SQL = 'SELECT * FROM deposits WHERE id = $1 AND account_id = $2';
+
+// undefined if the account has no such deposit.
+export async function getDeposit(
+  db: Queryable,
+  accountId: Uuid<'acct'>,
+  depositId: Uuid<'dep'>,
+): Promise<Deposit | undefined> {
+  const result = await db.query<DepositRow>(GET_SQL, [depositId, accountId]);
+  const row = result.rows[0];
+  return row === undefined ? undefined : depositFromRow(row);
+}
+
 const EXISTS_SQL = 'SELECT 1 FROM deposits WHERE id = $1';
 
 // For classifying an outcome after the fact (e.g. an event whose transitions all skipped:
