@@ -275,17 +275,33 @@ func TestTransactionsLimitMessagesAreZods(t *testing.T) {
 	}
 }
 
-// Every problem in the query is reported, in the schema's order (include, limit, before), as Zod's.
+// Every problem in the query is reported, in the contract's parameter order (limit, before,
+// include; slice 4 decision 68), whatever order the query sends them in.
 func TestTransactionsReportsEveryQueryProblem(t *testing.T) {
 	a := newTestAPI(t)
 	account := testdb.NewAccount(t, a.pool)
-	r := a.get(t, transactionsPath(account.ID, "limit=0&include=x"))
+	r := a.get(t, transactionsPath(account.ID, "include=x&limit=0"))
 	var paths []any
 	for _, e := range r.json(t)["errors"].([]any) {
 		paths = append(paths, e.(map[string]any)["path"])
 	}
-	if !slices.Equal(paths, []any{"include", "limit"}) {
-		t.Errorf("error paths = %v, want [include limit]", paths)
+	if !slices.Equal(paths, []any{"limit", "include"}) {
+		t.Errorf("error paths = %v, want [limit include]", paths)
+	}
+}
+
+// Every problem at once, the path then the query (slice 4 decision 68): byte for byte Node's
+// answer (node/test/api/accounts.test.ts, "reports every problem at once").
+func TestTransactionsReportsThePathAndTheQueryProblemsTogether(t *testing.T) {
+	a := newTestAPI(t)
+	r := a.get(t, "/accounts/nope/transactions?include=everything&before=nope&limit=0")
+	want := `{"type":"urn:ledger-demo:problem:invalid-request","title":"Invalid request","status":400,` +
+		`"errors":[{"path":"account_id","message":"must be a acct_ ID"},` +
+		`{"path":"limit","message":"Too small: expected number to be >=1"},` +
+		`{"path":"before","message":"must be a dep_ ID"},` +
+		`{"path":"include","message":"Invalid input: expected \"history\""}]}`
+	if r.status != 400 || r.body != want {
+		t.Errorf("got %d %s\nwant    %s", r.status, r.body, want)
 	}
 }
 

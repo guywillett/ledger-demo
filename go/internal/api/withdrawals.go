@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -284,16 +285,12 @@ func withdrawalParam(r *http.Request) (ids.WithdrawalID, []ValidationError) {
 }
 
 // GET /withdrawals/{withdrawal_id}: the withdrawal in its current status; ?include=history adds
-// its status history. The ID is checked first, then the query, each answered alone, as Node's two
-// separate checks.
+// its status history. Every problem with the request at once, the ID then the query (slice 4
+// decision 68).
 func (h withdrawalRoutes) get(w http.ResponseWriter, r *http.Request) error {
-	id, invalid := withdrawalParam(r)
-	if invalid != nil {
-		writeProblem(w, invalidRequest(invalid))
-		return nil
-	}
-	history, invalid := includeHistory(parseQuery(r.URL.RawQuery))
-	if invalid != nil {
+	id, pathErrs := withdrawalParam(r)
+	history, queryErrs := includeHistory(parseQuery(r.URL.RawQuery))
+	if invalid := slices.Concat(pathErrs, queryErrs); len(invalid) > 0 {
 		writeProblem(w, invalidRequest(invalid))
 		return nil
 	}

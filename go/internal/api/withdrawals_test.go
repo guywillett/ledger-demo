@@ -661,6 +661,20 @@ func TestGetAnswers404ForAnUnknownWithdrawalAnd400ForAnInvalidID(t *testing.T) {
 	}
 }
 
+// The ID's problem and the query's together, the ID first (slice 4 decision 68): byte for byte
+// Node's answer (node/test/api/withdrawals.test.ts, "reports an invalid ID and an invalid include
+// at once").
+func TestGetReportsAnInvalidIDAndAnInvalidIncludeAtOnce(t *testing.T) {
+	a := newTestAPI(t)
+	r := a.get(t, "/withdrawals/nope?include=everything")
+	want := `{"type":"urn:ledger-demo:problem:invalid-request","title":"Invalid request","status":400,` +
+		`"errors":[{"path":"withdrawal_id","message":"must be a wd_ ID"},` +
+		`{"path":"include","message":"Invalid input: expected \"history\""}]}`
+	if r.status != 400 || r.body != want {
+		t.Errorf("got %d %s\nwant    %s", r.status, r.body, want)
+	}
+}
+
 // Node runs its reconciliation here (Node only, decision 50); the Go test checks what it would for
 // this account (expectConsistent).
 func TestTheAccountStaysConsistentAfterWithdrawalsThroughTheAPI(t *testing.T) {

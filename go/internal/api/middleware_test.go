@@ -34,6 +34,9 @@ func serve(t *testing.T, handler http.Handler) (rec *httptest.ResponseRecorder, 
 		withRequestID(logger, withAccessLog(handler)).ServeHTTP(rec, req)
 	}()
 	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue // no lines at all
+		}
 		var m map[string]any
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
 			t.Fatalf("not a JSON log line: %q", line)
@@ -80,6 +83,39 @@ func TestReportsAPanicAfterTheResponseStartedAndAborts(t *testing.T) {
 	if len(lines) != 1 || lines[0]["msg"] != "request errored" || lines[0]["level"] != "error" ||
 		lines[0]["status_code"] != float64(200) {
 		t.Errorf("log lines = %v", lines)
+	}
+}
+
+// A route wrapped in quietOnSuccess (GET /health) gets no access line for a success, and the usual
+// line for a failure; an unwrapped route always gets one. With the middleware between the access log
+// and the route, as in newHandler, since quietOnSuccess reaches the access log through the context.
+func TestQuietOnSuccessLeavesOnlySuccessesUnlogged(t *testing.T) {
+	status := func(code int) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(code) })
+	}
+	between := func(h http.Handler) http.Handler {
+		return withDeadline(time.Second, onlyCleanPaths(h))
+	}
+	tests := []struct {
+		name    string
+		handler http.Handler
+		lines   int
+	}{
+		{"quiet, 200", between(quietOnSuccess(status(http.StatusOK))), 0},
+		{"quiet, 503", between(quietOnSuccess(status(http.StatusServiceUnavailable))), 1},
+		{"quiet, 404", between(quietOnSuccess(status(http.StatusNotFound))), 1},
+		{"not quiet, 200", between(status(http.StatusOK)), 1},
+	}
+	for _, tt := range tests {
+		_, lines, _ := serve(t, tt.handler)
+		if len(lines) != tt.lines {
+			t.Errorf("%s: %d log lines, want %d: %v", tt.name, len(lines), tt.lines, lines)
+		}
+		for _, line := range lines {
+			if line["msg"] != "request completed" {
+				t.Errorf("%s: line %v, want the access line", tt.name, line)
+			}
+		}
 	}
 }
 

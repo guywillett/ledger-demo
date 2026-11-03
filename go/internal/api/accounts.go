@@ -3,6 +3,7 @@ package api
 import (
 	"math"
 	"net/http"
+	"slices"
 
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/deposits"
@@ -127,12 +128,6 @@ type transactionsQuery struct {
 	history bool
 }
 
-// parseTransactionsQuery validates the query as Node's transactionsQuerySchema: include must be
-// "history"; limit a whole number from 1 to 200 (default 50), read as JavaScript's Number() reads
-// it (see jsNumber); before a deposit's TypeID. Unknown parameters are ignored. A parameter given
-// twice is invalid (Node's parser makes it an array, which no rule accepts). Every problem is
-// reported, in the schema's order; the messages are Zod's, though only the paths are part of the
-// contract.
 // includeHistory reads ?include, as Node's include: z.literal('history').optional(): absent is
 // false, exactly "history" true, anything else (another value, or the parameter given twice) a
 // problem. Shared by the deposits' and the withdrawals' GETs.
@@ -147,22 +142,25 @@ func includeHistory(query map[string][]string) (bool, []ValidationError) {
 	return false, []ValidationError{{Path: "include", Message: `Invalid input: expected "history"`}}
 }
 
+// parseTransactionsQuery validates the query as Node's transactionsQuerySchema: limit a whole
+// number from 1 to 200 (default 50), read as JavaScript's Number() reads it (see jsNumber); before
+// a deposit's TypeID; include "history". Unknown parameters are ignored. A parameter given twice is
+// invalid (Node's parser makes it an array, which no rule accepts). Every problem is reported, in
+// the contract's parameter order (slice 4 decision 68), as Node's schema lists its keys; the
+// messages are Zod's, though only the paths are part of the contract.
 func parseTransactionsQuery(raw string) (transactionsQuery, []ValidationError) {
 	query := parseQuery(raw)
 	parsed := transactionsQuery{limit: 50}
 	var errs []ValidationError
-
-	history, invalid := includeHistory(query)
-	parsed.history = history
-	errs = append(errs, invalid...)
 
 	if values, ok := query["limit"]; ok {
 		n := math.NaN()
 		if len(values) == 1 {
 			n = jsNumber(values[0])
 		}
-		errs = append(errs, limitErrors(n)...)
-		if len(errs) == 0 {
+		invalid := limitErrors(n)
+		errs = append(errs, invalid...)
+		if len(invalid) == 0 {
 			parsed.limit = int(n)
 		}
 	}
@@ -175,6 +173,10 @@ func parseTransactionsQuery(raw string) (transactionsQuery, []ValidationError) {
 			errs = append(errs, ValidationError{Path: "before", Message: "must be a dep_ ID"})
 		}
 	}
+
+	history, invalid := includeHistory(query)
+	parsed.history = history
+	errs = append(errs, invalid...)
 	return parsed, errs
 }
 
@@ -219,15 +221,12 @@ const maxSafeInteger = 1<<53 - 1
 
 // GET /accounts/{account_id}/transactions: deposits newest first, a page at a time (?limit,
 // ?before=<next_before from the previous page>). ?include=history adds each deposit's status
-// history, read for the whole page in one query.
+// history, read for the whole page in one query. Every problem with the request at once, the path
+// then the query (slice 4 decision 68).
 func (a accountRoutes) transactions(w http.ResponseWriter, r *http.Request) error {
-	account, invalid := accountParam(r)
-	if invalid != nil {
-		writeProblem(w, invalidRequest(invalid))
-		return nil
-	}
-	query, invalid := parseTransactionsQuery(r.URL.RawQuery)
-	if invalid != nil {
+	account, pathErrs := accountParam(r)
+	query, queryErrs := parseTransactionsQuery(r.URL.RawQuery)
+	if invalid := slices.Concat(pathErrs, queryErrs); len(invalid) > 0 {
 		writeProblem(w, invalidRequest(invalid))
 		return nil
 	}

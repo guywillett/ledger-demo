@@ -87,9 +87,33 @@ func (rec *recorder) Write(b []byte) (int, error) {
 // Unwrap gives http.ResponseController the ResponseWriter underneath (to flush, set deadlines).
 func (rec *recorder) Unwrap() http.ResponseWriter { return rec.ResponseWriter }
 
+// accessLogKey is the context key for a request's accessLogSettings, which the route's handler
+// can change: the access log writes its line after the handler has returned.
+type accessLogKey struct{}
+
+type accessLogSettings struct {
+	quietOnSuccess bool
+}
+
+// quietOnSuccess marks a route whose successful responses (below 400) get no access line, for GET
+// /health: probes call it often, and a line per probe would bury the access log (slice 4 decision
+// 72). Its failures are logged as usual. Wrapped around the route's handler where it is registered;
+// Node's counterpart is the route's accessLog: 'failures' config, read by its AccessLog. Through
+// the request's context rather than the ResponseWriter, so it works however many wrappers lie
+// between the access log and the route.
+func quietOnSuccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if settings, ok := r.Context().Value(accessLogKey{}).(*accessLogSettings); ok {
+			settings.quietOnSuccess = true
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // withAccessLog writes one line per request, as Node's AccessLog: method, the path without its
 // query string (caller input could carry anything, an IBAN or a name), status_code and
-// response_time_ms, as "request completed".
+// response_time_ms, as "request completed". A route wrapped in quietOnSuccess gets no line for a
+// response below 400.
 //
 // It also recovers a panic in a handler, as Fastify catches a thrown error: an "unexpected error"
 // line and a 500 problem, then the access line with status 500 (Node logs exactly that pair). Only
@@ -102,6 +126,8 @@ func withAccessLog(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &recorder{ResponseWriter: w, status: http.StatusOK}
 		logger := loggerFrom(r.Context())
+		settings := &accessLogSettings{}
+		r = r.WithContext(context.WithValue(r.Context(), accessLogKey{}, settings))
 		// Deferred, so it runs however the handler returns, panics included; recover() stops a
 		// panic only inside a deferred function.
 		defer func() {
@@ -128,6 +154,9 @@ func withAccessLog(next http.Handler) http.Handler {
 			if errored != nil {
 				logger.Error("request errored", append(fields, "err", errored)...)
 				panic(http.ErrAbortHandler)
+			}
+			if settings.quietOnSuccess && rec.status < http.StatusBadRequest {
+				return
 			}
 			logger.Info("request completed", fields...)
 		}()

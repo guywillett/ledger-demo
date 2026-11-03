@@ -98,6 +98,17 @@ func idempotencyKeyConflict(differing []requests.ComparedField) Problem {
 	}
 }
 
+// notReady: GET /health when the database doesn't answer (slice 4 decision 72). The detail names
+// the dependency, not the error: the cause is in the log line.
+func notReady() Problem {
+	return Problem{
+		Type:   "urn:ledger-demo:problem:not-ready",
+		Title:  "Not ready",
+		Status: http.StatusServiceUnavailable,
+		Detail: "The database did not answer.",
+	}
+}
+
 // httpProblem is a plain HTTP error (unknown routes, body framing errors, unexpected 500s), its
 // title Node's phrase for the status (Node's STATUS_CODES).
 func httpProblem(status int, detail string) Problem {

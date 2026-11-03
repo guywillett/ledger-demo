@@ -25,6 +25,7 @@ func newHandler(pool *pgxpool.Pool, logger *slog.Logger, webhooks webhookRoutes)
 	mux := http.NewServeMux()
 	accounts := accountRoutes{db: pool}
 	withdrawalsAPI := withdrawalRoutes{pool: pool}
+	health := healthRoutes{db: pool}
 	// "GET" in a pattern matches HEAD too, as Fastify's GET routes do: net/http then sends the
 	// headers (Content-Length included) without the body.
 	mux.Handle("GET /accounts/{account_id}/balance", handle(accounts.balance))
@@ -33,6 +34,7 @@ func newHandler(pool *pgxpool.Pool, logger *slog.Logger, webhooks webhookRoutes)
 	mux.Handle("GET /withdrawals/{withdrawal_id}", handle(withdrawalsAPI.get))
 	mux.Handle("POST /provider/incoming-payments", handle(webhooks.incomingPayment))
 	mux.Handle("POST /provider/transfer-updates", handle(webhooks.transferUpdate))
+	mux.Handle("GET /health", quietOnSuccess(handle(health.health)))
 	// Every other request, whatever its method or path: the most specific matching pattern wins, so
 	// this matches only what nothing else does. Registering it also keeps ServeMux from answering
 	// 405 for a known path with another method: something always matches.
