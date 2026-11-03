@@ -5,8 +5,9 @@ import type { Deposit } from '../../src/deposits/deposits.ts';
 import { book, postDecision } from '../../src/ledger/posting.ts';
 import { buildApp } from '../../src/api/app.ts';
 import { createPool, withTransaction } from '../../src/shared/db.ts';
-import { newUuid, toTypeId } from '../../src/shared/ids.ts';
+import { fromTypeId, newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import {
+  ALICE,
   capturingLogger,
   createTestAccount,
   createTestApp,
@@ -23,6 +24,7 @@ const testApp = await createTestApp();
 const { app, pool } = testApp;
 afterAll(testApp.close);
 
+const ACCOUNT = '/accounts/{account_id}';
 const BALANCE = '/accounts/{account_id}/balance';
 const TRANSACTIONS = '/accounts/{account_id}/transactions';
 
@@ -37,17 +39,95 @@ function balanceOf(account: TestAccount): Promise<Awaited<ReturnType<typeof getJ
   return getJson(app, `/accounts/${account.typeId}/balance`, BALANCE);
 }
 
+// The account's created_at as the API writes it, read from the database (set when it was inserted).
+async function createdAt(id: Uuid<'acct'>): Promise<string> {
+  const result = await pool.query<{ created_at: Date }>(
+    'SELECT created_at FROM accounts WHERE id = $1',
+    [id],
+  );
+  const row = result.rows[0];
+  if (row === undefined) throw new Error(`no account ${id}`);
+  return row.created_at.toISOString();
+}
+
+describe('GET /accounts/:id', () => {
+  // Byte for byte, in this order (Go's must match): id, name, iban, created_at.
+  it('returns a seeded account', async () => {
+    const response = await getJson(app, `/accounts/${ALICE.id}`, ACCOUNT);
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe(
+      JSON.stringify({
+        id: ALICE.id,
+        name: 'alice',
+        iban: ALICE.iban,
+        created_at: await createdAt(fromTypeId('acct', ALICE.id)),
+      }),
+    );
+  });
+
+  it('returns a test account', async () => {
+    const account = await createTestAccount(pool);
+    const response = await getJson(app, `/accounts/${account.typeId}`, ACCOUNT);
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe(
+      JSON.stringify({
+        id: account.typeId,
+        name: `test-${account.id}`,
+        iban: account.iban,
+        created_at: await createdAt(account.id),
+      }),
+    );
+  });
+
+  it('answers 404 for an unknown account', async () => {
+    const response = await getJson(app, `/accounts/${toTypeId('acct', newUuid('acct'))}`, ACCOUNT);
+    expect(response.statusCode).toBe(404);
+    expect(response.json).toEqual({
+      type: 'urn:ledger-demo:problem:account-not-found',
+      title: 'Account not found',
+      status: 404,
+    });
+  });
+
+  it.each(['acct_garbage', toTypeId('dep', newUuid('dep')), 'alice'])(
+    'answers 400 for account_id %s',
+    async (id) => {
+      const response = await getJson(app, `/accounts/${id}`, ACCOUNT);
+      expect(response.statusCode).toBe(400);
+      expect(response.json).toEqual({
+        type: 'urn:ledger-demo:problem:invalid-request',
+        title: 'Invalid request',
+        status: 400,
+        errors: [{ path: 'account_id', message: 'must be a acct_ ID' }],
+      });
+    },
+  );
+
+  it('answers HEAD with the headers only', async () => {
+    const get = await app.inject({ method: 'GET', url: `/accounts/${ALICE.id}` });
+    const head = await app.inject({ method: 'HEAD', url: `/accounts/${ALICE.id}` });
+    expect(head.statusCode).toBe(200);
+    expect(head.body).toBe('');
+    expect(head.headers['content-length']).toBe(String(Buffer.byteLength(get.body)));
+    expect(head.headers['content-type']).toBe('application/json; charset=utf-8');
+  });
+});
+
 describe('GET /accounts/:id/balance', () => {
+  // The body byte for byte: account_id first (slice 4, step 2), as Go writes it.
   it('starts at zero', async () => {
     const account = await createTestAccount(pool);
     const response = await balanceOf(account);
     expect(response.statusCode).toBe(200);
-    expect(response.json).toEqual({
-      pending_in: '0',
-      available: '0',
-      held: '0',
-      currency: 'EUR',
-    });
+    expect(response.body).toBe(
+      JSON.stringify({
+        account_id: account.typeId,
+        pending_in: '0',
+        available: '0',
+        held: '0',
+        currency: 'EUR',
+      }),
+    );
   });
 
   it('shows funds in pending_in once booked, then in available once credited', async () => {

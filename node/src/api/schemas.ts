@@ -7,6 +7,7 @@ import {
   sepaTextSchema,
   typeIdSchema,
 } from '../shared/schemas.ts';
+import type { Account } from '../accounts/accounts.ts';
 import type { Deposit } from '../deposits/deposits.ts';
 import type { Balance } from '../ledger/balances.ts';
 import type { DepositStatus, StatusChange } from '../deposits/status.ts';
@@ -60,15 +61,33 @@ export const transactionsQuerySchema = z.object({
   include: z.literal('history').optional(),
 });
 
+export type AccountResponse = {
+  readonly id: TypeIdString<'acct'>;
+  readonly name: string;
+  readonly iban: string;
+  readonly created_at: string;
+};
+
+export function toAccountResponse(account: Account): AccountResponse {
+  return {
+    id: toTypeId('acct', account.id),
+    name: account.name,
+    iban: account.iban,
+    created_at: account.createdAt.toISOString(),
+  };
+}
+
 export type BalanceResponse = {
+  readonly account_id: TypeIdString<'acct'>;
   readonly pending_in: string;
   readonly available: string;
   readonly held: string;
   readonly currency: 'EUR';
 };
 
-export function toBalanceResponse(balance: Balance): BalanceResponse {
+export function toBalanceResponse(balance: Balance, accountId: Uuid<'acct'>): BalanceResponse {
   return {
+    account_id: toTypeId('acct', accountId),
     pending_in: balance.pendingIn.toString(),
     available: balance.available.toString(),
     held: balance.held.toString(),

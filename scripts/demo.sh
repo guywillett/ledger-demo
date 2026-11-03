@@ -30,7 +30,8 @@
 #
 # Uses only the HTTP API and docker compose (reconciliation runs in its own compose service,
 # which reads the shared database), so it works against any implementation of the contract.
-# Deposits go to the demo accounts (alice, bob, carol) in the development database.
+# Deposits go to the demo accounts (alice, bob, carol) in the development database: their IDs are
+# the seed's, their IBANs read from the API.
 #
 # Exit codes, as for reconciliation: 0 all good; 1 an expectation failed or the books disagree;
 # 2 deposits still unfinished after the wait, or carol couldn't be funded; 3 couldn't run (the API
@@ -42,9 +43,6 @@ API=${API:-http://localhost:3000}
 ALICE=acct_01m564xr00fx7rjvqryn5dzwxx
 BOB=acct_01m564xr01ecrvnckn84evqsax
 CAROL=acct_01m564xr02e70a25p2hkva3gbn
-ALICE_IBAN=FR7612345000010000000000193
-BOB_IBAN=FR7612345000010000000000290
-CAROL_IBAN=FR7612345000010000000000387
 FOREIGN_IBAN=DE75512108001245126199 # valid, but not one of ours
 RUN="demo-$(date +%s)"
 failures=0
@@ -192,6 +190,13 @@ reconcile() {
 
 curl -sf -o /dev/null "$API/health" ||
   { echo "The API isn't ready at $API: run docker compose up -d --build first."; exit 3; }
+
+# The seed accounts' IBANs, which the notifications are addressed to, from the API.
+ALICE_IBAN=$(field "$(curl -s "$API/accounts/$ALICE")" iban)
+BOB_IBAN=$(field "$(curl -s "$API/accounts/$BOB")" iban)
+CAROL_IBAN=$(field "$(curl -s "$API/accounts/$CAROL")" iban)
+[ -n "$ALICE_IBAN" ] && [ -n "$BOB_IBAN" ] && [ -n "$CAROL_IBAN" ] ||
+  { echo "Couldn't read the demo accounts' IBANs from $API/accounts/{id}."; exit 3; }
 
 say "1. The same notification 5 times"
 codes=""

@@ -10,14 +10,14 @@
 #
 # Starts api-other (the compose profile "differential", host port 3001) in the implementation
 # opposite to the running api's (API_IMPL, node by default), and sends each request to both:
-# the health check, balances, every page of each demo account's transactions (each page's cursor
-# used on the other implementation too), the query parameters' edge cases, withdrawals in each final
-# status, unknown and malformed IDs, unknown routes and wrong methods, and replays of the demo's
-# withdrawal requests (the same key and body, then the same key and another amount: writes that
-# change nothing). It compares the status code, the body byte for byte, and the headers: names
-# case-insensitively, ignoring date, x-request-id and the transport headers. A difference is
-# printed (the request, the headers side by side, a diff of the bodies) and the check carries on.
-# Stops api-other however it ends.
+# the health check, the accounts, balances, every page of each demo account's transactions (each
+# page's cursor used on the other implementation too), the query parameters' edge cases,
+# withdrawals in each final status, unknown and malformed IDs, unknown routes and wrong methods,
+# and replays of the demo's withdrawal requests (the same key and body, then the same key and
+# another amount: writes that change nothing). It compares the status code, the body byte for
+# byte, and the headers: names case-insensitively, ignoring date, x-request-id and the transport
+# headers. A difference is printed (the request, the headers side by side, a diff of the bodies)
+# and the check carries on. Stops api-other however it ends.
 #
 # Exit codes, as the other scripts': 0 every response the same; 1 a difference, or a request there
 # to succeed (a page, a replay) that didn't; 3 couldn't run (an API isn't up, or too little data:
@@ -233,6 +233,19 @@ compare GET /health
 expect_status 200
 compare HEAD /health
 
+say "Accounts"
+for account in $ACCOUNTS; do
+  compare GET "/accounts/$account"
+  expect_status 200
+done
+compare HEAD "/accounts/$ALICE"
+compare GET "/accounts/$(unknown_id "$ALICE")"
+for id in nope acct_123 "acct_${ALICE#acct_}x" "$(printf '%s' "$ALICE" | tr 'a-z' 'A-Z')" \
+  "acct_8${ALICE#acct_?}" "pay_${ALICE#acct_}" "dep_${ALICE#acct_}" "wd_${ALICE#acct_}" \
+  "${ALICE#acct_}" "acct_" "acct%5F${ALICE#acct_}"; do
+  compare GET "/accounts/$id"
+done
+
 say "Balances"
 for account in $ACCOUNTS; do
   compare GET "/accounts/$account/balance"
@@ -299,7 +312,7 @@ for id in "$(unknown_id "$executed")" nope wd_123 "dep_${executed#wd_}" "acct_${
 done
 
 say "Unknown routes and wrong methods"
-for path in / /nope /accounts "/accounts/$ALICE" "/accounts/$ALICE/" "/accounts/$ALICE/balance/" \
+for path in / /nope /accounts "/accounts/$ALICE/" "/accounts/$ALICE/balance/" \
   "/accounts/$ALICE/nope" /withdrawals /withdrawals/ "/withdrawals/$executed/" \
   "/Accounts/$ALICE/balance" /accounts//balance "//accounts/$ALICE/balance" \
   "/accounts/$ALICE/../$BOB/balance" /provider /provider/nope; do

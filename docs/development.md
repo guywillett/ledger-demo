@@ -214,7 +214,7 @@ Exit code `0` means the books agree, `1` that they disagree, `2` stuck deposits,
 Two scripts beside the demo, each against the running stack, with the demo's exit codes (`0` all good, `1` an expectation failed, `3` couldn't run; `shared-consumer.sh` also `2`, deposits unfinished after the wait). Each works out the other implementation from the running service's variable, starts its extra service under its own profile, and removes it however it ends.
 
 - **`scripts/shared-consumer.sh`:** starts `deposit-worker-other` (the opposite of `DEPOSIT_WORKER_IMPL`) on the same durable consumer, posts a burst of 30 deposits, and checks from the two workers' logs that both processed some and none was processed twice; then reconciles. Run it on any stack, after `up -d`; it adds its own deposits.
-- **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: the health check, balances, every page of each demo account's transactions (each cursor used on the other implementation too), query-parameter edge cases, withdrawals in each final status, unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
+- **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: the health check, the accounts, balances, every page of each demo account's transactions (each cursor used on the other implementation too), query-parameter edge cases, withdrawals in each final status, unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
 
 ## Node
 
@@ -276,6 +276,7 @@ curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?li
 Read an account (alice here; TypeIDs of the demo accounts are listed under *Demo accounts*):
 
 ```sh
+curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx           # id, name, iban, created_at
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance
 curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=10&include=history'
 # next page: add &before=<next_before from the previous response>

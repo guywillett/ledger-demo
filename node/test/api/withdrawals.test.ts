@@ -95,6 +95,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
       '/accounts/{account_id}/balance',
     );
     expect(balance.json).toEqual({
+      account_id: account.typeId,
       pending_in: '0',
       available: '600',
       held: '400',

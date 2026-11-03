@@ -20,9 +20,6 @@ API=${API:-http://localhost:3000}
 ALICE=acct_01m564xr00fx7rjvqryn5dzwxx
 BOB=acct_01m564xr01ecrvnckn84evqsax
 CAROL=acct_01m564xr02e70a25p2hkva3gbn
-ALICE_IBAN=FR7612345000010000000000193
-BOB_IBAN=FR7612345000010000000000290
-CAROL_IBAN=FR7612345000010000000000387
 RUN="shared-$(date +%s)"
 DEPOSITS=30
 failures=0
@@ -64,6 +61,13 @@ expect() {
 
 curl -sf -o /dev/null "$API/health" ||
   { echo "The API isn't ready at $API: run docker compose up -d --build first."; exit 3; }
+
+# The seed accounts' IBANs, which the notifications are addressed to, from the API.
+ALICE_IBAN=$(field "$(curl -s "$API/accounts/$ALICE")" iban)
+BOB_IBAN=$(field "$(curl -s "$API/accounts/$BOB")" iban)
+CAROL_IBAN=$(field "$(curl -s "$API/accounts/$CAROL")" iban)
+[ -n "$ALICE_IBAN" ] && [ -n "$BOB_IBAN" ] && [ -n "$CAROL_IBAN" ] ||
+  { echo "Couldn't read the demo accounts' IBANs from $API/accounts/{id}."; exit 3; }
 
 say "Starting a $other_impl deposit-worker beside the $main_impl one, on the same consumer"
 # However the script ends, stop and remove it again: the stack is left as it was found.

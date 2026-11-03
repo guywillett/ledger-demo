@@ -109,6 +109,53 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /accounts/{account_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: The account
+      description: |
+        The account itself (slice 4 decision 71): its ID, its unique name, its IBAN (for incoming
+        payments) and when it was created. Its balance is a sub-resource of its own.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: The account
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          description: account_id is not an acct_ ID
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such account (type urn:ledger-demo:problem:account-not-found)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /accounts/{account_id}/balance:
     parameters:
       - $ref: '#/components/parameters/RequestId'
@@ -625,11 +672,33 @@ components:
             - type: string
               pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
             - type: 'null'
+    Account:
+      type: object
+      additionalProperties: false
+      required: [id, name, iban, created_at]
+      properties:
+        id:
+          type: string
+          pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        name:
+          description: The account's unique label.
+          type: string
+          minLength: 1
+        iban:
+          type: string
+          description: The account's IBAN, normalised (no separators, upper case).
+          pattern: '^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$'
+        created_at:
+          type: string
+          format: date-time
     Balance:
       type: object
       additionalProperties: false
-      required: [pending_in, available, held, currency]
+      required: [account_id, pending_in, available, held, currency]
       properties:
+        account_id:
+          type: string
+          pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
         pending_in:
           description: Booked but not yet credited (under review, or decided and not yet posted).
           $ref: '#/components/schemas/Money'
