@@ -48,7 +48,7 @@ func TestReplacesABadRequestID(t *testing.T) {
 func TestLogsOneAccessLinePerRequest(t *testing.T) {
 	a := newTestAPI(t)
 	account := testdb.NewAccount(t, a.pool)
-	req, r := a.do(t, http.MethodGet, transactionsPath(account.ID, "iban=FR7612345000010000000000193&limit=1"),
+	req, r := a.do(t, http.MethodGet, depositsPath(account.ID, "iban=FR7612345000010000000000193&limit=1"),
 		http.Header{"X-Request-Id": {"req-1"}})
 	contracttest.Check(t, req, &http.Response{
 		StatusCode: r.status, Header: r.header, Body: io.NopCloser(strings.NewReader(r.body)),
@@ -65,7 +65,7 @@ func TestLogsOneAccessLinePerRequest(t *testing.T) {
 		"service":     "api",
 		"request_id":  "req-1",
 		"method":      "GET",
-		"path":        transactionsPath(account.ID, ""), // without the query string
+		"path":        depositsPath(account.ID, ""), // without the query string
 		"status_code": float64(200),
 	}
 	for key, value := range want {
@@ -95,7 +95,7 @@ func TestAnswers404AsNodeDoes(t *testing.T) {
 		{http.MethodGet, "/accounts/" + account.ID.TypeID() + "/nope"},
 		{http.MethodGet, strings.ToUpper("/accounts") + "/" + account.ID.TypeID() + "/balance"},
 		{http.MethodPost, balance}, // a known path, another method
-		{http.MethodDelete, transactionsPath(account.ID, "")},
+		{http.MethodDelete, depositsPath(account.ID, "")},
 		{http.MethodOptions, balance},
 		{http.MethodGet, "/" + balance},                                        // //accounts/…
 		{http.MethodGet, "/accounts//" + account.ID.TypeID() + "/balance"},     // an empty segment

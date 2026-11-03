@@ -142,3 +142,56 @@ func isJSWhitespace(r rune) bool {
 	}
 	return r >= '\u2000' && r <= '\u200a'
 }
+
+// includeHistory reads ?include, as Node's include: z.literal('history').optional(): absent is
+// false, exactly "history" true, anything else (another value, or the parameter given twice) a
+// problem. Shared by the deposits' and the withdrawals' GETs.
+func includeHistory(query map[string][]string) (bool, []ValidationError) {
+	values, ok := query["include"]
+	if !ok {
+		return false, nil
+	}
+	if len(values) == 1 && values[0] == "history" {
+		return true, nil
+	}
+	return false, []ValidationError{{Path: "include", Message: `Invalid input: expected "history"`}}
+}
+
+// limitErrors are Zod's errors for a limit read as n, in Zod's order, measured against Node. A
+// value that isn't a finite number, or isn't whole, gets that one error. A whole number outside
+// JavaScript's safe range (int() refuses it) gets that error and is still checked against the
+// bounds, so 1e300 has two errors, as in Node; within the range, only the bounds are checked.
+func limitErrors(n float64) []ValidationError {
+	one := func(message string) []ValidationError {
+		return []ValidationError{{Path: "limit", Message: message}}
+	}
+	var messages []string
+	switch {
+	case math.IsNaN(n):
+		return one("Invalid input: expected number, received NaN")
+	case math.IsInf(n, 1):
+		return one("Invalid input: expected number, received Infinity")
+	case math.IsInf(n, -1):
+		return one("Invalid input: expected number, received -Infinity")
+	case n != math.Trunc(n):
+		return one("Invalid input: expected int, received number")
+	case n > maxSafeInteger:
+		messages = append(messages, "Too big: expected int to be <=9007199254740991")
+	case n < -maxSafeInteger:
+		messages = append(messages, "Too small: expected int to be >=-9007199254740991")
+	}
+	if n < 1 {
+		messages = append(messages, "Too small: expected number to be >=1")
+	}
+	if n > 200 {
+		messages = append(messages, "Too big: expected number to be <=200")
+	}
+	errs := make([]ValidationError, len(messages))
+	for i, m := range messages {
+		errs[i] = ValidationError{Path: "limit", Message: m}
+	}
+	return errs
+}
+
+// maxSafeInteger is JavaScript's Number.MAX_SAFE_INTEGER, 2^53 - 1: Zod's int() accepts no larger.
+const maxSafeInteger = 1<<53 - 1

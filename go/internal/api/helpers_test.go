@@ -127,6 +127,26 @@ func process(t *testing.T, pool *pgxpool.Pool, deposit ids.DepositID, decision d
 	}
 }
 
+// decideOnly takes a deposit through the lifecycle to its decision without posting it: approved
+// or rejected, not yet credited or returned.
+func decideOnly(t *testing.T, pool *pgxpool.Pool, deposit ids.DepositID, decision deposits.Transition, reason string) {
+	t.Helper()
+	ctx := context.Background()
+	err := db.InTx(ctx, pool, func(tx db.Tx) error {
+		if _, err := ledger.Book(ctx, tx, deposit); err != nil {
+			return err
+		}
+		if _, _, err := deposits.TransitionStatus(ctx, tx, deposit, deposits.StartReview, ""); err != nil {
+			return err
+		}
+		_, _, err := deposits.TransitionStatus(ctx, tx, deposit, decision, reason)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func book(t *testing.T, pool *pgxpool.Pool, deposit ids.DepositID) {
 	t.Helper()
 	err := db.InTx(context.Background(), pool, func(tx db.Tx) error {

@@ -97,6 +97,27 @@ ORDER BY id DESC
 LIMIT $2
 `
 
+const getSQL = `SELECT ` + columns + ` FROM deposits WHERE id = $1 AND account_id = $2`
+
+// Get reads a deposit of the account; false if the account has no such deposit, whether there is
+// none or it is another account's (slice 4 decision 64: one statement decides). An unmatched
+// deposit has no account, so it is never found.
+func Get(
+	ctx context.Context,
+	q db.Querier,
+	account ids.AccountID,
+	id ids.DepositID,
+) (Deposit, bool, error) {
+	d, err := scanDeposit(q.QueryRow(ctx, getSQL, id, account))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Deposit{}, false, nil
+	}
+	if err != nil {
+		return Deposit{}, false, fmt.Errorf("deposit %v of %v: %w", id, account, err)
+	}
+	return d, true, nil
+}
+
 // ListPage reads a page of at most limit deposits of the account, newest first, older than before
 // if it isn't nil. false if there is no such account (an account without deposits gets an empty
 // page). The existence check is a read before a read: nothing is written based on it.

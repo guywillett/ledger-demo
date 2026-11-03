@@ -69,6 +69,16 @@ func accountNotFound() Problem {
 	}
 }
 
+// depositNotFound: also for another account's deposit (slice 4 decision 64: the account in the
+// path is a scope).
+func depositNotFound() Problem {
+	return Problem{
+		Type:   "urn:ledger-demo:problem:deposit-not-found",
+		Title:  "Deposit not found",
+		Status: http.StatusNotFound,
+	}
+}
+
 func withdrawalNotFound() Problem {
 	return Problem{
 		Type:   "urn:ledger-demo:problem:withdrawal-not-found",
