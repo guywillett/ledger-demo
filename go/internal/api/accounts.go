@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"slices"
 
+	"github.com/guywillett/ledger-demo/go/internal/accounts"
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/deposits"
 	"github.com/guywillett/ledger-demo/go/internal/ids"
@@ -26,10 +27,18 @@ type accountRoutes struct {
 // and a nullable field a pointer (null when nil).
 
 type balanceResponse struct {
-	PendingIn money.Amount `json:"pending_in"`
-	Available money.Amount `json:"available"`
-	Held      money.Amount `json:"held"`
-	Currency  string       `json:"currency"`
+	AccountID ids.AccountID `json:"account_id"`
+	PendingIn money.Amount  `json:"pending_in"`
+	Available money.Amount  `json:"available"`
+	Held      money.Amount  `json:"held"`
+	Currency  string        `json:"currency"`
+}
+
+type accountResponse struct {
+	ID        ids.AccountID  `json:"id"`
+	Name      string         `json:"name"`
+	IBAN      sepa.IBAN      `json:"iban"`
+	CreatedAt timestamp.Time `json:"created_at"`
 }
 
 type depositResponse struct {
@@ -113,10 +122,34 @@ func (a accountRoutes) balance(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 	writeJSON(w, http.StatusOK, "application/json; charset=utf-8", balanceResponse{
+		AccountID: account,
 		PendingIn: balance.PendingIn,
 		Available: balance.Available,
 		Held:      balance.Held,
 		Currency:  balance.Currency,
+	})
+	return nil
+}
+
+func (a accountRoutes) account(w http.ResponseWriter, r *http.Request) error {
+	accountID, invalid := accountParam(r)
+	if invalid != nil {
+		writeProblem(w, invalidRequest(invalid))
+		return nil
+	}
+	account, found, err := accounts.Get(r.Context(), a.db, accountID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		writeProblem(w, accountNotFound())
+		return nil
+	}
+	writeJSON(w, http.StatusOK, "application/json; charset=utf-8", accountResponse{
+		ID:        account.ID,
+		Name:      account.Name,
+		IBAN:      account.IBAN,
+		CreatedAt: timestamp.Time(account.CreatedAt),
 	})
 	return nil
 }

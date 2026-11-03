@@ -200,7 +200,7 @@ func TestCreatesTheWithdrawalAndHoldsItsFunds201WithALocationHeader(t *testing.T
 		t.Errorf("holds %d", n)
 	}
 	balance := a.get(t, "/accounts/"+account.ID.TypeID()+"/balance")
-	if balance.body != `{"pending_in":"0","available":"600","held":"400","currency":"EUR"}` {
+	if balance.body != `{"account_id":"`+account.ID.TypeID()+`","pending_in":"0","available":"600","held":"400","currency":"EUR"}` {
 		t.Errorf("balance %s", balance.body)
 	}
 }

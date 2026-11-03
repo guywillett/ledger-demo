@@ -92,7 +92,7 @@ func TestAnswers404AsNodeDoes(t *testing.T) {
 	balance := balancePath(account.ID)
 	tests := []struct{ method, target string }{
 		{http.MethodGet, "/nope?iban=FR7612345000010000000000193"},
-		{http.MethodGet, "/accounts/" + account.ID.TypeID()},
+		{http.MethodGet, "/accounts/" + account.ID.TypeID() + "/nope"},
 		{http.MethodGet, strings.ToUpper("/accounts") + "/" + account.ID.TypeID() + "/balance"},
 		{http.MethodPost, balance}, // a known path, another method
 		{http.MethodDelete, transactionsPath(account.ID, "")},
@@ -179,7 +179,7 @@ func TestHeadAnswersTheHeadersOnly(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
-	want := len(`{"pending_in":"0","available":"0","held":"0","currency":"EUR"}`)
+	want := len(`{"account_id":"` + account.ID.TypeID() + `","pending_in":"0","available":"0","held":"0","currency":"EUR"}`)
 	if resp.StatusCode != 200 || len(body) != 0 || resp.ContentLength != int64(want) ||
 		resp.Header.Get("Content-Type") != "application/json; charset=utf-8" {
 		t.Errorf("HEAD = %d, Content-Length %d, Content-Type %q, body %q; want 200, %d, JSON, none",
