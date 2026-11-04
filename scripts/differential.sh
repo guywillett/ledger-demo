@@ -230,7 +230,9 @@ while read -r status uuid; do
 done <<< "$withdrawals"
 [ -n "$executed" ] || too_little "no executed withdrawal"
 [ -n "$failed" ] || too_little "no failed withdrawal"
-first_deposit=$(printf '%s\n' $deposit_ids | head -1)
+# The first ID, read without a pipe: printf | head -1 fails under pipefail (a broken pipe) once
+# the list outgrows the pipe's buffer.
+read -r first_deposit _ <<< "$deposit_ids"
 echo "   deposits:$deposit_statuses; withdrawals: executed $executed, failed $failed"
 
 say "Starting a $other_impl API beside the $main_impl one, on port ${API_OTHER##*:}"
