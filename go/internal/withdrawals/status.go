@@ -207,29 +207,44 @@ type StatusChange struct {
 	At     time.Time
 }
 
-const historyOfSQL = `
-SELECT from_status, to_status, reason, at
+const historiesSQL = `
+SELECT withdrawal_id, from_status, to_status, reason, at
 FROM withdrawal_status_history
-WHERE withdrawal_id = $1
-ORDER BY id
+WHERE withdrawal_id = ANY($1)
+ORDER BY withdrawal_id, id
 `
 
-// StatusHistory reads a withdrawal's status history, oldest change first.
-func StatusHistory(ctx context.Context, q db.Querier, id ids.WithdrawalID) ([]StatusChange, error) {
-	rows, err := q.Query(ctx, historyOfSQL, id)
+// StatusHistories reads the status history of several withdrawals in one query (not one query per
+// withdrawal), oldest change first. Withdrawals without history rows are absent from the map.
+func StatusHistories(
+	ctx context.Context,
+	q db.Querier,
+	withdrawals []ids.WithdrawalID,
+) (map[ids.WithdrawalID][]StatusChange, error) {
+	histories := make(map[ids.WithdrawalID][]StatusChange)
+	if len(withdrawals) == 0 {
+		return histories, nil
+	}
+	// As text: pgx encodes a []string for ANY($1), and Postgres reads the elements as the column's
+	// uuid (the same parameter as Node's).
+	uuids := make([]string, len(withdrawals))
+	for i, id := range withdrawals {
+		uuids[i] = id.UUID().String()
+	}
+	rows, err := q.Query(ctx, historiesSQL, uuids)
 	if err != nil {
-		return nil, fmt.Errorf("withdrawal %v history: %w", id, err)
+		return nil, fmt.Errorf("withdrawal histories: %w", err)
 	}
 	// defer rows.Close() releases the connection however the function returns; rows.Err() after
 	// the loop reports an error that ended it early (Next returns false for both "done" and
 	// "failed").
 	defer rows.Close()
-	var history []StatusChange
 	for rows.Next() {
+		var id ids.WithdrawalID
 		var change StatusChange
 		var from *string
 		var to string
-		if err := rows.Scan(&from, &to, &change.Reason, &change.At); err != nil {
+		if err := rows.Scan(&id, &from, &to, &change.Reason, &change.At); err != nil {
 			return nil, err
 		}
 		if from != nil {
@@ -242,7 +257,7 @@ func StatusHistory(ctx context.Context, q db.Querier, id ids.WithdrawalID) ([]St
 		if change.To, err = ParseStatus(to); err != nil {
 			return nil, err
 		}
-		history = append(history, change)
+		histories[id] = append(histories[id], change)
 	}
-	return history, rows.Err()
+	return histories, rows.Err()
 }

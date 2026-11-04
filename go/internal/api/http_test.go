@@ -104,7 +104,7 @@ func TestAnswers404AsNodeDoes(t *testing.T) {
 		{http.MethodGet, "/accounts/x/../" + account.ID.TypeID() + "/balance"}, // a dot-dot segment
 		// An empty path parameter (slice 3 decision 62): both are unclean paths (a trailing slash,
 		// a //), answered by onlyCleanPaths before routing; Node's onRequest hook matches it.
-		{http.MethodGet, "/withdrawals/"},
+		{http.MethodGet, "/accounts/" + account.ID.TypeID() + "/withdrawals/"},
 		{http.MethodGet, "/accounts//balance"},
 	}
 	for _, tt := range tests {

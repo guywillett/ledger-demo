@@ -57,6 +57,25 @@ func (r response) json(t *testing.T) map[string]any {
 	return v
 }
 
+// objects returns the JSON array under key in v (a decoded JSON object), each item an object.
+// Fatal, to this test only, if there is none or it holds something else: a panic would stop the
+// package's other tests too (a type assertion that fails without its ok form panics), so an
+// unexpected response, e.g. a 500 problem where a list was due, would hide every later result.
+func objects(t *testing.T, v map[string]any, key string) []map[string]any {
+	t.Helper()
+	list, ok := v[key].([]any)
+	if !ok {
+		t.Fatalf("no %s array in %v", key, v)
+	}
+	found := make([]map[string]any, len(list))
+	for i, item := range list {
+		if found[i], ok = item.(map[string]any); !ok {
+			t.Fatalf("%s[%d] is not an object: %v", key, i, item)
+		}
+	}
+	return found
+}
+
 // do sends a request through the handler with net/http/httptest: NewRequest builds an incoming
 // request, as the server would have parsed it, and NewRecorder is a ResponseWriter that keeps
 // what's written. No network: the counterpart of Fastify's inject.

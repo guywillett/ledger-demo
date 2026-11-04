@@ -31,9 +31,8 @@ func depositsPath(account ids.AccountID, query string) string {
 func depositRows(t *testing.T, r response) [][3]any {
 	t.Helper()
 	var rows [][3]any
-	for _, d := range r.json(t)["data"].([]any) {
-		m := d.(map[string]any)
-		rows = append(rows, [3]any{m["id"], m["amount_minor"], m["status"]})
+	for _, d := range objects(t, r.json(t), "data") {
+		rows = append(rows, [3]any{d["id"], d["amount_minor"], d["status"]})
 	}
 	return rows
 }
@@ -90,8 +89,8 @@ func TestDepositsPagesWithLimitAndBefore(t *testing.T) {
 	query := "limit=2"
 	for {
 		page := a.get(t, depositsPath(account.ID, query)).json(t)
-		for _, d := range page["data"].([]any) {
-			seen = append(seen, d.(map[string]any)["id"])
+		for _, d := range objects(t, page, "data") {
+			seen = append(seen, d["id"])
 		}
 		next := page["next_before"]
 		cursors = append(cursors, next)
@@ -116,15 +115,13 @@ func TestDepositsIncludesHistoryWithoutReasons(t *testing.T) {
 	process(t, a.pool, approved, deposits.Approve, "")
 	process(t, a.pool, rejected, deposits.Reject, "sanctions screening hit")
 
-	histories := map[any][]any{}
-	for _, d := range a.get(t, depositsPath(account.ID, "include=history")).json(t)["data"].([]any) {
-		m := d.(map[string]any)
-		histories[m["id"]] = m["history"].([]any)
+	histories := map[any][]map[string]any{}
+	for _, d := range objects(t, a.get(t, depositsPath(account.ID, "include=history")).json(t), "data") {
+		histories[d["id"]] = objects(t, d, "history")
 	}
 	var pairs [][2]any
 	for _, h := range histories[approved.TypeID()] {
-		m := h.(map[string]any)
-		pairs = append(pairs, [2]any{m["from_status"], m["to_status"]})
+		pairs = append(pairs, [2]any{h["from_status"], h["to_status"]})
 	}
 	want := [][2]any{
 		{nil, "created"}, {"created", "received"}, {"received", "under_review"},
@@ -134,7 +131,10 @@ func TestDepositsIncludesHistoryWithoutReasons(t *testing.T) {
 		t.Errorf("approved history = %v", pairs)
 	}
 	// The compliance decision's reason is internal (slice 4 decision 76): null in the history.
-	decision := histories[rejected.TypeID()][3].(map[string]any)
+	if len(histories[rejected.TypeID()]) < 4 {
+		t.Fatalf("rejected history = %v, want its decision 4th", histories[rejected.TypeID()])
+	}
+	decision := histories[rejected.TypeID()][3]
 	if decision["from_status"] != "under_review" || decision["to_status"] != "rejected" ||
 		decision["reason"] != nil {
 		t.Errorf("rejected decision = %v, want its reason null", decision)
@@ -205,8 +205,8 @@ func TestDepositsLimitMessagesAreZods(t *testing.T) {
 	for _, tt := range tests {
 		r := a.get(t, depositsPath(account.ID, "limit="+tt.limit))
 		var messages []any
-		for _, e := range r.json(t)["errors"].([]any) {
-			messages = append(messages, e.(map[string]any)["message"])
+		for _, e := range objects(t, r.json(t), "errors") {
+			messages = append(messages, e["message"])
 		}
 		if !slices.Equal(messages, tt.messages) {
 			t.Errorf("limit=%s: messages %q\nwant %q", tt.limit, messages, tt.messages)
@@ -221,8 +221,8 @@ func TestDepositsReportsEveryQueryProblem(t *testing.T) {
 	account := testdb.NewAccount(t, a.pool)
 	r := a.get(t, depositsPath(account.ID, "include=x&limit=0"))
 	var paths []any
-	for _, e := range r.json(t)["errors"].([]any) {
-		paths = append(paths, e.(map[string]any)["path"])
+	for _, e := range objects(t, r.json(t), "errors") {
+		paths = append(paths, e["path"])
 	}
 	if !slices.Equal(paths, []any{"limit", "include"}) {
 		t.Errorf("error paths = %v, want [limit include]", paths)
@@ -346,7 +346,7 @@ func TestDepositsListGivesEachStatusItsFailureReason(t *testing.T) {
 		account := testdb.NewAccount(t, a.pool)
 		tt.setUp(t, a.pool, testdb.NewDeposit(t, a.pool, account, 1250))
 		r := a.get(t, depositsPath(account.ID, ""))
-		item := r.json(t)["data"].([]any)[0].(map[string]any)
+		item := objects(t, r.json(t), "data")[0]
 		if item["status"] != tt.status || item["failure_reason"] != tt.failureReason {
 			t.Errorf("%s: status %v, failure_reason %v; want %v", tt.status, item["status"],
 				item["failure_reason"], tt.failureReason)
@@ -500,10 +500,16 @@ func accountWithStatuses(t *testing.T, pool *pgxpool.Pool) (testdb.Account, map[
 	return account, map[string]ids.DepositID{"created": created, "credited": credited, "returned": returned}
 }
 
+// listedIDs are the IDs of a list response's items. Fatal (to this test only, not a panic that
+// would stop the package's other tests) if the response isn't a list.
 func listedIDs(t *testing.T, r response) []any {
 	t.Helper()
+	data, ok := r.json(t)["data"].([]any)
+	if !ok {
+		t.Fatalf("not a list: %d %s", r.status, r.body)
+	}
 	var found []any
-	for _, d := range r.json(t)["data"].([]any) {
+	for _, d := range data {
 		found = append(found, d.(map[string]any)["id"])
 	}
 	return found

@@ -167,7 +167,7 @@ func withAccessLog(next http.Handler) http.Handler {
 // onlyCleanPaths answers 404 for a path that isn't in its clean form (a //, a . or .. segment, a
 // trailing slash), as Node's router does. Go's ServeMux would instead redirect it (301) to the
 // clean path; this runs first, so it never sees one. It is also what makes an empty path
-// parameter a 404 (/withdrawals/, /accounts//balance; slice 3 decision 62).
+// parameter a 404 (/accounts//balance, /accounts/x/deposits/; slice 3 decision 62).
 //
 // The path as sent (EscapedPath), not decoded (Path): an escaped / or .. belongs to a path value,
 // as in Node. /accounts/acct_x%2F/balance is the balance route with account_id "acct_x/" (a 400),

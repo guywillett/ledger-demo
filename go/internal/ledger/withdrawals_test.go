@@ -63,10 +63,11 @@ func getWithdrawal(t *testing.T, pool *pgxpool.Pool, id ids.WithdrawalID) withdr
 // historyPairs is a withdrawal's history as (from, to) pairs, "" for the first row's NULL.
 func historyPairs(t *testing.T, pool *pgxpool.Pool, id ids.WithdrawalID) [][2]string {
 	t.Helper()
-	history, err := withdrawals.StatusHistory(context.Background(), pool, id)
+	histories, err := withdrawals.StatusHistories(context.Background(), pool, []ids.WithdrawalID{id})
 	if err != nil {
 		t.Fatal(err)
 	}
+	history := histories[id]
 	pairs := make([][2]string, len(history))
 	for i, change := range history {
 		if change.From != nil {
@@ -340,10 +341,11 @@ func TestReleaseFromHeldAndFromSubmitted(t *testing.T) {
 			if steps := withdrawalSteps(t, pool, id); !slices.Equal(steps, []string{"hold", "release"}) {
 				t.Errorf("movements = %v", steps)
 			}
-			history, err := withdrawals.StatusHistory(context.Background(), pool, id)
+			histories, err := withdrawals.StatusHistories(context.Background(), pool, []ids.WithdrawalID{id})
 			if err != nil {
 				t.Fatal(err)
 			}
+			history := histories[id]
 			last := history[len(history)-1]
 			if last.From == nil || *last.From != origin || last.To != withdrawals.StatusFailed ||
 				last.Reason == nil || *last.Reason != "destination closed" {

@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
 	"slices"
@@ -32,8 +33,10 @@ type withdrawalRoutes struct {
 }
 
 // withdrawalResponse is a withdrawal on the wire, field for field Node's (toWithdrawalResponse), in
-// Node's order. No provider_transfer_id: provider identifiers stay at the edge.
+// Node's order: type first (slice 4 decision 67), in every response that carries one. No
+// provider_transfer_id: provider identifiers stay at the edge (decision 69).
 type withdrawalResponse struct {
+	Type           string             `json:"type"`
 	ID             ids.WithdrawalID   `json:"id"`
 	AccountID      ids.AccountID      `json:"account_id"`
 	IdempotencyKey string             `json:"idempotency_key"`
@@ -50,6 +53,10 @@ type withdrawalResponse struct {
 	History *[]withdrawalStatusChangeResponse `json:"history,omitempty"`
 }
 
+// withdrawalStatusChangeResponse is a withdrawal's history row as a client sees it. Unlike a
+// deposit's, its reason is shown: the only one recorded is on the change to failed, and it is the
+// provider's (its transfer update's reason, or its refusal's), or a generic text of ours when it
+// gave none; meant for the customer (slice 4 decision 76).
 type withdrawalStatusChangeResponse struct {
 	FromStatus *withdrawals.Status `json:"from_status"`
 	ToStatus   withdrawals.Status  `json:"to_status"`
@@ -59,6 +66,7 @@ type withdrawalStatusChangeResponse struct {
 
 func toWithdrawalResponse(w withdrawals.Withdrawal) withdrawalResponse {
 	return withdrawalResponse{
+		Type:           "withdrawal",
 		ID:             w.ID,
 		AccountID:      w.Account,
 		IdempotencyKey: w.IdempotencyKey,
@@ -72,6 +80,11 @@ func toWithdrawalResponse(w withdrawals.Withdrawal) withdrawalResponse {
 		CreatedAt:      timestamp.Time(w.CreatedAt),
 		UpdatedAt:      timestamp.Time(w.UpdatedAt),
 	}
+}
+
+type withdrawalListResponse struct {
+	Data       []withdrawalResponse `json:"data"`
+	NextBefore *ids.WithdrawalID    `json:"next_before"`
 }
 
 // idempotencyKeyPattern is Node's: 1-255 characters from a plain set (the key ends up in logs).
@@ -255,7 +268,8 @@ func (h withdrawalRoutes) create(w http.ResponseWriter, r *http.Request) error {
 		created := result.Withdrawal
 		log.Info("withdrawal created", "withdrawal_id", created.ID, "amount_minor", created.Amount,
 			"creditor_iban", created.CreditorIBAN.Mask(), "event_id", result.Event)
-		w.Header().Set("Location", "/withdrawals/"+created.ID.TypeID())
+		w.Header().Set("Location",
+			"/accounts/"+created.Account.TypeID()+"/withdrawals/"+created.ID.TypeID())
 		writeJSON(w, http.StatusCreated, "application/json; charset=utf-8",
 			toWithdrawalResponse(created))
 	case requests.Repeat:
@@ -274,6 +288,64 @@ func (h withdrawalRoutes) create(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// withdrawalsQuery is the list's validated ?limit, ?before, ?include, and ?status.
+type withdrawalsQuery struct {
+	limit   int
+	before  *ids.WithdrawalID
+	history bool
+	status  *withdrawals.Status
+}
+
+// parseWithdrawalsQuery validates the withdrawals list's query, as Node's withdrawalsQuerySchema
+// and as parseDepositsQuery does the deposits list's: limit (default 50, read as JavaScript's
+// Number() reads it: see jsNumber), before (a withdrawal's ID) and include, then its status filter
+// (decision 70), one of withdrawals.Statuses(). Unknown parameters are ignored. Every problem is
+// reported at once, in the contract's parameter order (slice 4 decision 68).
+func parseWithdrawalsQuery(raw string) (withdrawalsQuery, []ValidationError) {
+	query := parseQuery(raw)
+	parsed := withdrawalsQuery{limit: 50}
+	var errs []ValidationError
+
+	if values, ok := query["limit"]; ok {
+		n := math.NaN()
+		if len(values) == 1 {
+			n = jsNumber(values[0])
+		}
+		invalid := limitErrors(n)
+		errs = append(errs, invalid...)
+		if len(invalid) == 0 {
+			parsed.limit = int(n)
+		}
+	}
+
+	if values, ok := query["before"]; ok {
+		before, err := ids.FromTypeID[ids.Withdrawal](values[0])
+		if len(values) == 1 && err == nil {
+			parsed.before = &before
+		} else {
+			errs = append(errs, ValidationError{Path: "before", Message: "must be a wd_ ID"})
+		}
+	}
+
+	history, invalid := includeHistory(query)
+	parsed.history = history
+	errs = append(errs, invalid...)
+
+	if values, ok := query["status"]; ok {
+		s := withdrawals.Status(values[0])
+		if len(values) == 1 && slices.Contains(withdrawals.Statuses(), s) {
+			parsed.status = &s
+		} else {
+			errs = append(errs, ValidationError{
+				Path:    "status",
+				Message: `Invalid option: expected one of "held"|"submitted"|"executed"|"failed"`,
+			})
+		}
+	}
+
+	return parsed, errs
+}
+
 // withdrawalParam parses the {withdrawal_id} path value, as Node's withdrawalParamsSchema (and as
 // accountParam does an account's).
 func withdrawalParam(r *http.Request) (ids.WithdrawalID, []ValidationError) {
@@ -284,18 +356,36 @@ func withdrawalParam(r *http.Request) (ids.WithdrawalID, []ValidationError) {
 	return id, nil
 }
 
-// GET /withdrawals/{withdrawal_id}: the withdrawal in its current status; ?include=history adds
-// its status history. Every problem with the request at once, the ID then the query (slice 4
-// decision 68).
+// withWithdrawalHistory adds the withdrawal's history (nil for none, written as []), its reasons
+// shown (see withdrawalStatusChangeResponse). Node: toWithdrawalResponse's history.
+func withWithdrawalHistory(
+	item withdrawalResponse,
+	changes []withdrawals.StatusChange,
+) withdrawalResponse {
+	history := make([]withdrawalStatusChangeResponse, 0, len(changes))
+	for _, c := range changes {
+		history = append(history, withdrawalStatusChangeResponse{
+			FromStatus: c.From, ToStatus: c.To, Reason: c.Reason, At: timestamp.Time(c.At),
+		})
+	}
+	item.History = &history
+	return item
+}
+
+// GET /accounts/{account_id}/withdrawals/{withdrawal_id}: the withdrawal in its current status,
+// read with its account in one query: another account's withdrawal is a 404, the same as one that
+// doesn't exist, whether or not the account exists (decision 64). ?include=history adds its status
+// history. Every problem with the request at once, the IDs then the query (decision 68).
 func (h withdrawalRoutes) get(w http.ResponseWriter, r *http.Request) error {
-	id, pathErrs := withdrawalParam(r)
+	account, accountErrs := accountParam(r)
+	id, idErrs := withdrawalParam(r)
 	history, queryErrs := includeHistory(parseQuery(r.URL.RawQuery))
-	if invalid := slices.Concat(pathErrs, queryErrs); len(invalid) > 0 {
+	if invalid := slices.Concat(accountErrs, idErrs, queryErrs); len(invalid) > 0 {
 		writeProblem(w, invalidRequest(invalid))
 		return nil
 	}
 
-	withdrawal, found, err := withdrawals.Get(r.Context(), h.pool, id)
+	withdrawal, found, err := withdrawals.GetInAccount(r.Context(), h.pool, account, id)
 	if err != nil {
 		return err
 	}
@@ -303,19 +393,67 @@ func (h withdrawalRoutes) get(w http.ResponseWriter, r *http.Request) error {
 		writeProblem(w, withdrawalNotFound())
 		return nil
 	}
-	response := toWithdrawalResponse(withdrawal)
+	body := toWithdrawalResponse(withdrawal)
 	if history {
-		changes, err := withdrawals.StatusHistory(r.Context(), h.pool, withdrawal.ID)
+		changes, err := withdrawals.StatusHistories(
+			r.Context(), h.pool, []ids.WithdrawalID{withdrawal.ID})
 		if err != nil {
 			return err
 		}
-		mapped := make([]withdrawalStatusChangeResponse, len(changes))
-		for i, c := range changes {
-			mapped[i] = withdrawalStatusChangeResponse{
-				FromStatus: c.From, ToStatus: c.To, Reason: c.Reason, At: timestamp.Time(c.At),
-			}
+		body = withWithdrawalHistory(body, changes[withdrawal.ID])
+	}
+	writeJSON(w, http.StatusOK, "application/json; charset=utf-8", body)
+	return nil
+}
+
+// GET /accounts/{account_id}/withdrawals: newest first, a page at a time (?limit,
+// ?before=<next_before from the previous page>), as {data, next_before} (decision 66).
+// ?include=history adds each withdrawal's status history, read for the whole page in one query.
+// Every problem with the request at once, the path then the query (decision 68). A list checks
+// its account: an unknown one is a 404, an empty list an account without withdrawals.
+func (h withdrawalRoutes) list(w http.ResponseWriter, r *http.Request) error {
+	account, pathErrs := accountParam(r)
+	query, queryErrs := parseWithdrawalsQuery(r.URL.RawQuery)
+	if invalid := slices.Concat(pathErrs, queryErrs); len(invalid) > 0 {
+		writeProblem(w, invalidRequest(invalid))
+		return nil
+	}
+	filter := withdrawals.Filter{
+		Status: query.status,
+	}
+
+	page, found, err := withdrawals.ListPage(
+		r.Context(), h.pool, account, query.limit, query.before, filter)
+	if err != nil {
+		return err
+	}
+	if !found {
+		writeProblem(w, accountNotFound())
+		return nil
+	}
+
+	var histories map[ids.WithdrawalID][]withdrawals.StatusChange
+	if query.history {
+		withdrawalIDs := make([]ids.WithdrawalID, len(page.Withdrawals))
+		for i, wd := range page.Withdrawals {
+			withdrawalIDs[i] = wd.ID
 		}
-		response.History = &mapped
+		if histories, err = withdrawals.StatusHistories(r.Context(), h.pool, withdrawalIDs); err != nil {
+			return err
+		}
+	}
+
+	response := withdrawalListResponse{
+		// [] rather than null when empty.
+		Data:       make([]withdrawalResponse, 0, len(page.Withdrawals)),
+		NextBefore: page.NextBefore,
+	}
+	for _, wd := range page.Withdrawals {
+		item := toWithdrawalResponse(wd)
+		if query.history {
+			item = withWithdrawalHistory(item, histories[wd.ID])
+		}
+		response.Data = append(response.Data, item)
 	}
 	writeJSON(w, http.StatusOK, "application/json; charset=utf-8", response)
 	return nil
