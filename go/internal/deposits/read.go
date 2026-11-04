@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -71,6 +72,12 @@ func scanDeposit(row pgx.Row) (Deposit, error) {
 	return d, nil
 }
 
+// Filter holds values that ListPage should filter results by. A zero value does not filter.
+type Filter struct {
+	Status               *Status
+	NetworkTransactionID *string
+}
+
 // Page is a page of an account's deposits, newest first.
 type Page struct {
 	Deposits []Deposit
@@ -80,22 +87,17 @@ type Page struct {
 
 const accountExistsSQL = `SELECT 1 FROM accounts WHERE id = $1`
 
-// Seek pagination on the deposit ID: UUIDv7 IDs sort by creation time, so "older than the last one
-// seen" is id < $before, served by the (account_id, id DESC) index. Two fixed statements rather
-// than one with an optional condition, which keeps each one simple to plan.
-const firstPageSQL = `
+// listSQL generates SQL allowing for multiple filters and pagination cursor.
+// Condition values are always parameters. A missing filter/cursor is no condition
+// at all, so each statement is easy to plan.
+func listSQL(conditions []string) string {
+	return `
 SELECT ` + columns + ` FROM deposits
-WHERE account_id = $1
+WHERE ` + strings.Join(conditions, " AND ") + `
 ORDER BY id DESC
-LIMIT $2
+LIMIT $1
 `
-
-const nextPageSQL = `
-SELECT ` + columns + ` FROM deposits
-WHERE account_id = $1 AND id < $3
-ORDER BY id DESC
-LIMIT $2
-`
+}
 
 const getSQL = `SELECT ` + columns + ` FROM deposits WHERE id = $1 AND account_id = $2`
 
@@ -127,6 +129,7 @@ func ListPage(
 	account ids.AccountID,
 	limit int,
 	before *ids.DepositID,
+	filter Filter,
 ) (Page, bool, error) {
 	// Node's statement; its row, if any, is read and discarded (Exec would also work, through the
 	// SELECT's row count, but Querier documents Exec for statements that return no rows).
@@ -138,14 +141,27 @@ func ListPage(
 	if err != nil {
 		return Page{}, false, fmt.Errorf("account %v: %w", account, err)
 	}
-
-	// One more than the page size, to know whether there is a next page.
-	var rows pgx.Rows
-	if before == nil {
-		rows, err = q.Query(ctx, firstPageSQL, account, limit+1)
-	} else {
-		rows, err = q.Query(ctx, nextPageSQL, account, limit+1, *before)
+	// Build listSQL WHERE conditions, with matching numbered placeholders for associated params
+	// position. Limit is one more than the page size, to know whether there is a next page.
+	params := []any{limit + 1, account}
+	conditions := []string{"account_id = $2"}
+	where := func(column, op string, value any) {
+		params = append(params, value)
+		conditions = append(conditions, fmt.Sprintf("%s %s $%d", column, op, len(params)))
 	}
+	if before != nil {
+		// Seek pagination on the deposit ID: UUIDv7 IDs sort by creation time, so "older than the
+		// last one seen" is id < $before, served by the (account_id, id DESC) index.
+		where("id", "<", *before)
+	}
+	if filter.Status != nil {
+		where("status", "=", *filter.Status)
+	}
+	if filter.NetworkTransactionID != nil {
+		where("network_transaction_id", "=", *filter.NetworkTransactionID)
+	}
+
+	rows, err := q.Query(ctx, listSQL(conditions), params...)
 	if err != nil {
 		return Page{}, false, fmt.Errorf("deposits of %v: %w", account, err)
 	}

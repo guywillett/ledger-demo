@@ -4,6 +4,7 @@ import (
 	"math"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/deposits"
@@ -43,10 +44,11 @@ type depositResponse struct {
 }
 
 // depositStatusChangeResponse is a deposit's history row as a client sees it. Reason is always
-// null: the only reasons a deposit's history holds are the compliance decision's, which are internal
-// (slice 4 decision 76: telling a customer why a payment was rejected can be tipping off). Hidden
-// here, at the boundary, rather than by transition: a reason added to another transition later
-// stays hidden until it is deliberately made client-facing. Node: toDepositStatusChangeResponse.
+// null: the only reasons a deposit's history holds are the compliance decision's, which are
+// internal (slice 4 decision 76: telling a customer why a payment was rejected can be tipping
+// off). Hidden here, at the boundary, rather than by transition: a reason added to another
+// transition later stays hidden until it is deliberately made client-facing. Node:
+// toDepositStatusChangeResponse.
 type depositStatusChangeResponse struct {
 	FromStatus *deposits.Status `json:"from_status"`
 	ToStatus   deposits.Status  `json:"to_status"`
@@ -113,12 +115,26 @@ func depositParam(r *http.Request) (ids.DepositID, []ValidationError) {
 	return deposit, nil
 }
 
-// depositsQuery is the list's ?limit, ?before and ?include, validated.
+// depositsQuery is the list's validated ?limit, ?before, ?include, ?status and
+// ?network_transaction_id.
 type depositsQuery struct {
-	limit   int
-	before  *ids.DepositID
-	history bool
+	limit                int
+	before               *ids.DepositID
+	history              bool
+	status               *deposits.Status
+	networkTransactionID *string
 }
+
+// statusFilterMessage: a ValidationError message with all deposits.BookedStatuses values
+// correctly formatted.
+var statusFilterMessage = func() string {
+	statuses := deposits.BookedStatuses()
+	quoted := make([]string, len(statuses))
+	for i, s := range statuses {
+		quoted[i] = `"` + string(s) + `"`
+	}
+	return "Invalid option: expected one of " + strings.Join(quoted, "|")
+}()
 
 // parseDepositsQuery validates the query as Node's depositsQuerySchema: limit a whole number from 1
 // to 200 (default 50), read as JavaScript's Number() reads it (see jsNumber); before a deposit's
@@ -155,6 +171,30 @@ func parseDepositsQuery(raw string) (depositsQuery, []ValidationError) {
 	history, invalid := includeHistory(query)
 	parsed.history = history
 	errs = append(errs, invalid...)
+
+	if values, ok := query["status"]; ok {
+		s := deposits.Status(values[0])
+		if len(values) == 1 && slices.Contains(deposits.BookedStatuses(), s) {
+			parsed.status = &s
+		} else {
+			errs = append(errs, ValidationError{Path: "status", Message: statusFilterMessage})
+		}
+	}
+
+	if values, ok := query["network_transaction_id"]; ok {
+		length := zodLen(values[0])
+		path := "network_transaction_id"
+		switch {
+		case len(values) > 1:
+			errs = append(errs, ValidationError{Path: path, Message: "Invalid input: expected string, received array"})
+		case length == 0:
+			errs = append(errs, ValidationError{Path: path, Message: "Too small: expected string to have >=1 characters"})
+		case length > 255:
+			errs = append(errs, ValidationError{Path: path, Message: "Too big: expected string to have <=255 characters"})
+		default:
+			parsed.networkTransactionID = &values[0]
+		}
+	}
 	return parsed, errs
 }
 
@@ -199,8 +239,13 @@ func (d depositRoutes) list(w http.ResponseWriter, r *http.Request) error {
 		writeProblem(w, invalidRequest(invalid))
 		return nil
 	}
+	filter := deposits.Filter{
+		Status:               query.status,
+		NetworkTransactionID: query.networkTransactionID,
+	}
 
-	page, found, err := deposits.ListPage(r.Context(), d.db, account, query.limit, query.before)
+	page, found, err := deposits.ListPage(
+		r.Context(), d.db, account, query.limit, query.before, filter)
 	if err != nil {
 		return err
 	}

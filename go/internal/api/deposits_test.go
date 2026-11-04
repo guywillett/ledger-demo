@@ -2,7 +2,9 @@ package api_test
 
 import (
 	"context"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -475,6 +477,166 @@ func TestDepositReportsBothInvalidIDsAndAnInvalidIncludeAtOnce(t *testing.T) {
 		`"errors":[{"path":"account_id","message":"must be a acct_ ID"},` +
 		`{"path":"deposit_id","message":"must be a dep_ ID"},` +
 		`{"path":"include","message":"Invalid input: expected \"history\""}]}`
+	if r.status != 400 || r.body != want {
+		t.Errorf("got %d %s\nwant    %s", r.status, r.body, want)
+	}
+}
+
+// The list's filters (slice 4 decision 70): exact matches, combined with each other and with
+// pagination. The cases of node/test/api/deposits.test.ts ("GET /accounts/:id/deposits
+// filtered").
+
+const statusMessage = `Invalid option: expected one of "created"|"received"|"under_review"|"approved"|"rejected"|"credited"|"returned"`
+
+// accountWithStatuses: an account with a deposit in each of three statuses, newest last.
+func accountWithStatuses(t *testing.T, pool *pgxpool.Pool) (testdb.Account, map[string]ids.DepositID) {
+	t.Helper()
+	account := testdb.NewAccount(t, pool)
+	credited := testdb.NewDeposit(t, pool, account, 1250)
+	process(t, pool, credited, deposits.Approve, "")
+	returned := testdb.NewDeposit(t, pool, account, 1250)
+	process(t, pool, returned, deposits.Reject, "sanctions screening hit")
+	created := testdb.NewDeposit(t, pool, account, 1250)
+	return account, map[string]ids.DepositID{"created": created, "credited": credited, "returned": returned}
+}
+
+func listedIDs(t *testing.T, r response) []any {
+	t.Helper()
+	var found []any
+	for _, d := range r.json(t)["data"].([]any) {
+		found = append(found, d.(map[string]any)["id"])
+	}
+	return found
+}
+
+func TestDepositsFilterByStatus(t *testing.T) {
+	a := newTestAPI(t)
+	for _, status := range []string{"created", "credited", "returned"} {
+		account, byStatus := accountWithStatuses(t, a.pool)
+		r := a.get(t, depositsPath(account.ID, "status="+status))
+		if got, want := listedIDs(t, r), []any{byStatus[status].TypeID()}; r.status != 200 || !slices.Equal(got, want) {
+			t.Errorf("status=%s: got %d %v, want %v", status, r.status, got, want)
+		}
+	}
+}
+
+func TestDepositsFilterByAValidStatusNoneIsInIsEmpty(t *testing.T) {
+	a := newTestAPI(t)
+	account, _ := accountWithStatuses(t, a.pool)
+	if r := a.get(t, depositsPath(account.ID, "status=under_review")); r.body != `{"data":[],"next_before":null}` {
+		t.Errorf("got %d %s", r.status, r.body)
+	}
+}
+
+func TestDepositsFilterByNetworkTransactionIDExactly(t *testing.T) {
+	a := newTestAPI(t)
+	account, byStatus := accountWithStatuses(t, a.pool)
+	ntx := "go-test-" + byStatus["credited"].TypeID() // as testdb.NewDeposit stores it
+	r := a.get(t, depositsPath(account.ID, "network_transaction_id="+ntx))
+	if got, want := listedIDs(t, r), []any{byStatus["credited"].TypeID()}; !slices.Equal(got, want) {
+		t.Errorf("got %d %v, want %v", r.status, got, want)
+	}
+	// A prefix of it matches nothing: exact, not a search.
+	prefix := a.get(t, depositsPath(account.ID, "network_transaction_id="+ntx[:len(ntx)-1]))
+	if prefix.body != `{"data":[],"next_before":null}` {
+		t.Errorf("prefix: got %d %s", prefix.status, prefix.body)
+	}
+	// Another account's deposit isn't found by it.
+	other := testdb.NewAccount(t, a.pool)
+	if r := a.get(t, depositsPath(other.ID, "network_transaction_id="+ntx)); r.body != `{"data":[],"next_before":null}` {
+		t.Errorf("another account: got %d %s", r.status, r.body)
+	}
+}
+
+func TestDepositsFilterCombinesBoth(t *testing.T) {
+	a := newTestAPI(t)
+	account, byStatus := accountWithStatuses(t, a.pool)
+	query := "network_transaction_id=go-test-" + byStatus["credited"].TypeID() + "&status="
+	if got := listedIDs(t, a.get(t, depositsPath(account.ID, query+"credited"))); !slices.Equal(got, []any{byStatus["credited"].TypeID()}) {
+		t.Errorf("matching status: %v", got)
+	}
+	if got := listedIDs(t, a.get(t, depositsPath(account.ID, query+"returned"))); len(got) != 0 {
+		t.Errorf("other status: %v, want none", got)
+	}
+}
+
+// limit and before apply within the filtered list; next_before is the last deposit of the
+// filtered page, so following it skips the deposits the filter leaves out.
+func TestDepositsFilterPagesWithItsOwnCursors(t *testing.T) {
+	a := newTestAPI(t)
+	account := testdb.NewAccount(t, a.pool)
+	var newestFirst []any
+	for range 5 {
+		deposit := testdb.NewDeposit(t, a.pool, account, 1250)
+		process(t, a.pool, deposit, deposits.Approve, "")
+		newestFirst = slices.Insert(newestFirst, 0, any(deposit.TypeID()))
+		testdb.NewDeposit(t, a.pool, account, 1250) // left created, between them
+	}
+
+	var seen, cursors []any
+	query := "status=credited&limit=2"
+	for {
+		page := a.get(t, depositsPath(account.ID, query))
+		seen = append(seen, listedIDs(t, page)...)
+		next := page.json(t)["next_before"]
+		cursors = append(cursors, next)
+		if next == nil {
+			break
+		}
+		query = "status=credited&limit=2&before=" + next.(string)
+	}
+	if !slices.Equal(seen, newestFirst) {
+		t.Errorf("seen = %v\nwant   %v", seen, newestFirst)
+	}
+	if want := []any{newestFirst[1], newestFirst[3], nil}; !slices.Equal(cursors, want) {
+		t.Errorf("cursors = %v, want %v", cursors, want)
+	}
+}
+
+func TestDepositsFilterInvalidIs400(t *testing.T) {
+	a := newTestAPI(t)
+	account := testdb.NewAccount(t, a.pool)
+	tests := []struct{ query, path, message string }{
+		{"status=unmatched", "status", statusMessage},
+		{"status=nope", "status", statusMessage},
+		{"status=", "status", statusMessage},
+		{"status=created&status=credited", "status", statusMessage},
+		{"network_transaction_id=", "network_transaction_id", "Too small: expected string to have >=1 characters"},
+		{"network_transaction_id=" + strings.Repeat("x", 256), "network_transaction_id", "Too big: expected string to have <=255 characters"},
+		{"network_transaction_id=a&network_transaction_id=b", "network_transaction_id", "Invalid input: expected string, received array"},
+	}
+	for _, tt := range tests {
+		r := a.get(t, depositsPath(account.ID, tt.query))
+		want := `{"type":"urn:ledger-demo:problem:invalid-request","title":"Invalid request","status":400,` +
+			`"errors":[{"path":"` + tt.path + `","message":` + strconv.Quote(tt.message) + `}]}`
+		if r.status != 400 || r.body != want {
+			t.Errorf("%s: got %d %s\nwant %s", tt.query, r.status, r.body, want)
+		}
+	}
+}
+
+// 255 characters counted as Zod counts them, in code points: 255 emoji are valid.
+func TestDepositsFilterAcceptsA255CodePointNetworkTransactionID(t *testing.T) {
+	a := newTestAPI(t)
+	account := testdb.NewAccount(t, a.pool)
+	r := a.get(t, depositsPath(account.ID, "network_transaction_id="+url.QueryEscape(strings.Repeat("😀", 255))))
+	if r.status != 200 {
+		t.Errorf("got %d %s", r.status, r.body)
+	}
+}
+
+// Every problem at once, in the contract's parameter order (decision 68): byte for byte Node's
+// answer (deposits.test.ts, "reports every problem at once, in the contract's order").
+func TestDepositsFilterReportsEveryProblemInTheContractsOrder(t *testing.T) {
+	a := newTestAPI(t)
+	r := a.get(t, "/accounts/nope/deposits?network_transaction_id=&status=nope&include=x&before=nope&limit=0")
+	want := `{"type":"urn:ledger-demo:problem:invalid-request","title":"Invalid request","status":400,"errors":[` +
+		`{"path":"account_id","message":"must be a acct_ ID"},` +
+		`{"path":"limit","message":"Too small: expected number to be >=1"},` +
+		`{"path":"before","message":"must be a dep_ ID"},` +
+		`{"path":"include","message":"Invalid input: expected \"history\""},` +
+		`{"path":"status","message":` + strconv.Quote(statusMessage) + `},` +
+		`{"path":"network_transaction_id","message":"Too small: expected string to have >=1 characters"}]}`
 	if r.status != 400 || r.body != want {
 		t.Errorf("got %d %s\nwant    %s", r.status, r.body, want)
 	}
