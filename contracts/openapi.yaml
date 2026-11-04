@@ -208,7 +208,9 @@ paths:
       description: |
         A list (slice 4 decision 66): `data` holds the page, `next_before` the cursor for the next,
         older page (null on the last). Paginated by seeking on the deposit ID (UUIDv7 IDs sort by
-        creation time). A `before` naming another account's deposit, or none, is a position in
+        creation time). The filters (status, network_transaction_id) combine with each other and with
+        pagination: limit and before apply within the filtered list, and next_before is the last
+        deposit of the filtered page. A `before` naming another account's deposit, or none, is a position in
         time, not a reference: accepted, never looked up. An unknown account is a 404; an account
         without deposits an empty list.
       parameters:
@@ -222,6 +224,27 @@ paths:
             type: string
             pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
         - $ref: '#/components/parameters/IncludeHistory'
+        - name: status
+          in: query
+          required: false
+          description: |
+            Only deposits in this status (slice 4 decision 70): one of the statuses an account's
+            deposit can have. Any other value is a 400, `unmatched` included: a deposit in suspense
+            has no account, so no account's list could hold one.
+          schema:
+            $ref: '#/components/schemas/DepositStatus'
+        - name: network_transaction_id
+          in: query
+          required: false
+          description: |
+            Only the deposit with this network transaction ID, the payment's reference (exact
+            match; slice 4 decision 70). Valid as the incoming-payment webhook accepts the field:
+            1 to 255 characters (counted in Unicode code points), any characters; anything else is
+            a 400, since no deposit could have it.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
       responses:
         '200':
           description: A page of deposits

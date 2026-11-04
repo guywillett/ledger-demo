@@ -112,36 +112,55 @@ export type DepositPage = {
 const ACCOUNT_EXISTS_SQL = 'SELECT 1 FROM accounts WHERE id = $1';
 
 // Seek pagination on the deposit ID: UUIDv7 IDs sort by creation time, so "older than the
-// last one seen" is `id < $before`, served by the (account_id, id DESC) index. Two fixed
-// statements rather than one with an optional condition, which keeps each one simple to plan.
-const FIRST_PAGE_SQL = `
+// last one seen" is `id < $before`, served by the (account_id, id DESC) index. The filters
+// (slice 4 decision 70) are further conditions on the same index's rows: status is checked row
+// by row (a known gap if accounts grow large).
+//
+// One statement assembled from fixed fragments, one per condition present, each with its own
+// placeholder: the values are always parameters, never part of the SQL text. A condition left
+// out entirely, rather than written as `($n IS NULL OR …)`, keeps each statement as simple to
+// plan as the two fixed ones it replaces.
+function listSql(conditions: readonly string[]): string {
+  return `
 SELECT * FROM deposits
-WHERE account_id = $1
+WHERE ${conditions.join(' AND ')}
 ORDER BY id DESC
-LIMIT $2
+LIMIT $1
 `;
-const NEXT_PAGE_SQL = `
-SELECT * FROM deposits
-WHERE account_id = $1 AND id < $3
-ORDER BY id DESC
-LIMIT $2
-`;
+}
+
+export type DepositFilters = {
+  readonly status?: BookedStatus;
+  readonly networkTransactionId?: string;
+};
 
 // undefined if there is no such account (an account without deposits gets an empty page).
-// The existence check is a read before a read: nothing is written based on it.
+// The existence check is a read before a read: nothing is written based on it. The filters and
+// the cursor apply together, so a page holds the next matching deposits older than `before`, and
+// nextBefore is the last of them.
 export async function listDeposits(
   db: Queryable,
   accountId: Uuid<'acct'>,
-  page: { readonly limit: number; readonly before?: Uuid<'dep'> },
+  page: { readonly limit: number; readonly before?: Uuid<'dep'> } & DepositFilters,
 ): Promise<DepositPage | undefined> {
   const account = await db.query(ACCOUNT_EXISTS_SQL, [accountId]);
   if (account.rowCount === 0) return undefined;
 
   // One more than the page size, to know whether there is a next page.
-  const params: unknown[] = [accountId, page.limit + 1];
-  const sql = page.before === undefined ? FIRST_PAGE_SQL : NEXT_PAGE_SQL;
-  if (page.before !== undefined) params.push(page.before);
-  const result = await db.query<DepositRow>(sql, params);
+  const params: unknown[] = [page.limit + 1];
+  const conditions: string[] = [];
+  // Each condition's fragment takes the next placeholder: $2, $3, … in the order pushed.
+  const where = (fragment: (placeholder: string) => string, value: unknown): void => {
+    params.push(value);
+    conditions.push(fragment(`$${params.length}`));
+  };
+  where((p) => `account_id = ${p}`, accountId);
+  if (page.before !== undefined) where((p) => `id < ${p}`, page.before);
+  if (page.status !== undefined) where((p) => `status = ${p}`, page.status);
+  if (page.networkTransactionId !== undefined) {
+    where((p) => `network_transaction_id = ${p}`, page.networkTransactionId);
+  }
+  const result = await db.query<DepositRow>(listSql(conditions), params);
 
   const deposits = result.rows.slice(0, page.limit).map(depositFromRow);
   const hasMore = result.rows.length > page.limit;

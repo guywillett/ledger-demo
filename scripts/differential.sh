@@ -11,8 +11,8 @@
 # Starts api-other (the compose profile "differential", host port 3001) in the implementation
 # opposite to the running api's (API_IMPL, node by default), and sends each request to both:
 # the health check, the accounts, balances, every page of each demo account's deposits (each
-# page's cursor used on the other implementation too), the query parameters' edge cases, single
-# deposits (found, another account's, unknown, malformed IDs),
+# page's cursor used on the other implementation too, filtered and not), the query parameters' and
+# the filters' edge cases, single deposits (found, another account's, unknown, malformed IDs),
 # withdrawals in each final status, unknown and malformed IDs, unknown routes and wrong methods,
 # and replays of the demo's withdrawal requests (the same key and body, then the same key and
 # another amount: writes that change nothing). It compares the status code, the body byte for
@@ -185,11 +185,14 @@ deposit_ids=""
 multi_page=0
 credited_deposit=""
 returned_deposit=""
+first_ntx=""
 for account in $ACCOUNTS; do
   before=""
   count=0
   while :; do
     body=$(curl -s "$API/accounts/$account/deposits?limit=200${before:+&before=$before}")
+    # The first deposit's network_transaction_id (alice's newest), for the filter.
+    [ -n "$first_ntx" ] || first_ntx=$(field "$body" network_transaction_id)
     # One credited and one returned deposit, as "<account> <deposit>", for the single reads.
     [ -n "$credited_deposit" ] || credited_deposit=$(deposit_with credited "$account" "$body")
     [ -n "$returned_deposit" ] || returned_deposit=$(deposit_with returned "$account" "$body")
@@ -294,6 +297,9 @@ for account in $ACCOUNTS; do
   for first in a b; do
     walk "$account" "limit=$PAGE" "$first"
     walk "$account" "limit=$PAGE&include=history" "$first"
+    # Filtered: the cursors are the filtered pages' own (slice 4 decision 70).
+    walk "$account" "limit=3&status=credited" "$first"
+    walk "$account" "limit=3&status=returned" "$first"
   done
   walk "$account" "" a
 done
@@ -309,6 +315,30 @@ for q in limit=0 limit=1 limit=200 limit=201 limit=abc limit=-1 limit=1.5 limit=
   compare GET "$T?$q"
 done
 compare HEAD "$T?limit=1"
+
+say "Deposits: filters"
+# Every status an account's deposit can have (the demo's data has credited and returned; the rest
+# are valid and absent), then the invalid ones: unmatched, unknown, empty, repeated.
+for status in created received under_review approved rejected credited returned; do
+  compare GET "$T?status=$status"
+  expect_status 200
+done
+for q in status=unmatched status=nope status= status=CREDITED "status=credited&status=returned"; do
+  compare GET "$T?$q"
+done
+# network_transaction_id: matching, a valid one that matches nothing, the same with a status that
+# does and one that doesn't, and the invalid ones (empty, 256 characters, repeated).
+compare GET "$T?network_transaction_id=$first_ntx"
+expect_status 200
+compare GET "$T?network_transaction_id=no-such-reference"
+expect_status 200
+for status in credited returned; do
+  compare GET "$T?network_transaction_id=$first_ntx&status=$status"
+done
+compare GET "$T?network_transaction_id="
+compare GET "$T?network_transaction_id=$(printf 'x%.0s' $(seq 1 256))"
+compare GET "$T?network_transaction_id=a&network_transaction_id=b"
+compare GET "/accounts/nope/deposits?network_transaction_id=&status=nope&include=x&before=nope&limit=0"
 compare GET "/accounts/$(unknown_id "$ALICE")/deposits"
 compare GET "/accounts/nope/deposits"
 compare GET "/accounts/dep_${ALICE#acct_}/deposits"

@@ -10,7 +10,7 @@ import {
 import type { Account } from '../accounts/accounts.ts';
 import type { Deposit } from '../deposits/deposits.ts';
 import type { Balance } from '../ledger/balances.ts';
-import type { DepositStatus, StatusChange } from '../deposits/status.ts';
+import { BOOKED_STATUSES, type DepositStatus, type StatusChange } from '../deposits/status.ts';
 import type { WithdrawalStatus, WithdrawalStatusChange } from '../withdrawals/status.ts';
 import type { NewWithdrawal, Withdrawal } from '../withdrawals/withdrawals.ts';
 import type { Uuid } from '../shared/ids.ts';
@@ -104,6 +104,11 @@ export const depositsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
   before: typeIdSchema('dep').optional(),
   include: z.literal('history').optional(),
+  // The filters (slice 4 decision 70). status: one an account's deposit can have (not unmatched).
+  // network_transaction_id: as the incoming-payment webhook accepts it (webhooks/schemas.ts), so
+  // a value no deposit could have is a 400 rather than an empty list.
+  status: z.enum(BOOKED_STATUSES).optional(),
+  network_transaction_id: z.string().min(1).max(255).optional(),
 });
 
 // GET /accounts/:account_id/deposits/:deposit_id: both IDs, in the contract's order.

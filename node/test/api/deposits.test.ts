@@ -195,6 +195,182 @@ describe('GET /accounts/:id/deposits', () => {
   });
 });
 
+// The list's filters (slice 4 decision 70): exact matches, combined with each other and with
+// pagination.
+describe('GET /accounts/:id/deposits filtered', () => {
+  const STATUS_MESSAGE =
+    'Invalid option: expected one of "created"|"received"|"under_review"|"approved"|"rejected"|"credited"|"returned"';
+
+  // An account with a deposit in each of three statuses, newest last.
+  async function accountWithStatuses(): Promise<{
+    account: TestAccount;
+    created: Deposit;
+    credited: Deposit;
+    returned: Deposit;
+  }> {
+    const account = await createTestAccount(pool);
+    const credited = await createTestDeposit(pool, account);
+    await processDeposit(credited, { outcome: 'approved' });
+    const returned = await createTestDeposit(pool, account);
+    await processDeposit(returned, { outcome: 'rejected', reason: 'sanctions screening hit' });
+    const created = await createTestDeposit(pool, account);
+    return { account, created, credited, returned };
+  }
+
+  function ids(response: { json: Record<string, unknown> }): unknown[] {
+    return (response.json.data as { id: string }[]).map((d) => d.id);
+  }
+
+  it.each(['created', 'credited', 'returned'] as const)('filters by status=%s', async (status) => {
+    const deposits = await accountWithStatuses();
+    const response = await getJson(
+      app,
+      `/accounts/${deposits.account.typeId}/deposits?status=${status}`,
+      DEPOSITS,
+    );
+    expect(response.statusCode).toBe(200);
+    expect(ids(response)).toEqual([toTypeId('dep', deposits[status].id)]);
+    expect(response.json.next_before).toBeNull();
+  });
+
+  it('answers an empty list for a valid status no deposit is in', async () => {
+    const { account } = await accountWithStatuses();
+    const response = await getJson(
+      app,
+      `/accounts/${account.typeId}/deposits?status=under_review`,
+      DEPOSITS,
+    );
+    expect(response.json).toEqual({ data: [], next_before: null });
+  });
+
+  it('filters by network_transaction_id, an exact match', async () => {
+    const { account, credited } = await accountWithStatuses();
+    const url = `/accounts/${account.typeId}/deposits?network_transaction_id=`;
+    const match = await getJson(
+      app,
+      url + encodeURIComponent(credited.networkTransactionId),
+      DEPOSITS,
+    );
+    expect(ids(match)).toEqual([toTypeId('dep', credited.id)]);
+    // A prefix of it matches nothing: exact, not a search.
+    const prefix = await getJson(
+      app,
+      url + encodeURIComponent(credited.networkTransactionId.slice(0, -1)),
+      DEPOSITS,
+    );
+    expect(prefix.json).toEqual({ data: [], next_before: null });
+  });
+
+  it("doesn't find another account's deposit by its network_transaction_id", async () => {
+    const { credited } = await accountWithStatuses();
+    const other = await createTestAccount(pool);
+    const response = await getJson(
+      app,
+      `/accounts/${other.typeId}/deposits?network_transaction_id=${encodeURIComponent(credited.networkTransactionId)}`,
+      DEPOSITS,
+    );
+    expect(response.json).toEqual({ data: [], next_before: null });
+  });
+
+  it('combines both filters', async () => {
+    const { account, credited } = await accountWithStatuses();
+    const ntx = encodeURIComponent(credited.networkTransactionId);
+    const url = `/accounts/${account.typeId}/deposits?network_transaction_id=${ntx}&status=`;
+    expect(ids(await getJson(app, `${url}credited`, DEPOSITS))).toEqual([
+      toTypeId('dep', credited.id),
+    ]);
+    expect(ids(await getJson(app, `${url}returned`, DEPOSITS))).toEqual([]);
+  });
+
+  // limit and before apply within the filtered list; next_before is the last deposit of the
+  // filtered page, so following it skips the deposits the filter leaves out.
+  it('pages through a filtered list with its own cursors', async () => {
+    const account = await createTestAccount(pool);
+    const credited: Deposit[] = [];
+    for (let i = 0; i < 5; i++) {
+      const deposit = await createTestDeposit(pool, account);
+      await processDeposit(deposit, { outcome: 'approved' });
+      credited.push(deposit);
+      await createTestDeposit(pool, account); // left created, between them
+    }
+    const newestFirst = credited.map((d) => toTypeId('dep', d.id)).reverse();
+
+    const seen: unknown[] = [];
+    const cursors: unknown[] = [];
+    let url = `/accounts/${account.typeId}/deposits?status=credited&limit=2`;
+    for (;;) {
+      const page = await getJson(app, url, DEPOSITS);
+      seen.push(...ids(page));
+      const next = page.json.next_before;
+      cursors.push(next);
+      if (typeof next !== 'string') break;
+      url = `/accounts/${account.typeId}/deposits?status=credited&limit=2&before=${next}`;
+    }
+    expect(seen).toEqual(newestFirst);
+    expect(cursors).toEqual([newestFirst[1], newestFirst[3], null]);
+  });
+
+  it.each([
+    ['status=unmatched', 'status', STATUS_MESSAGE],
+    ['status=nope', 'status', STATUS_MESSAGE],
+    ['status=', 'status', STATUS_MESSAGE],
+    ['status=created&status=credited', 'status', STATUS_MESSAGE],
+    [
+      'network_transaction_id=',
+      'network_transaction_id',
+      'Too small: expected string to have >=1 characters',
+    ],
+    [
+      `network_transaction_id=${'x'.repeat(256)}`,
+      'network_transaction_id',
+      'Too big: expected string to have <=255 characters',
+    ],
+    [
+      'network_transaction_id=a&network_transaction_id=b',
+      'network_transaction_id',
+      'Invalid input: expected string, received array',
+    ],
+  ])('answers 400 for %s', async (query, path, message) => {
+    const account = await createTestAccount(pool);
+    const response = await getJson(app, `/accounts/${account.typeId}/deposits?${query}`, DEPOSITS);
+    expect(response.statusCode).toBe(400);
+    expect(response.json.errors).toEqual([{ path, message }]);
+  });
+
+  // 255 characters counted as Zod counts them, in code points: 255 emoji are valid.
+  it('accepts a network_transaction_id of 255 characters, counted in code points', async () => {
+    const account = await createTestAccount(pool);
+    const response = await getJson(
+      app,
+      `/accounts/${account.typeId}/deposits?network_transaction_id=${encodeURIComponent('😀'.repeat(255))}`,
+      DEPOSITS,
+    );
+    expect(response.statusCode).toBe(200);
+  });
+
+  // Slice 4 decision 68: every problem at once, in the contract's parameter order (limit,
+  // before, include, status, network_transaction_id), whatever order the query sends them in.
+  it('reports every problem at once, in the contract’s order', async () => {
+    const response = await getJson(
+      app,
+      '/accounts/nope/deposits?network_transaction_id=&status=nope&include=x&before=nope&limit=0',
+      DEPOSITS,
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json.errors).toEqual([
+      { path: 'account_id', message: 'must be a acct_ ID' },
+      { path: 'limit', message: 'Too small: expected number to be >=1' },
+      { path: 'before', message: 'must be a dep_ ID' },
+      { path: 'include', message: 'Invalid input: expected "history"' },
+      { path: 'status', message: STATUS_MESSAGE },
+      {
+        path: 'network_transaction_id',
+        message: 'Too small: expected string to have >=1 characters',
+      },
+    ]);
+  });
+});
+
 describe('GET /accounts/:id/deposits/:deposit_id', () => {
   // Byte for byte, in this order (Go's must match): type first, no provider_account_id.
   it('returns the deposit', async () => {

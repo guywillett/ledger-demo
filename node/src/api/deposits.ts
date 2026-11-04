@@ -18,7 +18,9 @@ import type { App } from './types.ts';
 export function registerDepositRoutes(app: App, deps: { db: Queryable }): void {
   // Newest first, a page at a time: ?limit (default 50, at most 200) and ?before=<next_before
   // from the previous page>; {data, next_before} (decision 66). ?include=history adds each
-  // deposit's status history, read for the whole page in one query.
+  // deposit's status history, read for the whole page in one query. ?status and
+  // ?network_transaction_id filter it (decision 70), the page and its cursor within the filtered
+  // list.
   app.get('/accounts/:account_id/deposits', async (request, reply) => {
     // Every problem at once, path then query (slice 4 decision 68).
     const params = accountParamsSchema.safeParse(request.params);
@@ -30,6 +32,10 @@ export function registerDepositRoutes(app: App, deps: { db: Queryable }): void {
     const page = await listDeposits(deps.db, params.data.account_id, {
       limit: query.data.limit,
       ...(query.data.before === undefined ? {} : { before: query.data.before }),
+      ...(query.data.status === undefined ? {} : { status: query.data.status }),
+      ...(query.data.network_transaction_id === undefined
+        ? {}
+        : { networkTransactionId: query.data.network_transaction_id }),
     });
     // A list checks its account: an unknown one is a 404, an empty list an account without any.
     if (page === undefined) return sendProblem(reply, problems.accountNotFound());
