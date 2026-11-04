@@ -11,7 +11,11 @@ import type { Account } from '../accounts/accounts.ts';
 import type { Deposit } from '../deposits/deposits.ts';
 import type { Balance } from '../ledger/balances.ts';
 import { BOOKED_STATUSES, type DepositStatus, type StatusChange } from '../deposits/status.ts';
-import type { WithdrawalStatus, WithdrawalStatusChange } from '../withdrawals/status.ts';
+import {
+  WITHDRAWAL_STATUSES,
+  type WithdrawalStatus,
+  type WithdrawalStatusChange,
+} from '../withdrawals/status.ts';
 import type { NewWithdrawal, Withdrawal } from '../withdrawals/withdrawals.ts';
 import type { Uuid } from '../shared/ids.ts';
 
@@ -193,10 +197,27 @@ export function toNewWithdrawal(
   };
 }
 
-export const withdrawalParamsSchema = z.object({ withdrawal_id: typeIdSchema('wd') });
+// GET /accounts/:account_id/withdrawals/:withdrawal_id: both IDs, in the contract's order.
+export const withdrawalParamsSchema = z.object({
+  account_id: typeIdSchema('acct'),
+  withdrawal_id: typeIdSchema('wd'),
+});
 
 export const withdrawalQuerySchema = z.object({ include: z.literal('history').optional() });
 
+// The withdrawals list's query, in the contract's parameter order (decision 68), as the
+// deposits list's. status: any withdrawal status (every withdrawal has an account).
+export const withdrawalsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  before: typeIdSchema('wd').optional(),
+  include: z.literal('history').optional(),
+  status: z.enum(WITHDRAWAL_STATUSES).optional(),
+});
+
+// A withdrawal's history row as a client sees it. Unlike a deposit's, its reason is shown: the
+// only one recorded is on the change to failed, and it is the provider's (its transfer update's
+// reason, or its refusal's), or a generic text of ours when it gave none; meant for the customer
+// (slice 4 decision 76).
 export type WithdrawalStatusChangeResponse = {
   readonly from_status: WithdrawalStatus | null;
   readonly to_status: WithdrawalStatus;
@@ -204,8 +225,10 @@ export type WithdrawalStatusChangeResponse = {
   readonly at: string;
 };
 
-// No provider_transfer_id: provider identifiers stay at the edge, as for deposits' events.
+// type first (decision 67). No provider_transfer_id: provider identifiers stay at the edge
+// (decision 69). history only with include=history.
 export type WithdrawalResponse = {
+  readonly type: 'withdrawal';
   readonly id: TypeIdString<'wd'>;
   readonly account_id: TypeIdString<'acct'>;
   readonly idempotency_key: string;
@@ -221,8 +244,13 @@ export type WithdrawalResponse = {
   readonly history?: readonly WithdrawalStatusChangeResponse[];
 };
 
-export function toWithdrawalResponse(withdrawal: Withdrawal): WithdrawalResponse {
+// With history when given (an array, empty if the withdrawal has none).
+export function toWithdrawalResponse(
+  withdrawal: Withdrawal,
+  history?: readonly WithdrawalStatusChange[],
+): WithdrawalResponse {
   return {
+    type: 'withdrawal',
     id: toTypeId('wd', withdrawal.id),
     account_id: toTypeId('acct', withdrawal.accountId),
     idempotency_key: withdrawal.idempotencyKey,
@@ -235,8 +263,14 @@ export function toWithdrawalResponse(withdrawal: Withdrawal): WithdrawalResponse
     failure_reason: withdrawal.failureReason,
     created_at: withdrawal.createdAt.toISOString(),
     updated_at: withdrawal.updatedAt.toISOString(),
+    ...(history === undefined ? {} : { history: history.map(toWithdrawalStatusChangeResponse) }),
   };
 }
+
+export type WithdrawalListResponse = {
+  readonly data: readonly WithdrawalResponse[];
+  readonly next_before: TypeIdString<'wd'> | null;
+};
 
 export function toWithdrawalStatusChangeResponse(
   change: WithdrawalStatusChange,

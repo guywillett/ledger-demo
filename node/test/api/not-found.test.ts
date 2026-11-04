@@ -18,7 +18,8 @@ const NO_SUCH_ROUTE = {
 
 describe('an empty path parameter', () => {
   it.each([
-    ['GET', '/withdrawals/', '/withdrawals/{withdrawal_id}'],
+    ['GET', '/accounts//withdrawals', '/accounts/{account_id}/withdrawals'],
+    ['GET', '/accounts//withdrawals/x', '/accounts/{account_id}/withdrawals/{withdrawal_id}'],
     ['GET', '/accounts//balance', '/accounts/{account_id}/balance'],
     ['GET', '/accounts//deposits?limit=1', '/accounts/{account_id}/deposits'],
     ['GET', '/accounts//deposits/x', '/accounts/{account_id}/deposits/{deposit_id}'],
@@ -43,7 +44,7 @@ describe('an empty path parameter', () => {
   });
 
   it('leaves a non-empty invalid parameter to the route (400)', async () => {
-    const response = await app.inject({ method: 'GET', url: '/withdrawals/nope' });
+    const response = await app.inject({ method: 'GET', url: '/accounts/nope/withdrawals/nope' });
     expect(response.statusCode).toBe(400);
   });
 });

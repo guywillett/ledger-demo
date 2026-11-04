@@ -18,9 +18,9 @@ info:
     - HEAD is answered on every GET path: the GET's status and headers (Content-Length included),
       without the body.
     - Unknown routes: a path matching no operation, a known path with another method, or a path
-      that isn't in its clean form (an empty segment such as /accounts//balance or /withdrawals/,
-      a trailing slash, a `.` or `..` segment) answers 404 with an `about:blank` problem, whatever
-      the body.
+      that isn't in its clean form (an empty segment such as /accounts//balance or
+      /accounts/x/deposits/, a trailing slash, a `.` or `..` segment) answers 404 with an
+      `about:blank` problem, whatever the body.
     - Query parameters: unknown ones are ignored; a documented one given more than once is
       invalid (400).
     - Validation reports every problem at once (slice 4 decision 68): one 400 `invalid-request`
@@ -339,6 +339,69 @@ paths:
   /accounts/{account_id}/withdrawals:
     parameters:
       - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: The account's withdrawals, newest first, a page at a time
+      description: |
+        A list (slice 4 decision 66), as the deposits list: `data` holds the page, `next_before`
+        the cursor for the next, older page (null on the last), seeking on the withdrawal ID. A
+        `before` naming another account's withdrawal, or none, is a position in time: accepted,
+        never looked up. The status filter combines with pagination: limit and before apply
+        within the filtered list, and next_before is the last withdrawal of the filtered page. An
+        unknown account is a 404; an account without withdrawals an empty list.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/Limit'
+        - name: before
+          in: query
+          required: false
+          description: Only withdrawals older than this one (a previous page's next_before).
+          schema:
+            type: string
+            pattern: '^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        - $ref: '#/components/parameters/IncludeHistory'
+        - name: status
+          in: query
+          required: false
+          description: Only withdrawals in this status (slice 4 decision 70); any other value is a 400.
+          schema:
+            $ref: '#/components/schemas/WithdrawalStatus'
+      responses:
+        '200':
+          description: A page of withdrawals
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalList'
+        '400':
+          description: Invalid account_id or query parameter
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such account (type urn:ledger-demo:problem:account-not-found)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
     post:
       summary: Request a withdrawal (a SEPA transfer out of the account)
       description: |
@@ -380,7 +443,7 @@ paths:
           description: Withdrawal created, funds held (status held)
           headers:
             location:
-              description: The withdrawal's URL, /withdrawals/{withdrawal_id}
+              description: The withdrawal's URL, /accounts/{account_id}/withdrawals/{withdrawal_id}
               schema:
                 type: string
             x-request-id:
@@ -461,24 +524,23 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
-  /withdrawals/{withdrawal_id}:
+  /accounts/{account_id}/withdrawals/{withdrawal_id}:
     parameters:
       - $ref: '#/components/parameters/RequestId'
     get:
-      summary: A withdrawal in its current status
+      summary: One of the account's withdrawals, in its current status
+      description: |
+        Read within the account (slice 4 decision 64): a withdrawal of another account answers as
+        one that doesn't exist, whether or not the account in the path exists.
       parameters:
+        - $ref: '#/components/parameters/AccountId'
         - name: withdrawal_id
           in: path
           required: true
           schema:
             type: string
             pattern: '^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$'
-        - name: include
-          in: query
-          required: false
-          description: '`history` adds the withdrawal''s status history.'
-          schema:
-            const: history
+        - $ref: '#/components/parameters/IncludeHistory'
       responses:
         '200':
           description: The withdrawal
@@ -490,7 +552,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Withdrawal'
         '400':
-          description: withdrawal_id is not a wd_ ID, or an invalid query parameter
+          description: Invalid account_id, withdrawal_id or query parameter
           headers:
             x-request-id:
               $ref: '#/components/headers/RequestId'
@@ -499,7 +561,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
-          description: No such withdrawal
+          description: No such withdrawal in this account (type urn:ledger-demo:problem:withdrawal-not-found)
           headers:
             x-request-id:
               $ref: '#/components/headers/RequestId'
@@ -843,6 +905,7 @@ components:
       type: object
       additionalProperties: false
       required:
+        - type
         - id
         - account_id
         - idempotency_key
@@ -856,6 +919,9 @@ components:
         - created_at
         - updated_at
       properties:
+        type:
+          description: What the object is (slice 4 decision 67).
+          const: withdrawal
         id:
           type: string
           pattern: '^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$'
@@ -912,10 +978,29 @@ components:
         to_status:
           $ref: '#/components/schemas/WithdrawalStatus'
         reason:
+          description: |
+            Set on the change to failed: the provider's reason (from its transfer update, or its
+            refusal of the transfer), or a generic text when it gave none. Meant for the customer
+            (slice 4 decision 76). null on every other change.
           type: [string, 'null']
         at:
           type: string
           format: date-time
+    WithdrawalList:
+      type: object
+      additionalProperties: false
+      required: [data, next_before]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Withdrawal'
+        next_before:
+          description: Pass as `before` for the next page; null on the last page.
+          oneOf:
+            - type: string
+              pattern: '^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+            - type: 'null'
     TransferUpdate:
       type: object
       description: Unknown fields are ignored (tolerant reader).

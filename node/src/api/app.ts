@@ -69,9 +69,10 @@ export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
     return sendProblem(reply, problems.http(404, 'No such route.'));
   });
 
-  // An empty path parameter (GET /withdrawals/, GET /accounts//balance) names no resource: 404,
-  // the not-found handler's answer, as in Go (slice 3 decision 62). Fastify's router matches a
-  // parameter that is empty, so without this the route's validation would answer 400.
+  // An empty path parameter (GET /accounts//balance, GET /accounts/x/deposits/) names no
+  // resource: 404, the not-found handler's answer, as in Go (slice 3 decision 62). Fastify's
+  // router matches a parameter that is empty, so without this the route's validation would
+  // answer 400.
   // onRequest is the first hook: it runs after routing (request.params is set) and before the
   // body is parsed, so the 404 comes first whatever the body, as Go's clean-path check does.
   // reply.callNotFound() hands the request to the not-found handler above; returning the reply

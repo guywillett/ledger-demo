@@ -157,6 +157,8 @@ export async function getWithdrawalByKey(
   return row === undefined ? undefined : withdrawalFromRow(row);
 }
 
+// By ID alone: for the system's own use (the submitter, the transfer-update webhook), which acts on
+// a withdrawal whatever its account. The client API reads one with getWithdrawalInAccount.
 export async function getWithdrawal(
   db: Queryable,
   id: Uuid<'wd'>,
@@ -164,4 +166,73 @@ export async function getWithdrawal(
   const result = await db.query<WithdrawalRow>(GET_SQL, [id]);
   const row = result.rows[0];
   return row === undefined ? undefined : withdrawalFromRow(row);
+}
+
+// The withdrawal within its account (slice 4 decision 64): one statement, so "no such
+// withdrawal" and "another account's withdrawal" are the same answer, decided by the database.
+const GET_IN_ACCOUNT_SQL = 'SELECT * FROM withdrawals WHERE id = $1 AND account_id = $2';
+
+// undefined if the account has no such withdrawal.
+export async function getWithdrawalInAccount(
+  db: Queryable,
+  accountId: Uuid<'acct'>,
+  id: Uuid<'wd'>,
+): Promise<Withdrawal | undefined> {
+  const result = await db.query<WithdrawalRow>(GET_IN_ACCOUNT_SQL, [id, accountId]);
+  const row = result.rows[0];
+  return row === undefined ? undefined : withdrawalFromRow(row);
+}
+
+// A page of an account's withdrawals, newest first.
+export type WithdrawalPage = {
+  readonly withdrawals: readonly Withdrawal[];
+  // Pass as `before` to get the next (older) page; null on the last page.
+  readonly nextBefore: Uuid<'wd'> | null;
+};
+
+const ACCOUNT_EXISTS_SQL = 'SELECT 1 FROM accounts WHERE id = $1';
+
+// As the deposits list (deposits/deposits.ts): seek pagination on the ID, served by the
+// (account_id, id DESC) index, and one statement assembled from fixed fragments, one per
+// condition present, the values always parameters.
+function listSql(conditions: readonly string[]): string {
+  return `
+SELECT * FROM withdrawals
+WHERE ${conditions.join(' AND ')}
+ORDER BY id DESC
+LIMIT $1
+`;
+}
+
+// undefined if there is no such account (an account without withdrawals gets an empty page).
+// The existence check is a read before a read: nothing is written based on it. The status
+// filter and the cursor apply together, so nextBefore is the last of the filtered page.
+export async function listWithdrawals(
+  db: Queryable,
+  accountId: Uuid<'acct'>,
+  page: {
+    readonly limit: number;
+    readonly before?: Uuid<'wd'>;
+    readonly status?: WithdrawalStatus;
+  },
+): Promise<WithdrawalPage | undefined> {
+  const account = await db.query(ACCOUNT_EXISTS_SQL, [accountId]);
+  if (account.rowCount === 0) return undefined;
+
+  // One more than the page size, to know whether there is a next page.
+  const params: unknown[] = [page.limit + 1];
+  const conditions: string[] = [];
+  // Each condition's fragment takes the next placeholder: $2, $3, … in the order pushed.
+  const where = (fragment: (placeholder: string) => string, value: unknown): void => {
+    params.push(value);
+    conditions.push(fragment(`$${params.length}`));
+  };
+  where((p) => `account_id = ${p}`, accountId);
+  if (page.before !== undefined) where((p) => `id < ${p}`, page.before);
+  if (page.status !== undefined) where((p) => `status = ${p}`, page.status);
+  const result = await db.query<WithdrawalRow>(listSql(conditions), params);
+
+  const withdrawals = result.rows.slice(0, page.limit).map(withdrawalFromRow);
+  const hasMore = result.rows.length > page.limit;
+  return { withdrawals, nextBefore: hasMore ? (withdrawals.at(-1)?.id ?? null) : null };
 }

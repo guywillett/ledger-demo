@@ -90,11 +90,11 @@ withdraw() {
 }
 
 # wait_final <withdrawal id> [timeout s]: polls the withdrawal until it is executed or failed
-# (30 s by default) and prints its body.
+# (30 s by default) and prints its body. Every withdrawal of the demo's is carol's.
 wait_final() {
   local deadline=$((SECONDS + ${2:-30})) body=''
   while [ "$SECONDS" -lt "$deadline" ]; do
-    body=$(curl -s "$API/withdrawals/$1")
+    body=$(curl -s "$API/accounts/$CAROL/withdrawals/$1")
     case "$(field "$body" status)" in executed | failed) break ;; esac
     sleep 1
   done
@@ -281,7 +281,7 @@ expect "created" 201 "${response##*$'\n'}"
 withdrawal=$(field "${response%$'\n'*}" id)
 # Header names are case-insensitive (RFC 9110 5.1): Node sends "location", Go "Location".
 # Lowercased whole (TypeIDs are lowercase already).
-contains "with its Location" "location: /withdrawals/$withdrawal" "$(tr -d '\r' < "$headers" | tr 'A-Z' 'a-z')"
+contains "with its Location" "location: /accounts/$CAROL/withdrawals/$withdrawal" "$(tr -d '\r' < "$headers" | tr 'A-Z' 'a-z')"
 expect "ends executed" executed "$(field "$(wait_final "$withdrawal")" status)"
 expect "available down by the amount" $((before - 700)) "$(balance "$CAROL" available)"
 expect "nothing left held" 0 "$(balance "$CAROL" held)"
