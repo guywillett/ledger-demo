@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"regexp"
 	"slices"
@@ -216,7 +215,7 @@ func (h withdrawalRoutes) create(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	// Every problem with the request at once: path, header and body, in that order.
-	account, pathErrs := accountParam(r)
+	account, pathErrs := idParam[ids.Account](r, "account_id")
 	key, headerErrs := idempotencyKeyHeader(r)
 	decoded, bodyErrs := decodeWithdrawalBody(body)
 	// A new slice: appending to pathErrs could write into its backing array (append reuses spare
@@ -296,64 +295,28 @@ type withdrawalsQuery struct {
 	status  *withdrawals.Status
 }
 
-// parseWithdrawalsQuery validates the withdrawals list's query, as Node's withdrawalsQuerySchema
-// and as parseDepositsQuery does the deposits list's: limit (default 50, read as JavaScript's
-// Number() reads it: see jsNumber), before (a withdrawal's ID) and include, then its status filter
+// parseWithdrawalsQuery validates the withdrawals list's query, as Node's withdrawalsQuerySchema:
+// the list's limit, before (a withdrawal's ID) and include (query.go), then its status filter
 // (decision 70), one of withdrawals.Statuses(). Unknown parameters are ignored. Every problem is
 // reported at once, in the contract's parameter order (slice 4 decision 68).
 func parseWithdrawalsQuery(raw string) (withdrawalsQuery, []ValidationError) {
 	query := parseQuery(raw)
-	parsed := withdrawalsQuery{limit: 50}
-	var errs []ValidationError
+	parsed := withdrawalsQuery{}
+	var errs, invalid []ValidationError
 
-	if values, ok := query["limit"]; ok {
-		n := math.NaN()
-		if len(values) == 1 {
-			n = jsNumber(values[0])
-		}
-		invalid := limitErrors(n)
-		errs = append(errs, invalid...)
-		if len(invalid) == 0 {
-			parsed.limit = int(n)
-		}
-	}
-
-	if values, ok := query["before"]; ok {
-		before, err := ids.FromTypeID[ids.Withdrawal](values[0])
-		if len(values) == 1 && err == nil {
-			parsed.before = &before
-		} else {
-			errs = append(errs, ValidationError{Path: "before", Message: "must be a wd_ ID"})
-		}
-	}
-
-	history, invalid := includeHistory(query)
-	parsed.history = history
+	parsed.limit, invalid = parseLimit(query)
 	errs = append(errs, invalid...)
 
-	if values, ok := query["status"]; ok {
-		s := withdrawals.Status(values[0])
-		if len(values) == 1 && slices.Contains(withdrawals.Statuses(), s) {
-			parsed.status = &s
-		} else {
-			errs = append(errs, ValidationError{
-				Path:    "status",
-				Message: `Invalid option: expected one of "held"|"submitted"|"executed"|"failed"`,
-			})
-		}
-	}
+	parsed.before, invalid = parseBefore[ids.Withdrawal](query)
+	errs = append(errs, invalid...)
+
+	parsed.history, invalid = includeHistory(query)
+	errs = append(errs, invalid...)
+
+	parsed.status, invalid = parseStatusFilter(query, withdrawals.Statuses())
+	errs = append(errs, invalid...)
 
 	return parsed, errs
-}
-
-// withdrawalParam parses the {withdrawal_id} path value, as Node's withdrawalParamsSchema (and as
-// accountParam does an account's).
-func withdrawalParam(r *http.Request) (ids.WithdrawalID, []ValidationError) {
-	id, err := ids.FromTypeID[ids.Withdrawal](r.PathValue("withdrawal_id"))
-	if err != nil {
-		return ids.WithdrawalID{}, []ValidationError{{Path: "withdrawal_id", Message: "must be a wd_ ID"}}
-	}
-	return id, nil
 }
 
 // withWithdrawalHistory adds the withdrawal's history (nil for none, written as []), its reasons
@@ -377,8 +340,8 @@ func withWithdrawalHistory(
 // doesn't exist, whether or not the account exists (decision 64). ?include=history adds its status
 // history. Every problem with the request at once, the IDs then the query (decision 68).
 func (h withdrawalRoutes) get(w http.ResponseWriter, r *http.Request) error {
-	account, accountErrs := accountParam(r)
-	id, idErrs := withdrawalParam(r)
+	account, accountErrs := idParam[ids.Account](r, "account_id")
+	id, idErrs := idParam[ids.Withdrawal](r, "withdrawal_id")
 	history, queryErrs := includeHistory(parseQuery(r.URL.RawQuery))
 	if invalid := slices.Concat(accountErrs, idErrs, queryErrs); len(invalid) > 0 {
 		writeProblem(w, invalidRequest(invalid))
@@ -412,7 +375,7 @@ func (h withdrawalRoutes) get(w http.ResponseWriter, r *http.Request) error {
 // Every problem with the request at once, the path then the query (decision 68). A list checks
 // its account: an unknown one is a 404, an empty list an account without withdrawals.
 func (h withdrawalRoutes) list(w http.ResponseWriter, r *http.Request) error {
-	account, pathErrs := accountParam(r)
+	account, pathErrs := idParam[ids.Account](r, "account_id")
 	query, queryErrs := parseWithdrawalsQuery(r.URL.RawQuery)
 	if invalid := slices.Concat(pathErrs, queryErrs); len(invalid) > 0 {
 		writeProblem(w, invalidRequest(invalid))

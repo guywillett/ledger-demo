@@ -3,10 +3,19 @@ package api
 import (
 	"errors"
 	"math"
+	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/guywillett/ledger-demo/go/internal/ids"
 )
+
+// The parsing of a request's parameters, the query string's and the path's IDs, by Node's rules
+// (Fastify's parser, Zod's schemas and messages): the bytes of a 400 must match Node's, so how a
+// value is read, and what each problem says, is reproduced here rather than left to Go's defaults.
+// Each list's parser (parseDepositsQuery, parseWithdrawalsQuery) is built from these.
 
 // parseQuery splits a raw query string the way Node's API reads it (Fastify's querystring
 // parser), which Go's url.ParseQuery doesn't quite:
@@ -155,6 +164,96 @@ func includeHistory(query map[string][]string) (bool, []ValidationError) {
 		return true, nil
 	}
 	return false, []ValidationError{{Path: "include", Message: `Invalid input: expected "history"`}}
+}
+
+// parseTypeID parses value as a TypeID of kind K, as Node's typeIdSchema does: it must be well
+// formed, have K's prefix and hold a UUIDv7. Anything else is typeIDProblem.
+func parseTypeID[K ids.Kind](value, path string) (ids.ID[K], []ValidationError) {
+	id, err := ids.FromTypeID[K](value)
+	if err != nil {
+		return ids.ID[K]{}, typeIDProblem[K](path)
+	}
+	return id, nil
+}
+
+// typeIDProblem is the one problem for a value at path that isn't a TypeID of kind K, naming the
+// kind it must be, as Node's message does: "must be a dep_ ID".
+func typeIDProblem[K ids.Kind](path string) []ValidationError {
+	return []ValidationError{{Path: path, Message: "must be a " + ids.PrefixOf[K]() + "_ ID"}}
+}
+
+// idParam parses the path value name as a TypeID of kind K (see parseTypeID), the problem's path
+// the parameter's name: idParam[ids.Account](r, "account_id").
+func idParam[K ids.Kind](r *http.Request, name string) (ids.ID[K], []ValidationError) {
+	return parseTypeID[K](r.PathValue(name), name)
+}
+
+// oneOfMessage is Zod's message for a value outside an enum (z.enum), measured against Node:
+// `Invalid option: expected one of "held"|"submitted"`. The values are listed in the order given,
+// so the order is part of the API's bytes.
+func oneOfMessage[S ~string](values []S) string {
+	quoted := make([]string, len(values))
+	for i, s := range values {
+		quoted[i] = `"` + string(s) + `"`
+	}
+	return "Invalid option: expected one of " + strings.Join(quoted, "|")
+}
+
+// parseStatusFilter reads ?status, a list's status filter (slice 4 decision 70): absent is nil (no
+// filter); one of valid, its status; anything else (another value, an empty one, or the parameter
+// given twice) is one problem with Zod's enum message, which lists valid in the order given.
+func parseStatusFilter[S ~string](query map[string][]string, valid []S) (*S, []ValidationError) {
+	values, ok := query["status"]
+	if !ok {
+		return nil, nil
+	}
+	s := S(values[0])
+	if len(values) != 1 || !slices.Contains(valid, s) {
+		return nil, []ValidationError{{Path: "status", Message: oneOfMessage(valid)}}
+	}
+	return &s, nil
+}
+
+// parseBefore reads ?before, a list's cursor (slice 4 decision 66): absent is nil (the first page);
+// otherwise exactly one TypeID of kind K (see parseTypeID), the parameter given twice being the
+// same problem. A position in time, never looked up: another account's ID, or one that names
+// nothing, is accepted.
+func parseBefore[K ids.Kind](query map[string][]string) (*ids.ID[K], []ValidationError) {
+	values, ok := query["before"]
+	if !ok {
+		return nil, nil
+	}
+	if len(values) != 1 {
+		return nil, typeIDProblem[K]("before")
+	}
+	before, invalid := parseTypeID[K](values[0], "before")
+	if invalid != nil {
+		return nil, invalid
+	}
+	return &before, nil
+}
+
+// defaultLimit is a list's page size when ?limit is absent (slice 4 decision 66: every list keeps
+// limit's rules, 1 to 200 and 50 by default).
+const defaultLimit = 50
+
+// parseLimit reads ?limit, a list's page size: absent is defaultLimit; otherwise a whole number
+// from 1 to 200, read as JavaScript's Number() reads it (see jsNumber), with Zod's messages
+// (limitErrors). The parameter given twice reads as NaN, as Node's array does.
+func parseLimit(query map[string][]string) (int, []ValidationError) {
+	values, ok := query["limit"]
+	if !ok {
+		return defaultLimit, nil
+	}
+	n := math.NaN()
+	if len(values) == 1 {
+		n = jsNumber(values[0])
+	}
+	invalid := limitErrors(n)
+	if len(invalid) != 0 {
+		return 0, invalid
+	}
+	return int(n), nil
 }
 
 // limitErrors are Zod's errors for a limit read as n, in Zod's order, measured against Node. A

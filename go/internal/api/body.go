@@ -315,11 +315,7 @@ func (f *fields) enum(name string, allowed ...string) (string, bool) {
 		json.Unmarshal(raw, &s) == nil && slices.Contains(allowed, s) {
 		return s, true
 	}
-	quoted := make([]string, len(allowed))
-	for i, a := range allowed {
-		quoted[i] = `"` + a + `"`
-	}
-	f.fail(name, "Invalid option: expected one of "+strings.Join(quoted, "|"))
+	f.fail(name, oneOfMessage(allowed))
 	return "", false
 }
 

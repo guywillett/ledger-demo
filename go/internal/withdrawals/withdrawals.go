@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/guywillett/ledger-demo/go/internal/accounts"
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/ids"
 	"github.com/guywillett/ledger-demo/go/internal/money"
@@ -195,8 +196,6 @@ func one(w Withdrawal, err error) (Withdrawal, bool, error) {
 	return w, true, nil
 }
 
-const accountExistsSQL = `SELECT 1 FROM accounts WHERE id = $1`
-
 // ListPage reads a page of at most limit withdrawals of the account, newest first, older than
 // before if it isn't nil, in filter's status if it has one. false if there is no such account (an
 // account without withdrawals gets an empty page). The existence check is a read before a read:
@@ -209,15 +208,12 @@ func ListPage(
 	before *ids.WithdrawalID,
 	filter Filter,
 ) (Page, bool, error) {
-	// Node's statement; its row, if any, is read and discarded (Exec would also work, through the
-	// SELECT's row count, but Querier documents Exec for statements that return no rows).
-	var one int
-	err := q.QueryRow(ctx, accountExistsSQL, account).Scan(&one)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Page{}, false, nil
-	}
+	exists, err := accounts.Exists(ctx, q, account)
 	if err != nil {
-		return Page{}, false, fmt.Errorf("account %v: %w", account, err)
+		return Page{}, false, err
+	}
+	if !exists {
+		return Page{}, false, nil
 	}
 	// Build listSQL WHERE conditions, with matching numbered placeholders for associated params
 	// position. Limit is one more than the page size, to know whether there is a next page.

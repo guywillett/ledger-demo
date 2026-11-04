@@ -44,3 +44,20 @@ func Get(ctx context.Context, q db.Querier, id ids.AccountID) (Account, bool, er
 	a.IBAN = sepa.IBAN(iban)
 	return a, true, nil
 }
+
+const accountExistsSQL = `SELECT 1 FROM accounts WHERE id = $1`
+
+// Exists checks an account exists.
+// Node's statement; its row, if any, is read and discarded (Exec would also work, through the
+// SELECT's row count, but Querier documents Exec for statements that return no rows).
+func Exists(ctx context.Context, q db.Querier, id ids.AccountID) (bool, error) {
+	var exists int
+	err := q.QueryRow(ctx, accountExistsSQL, id).Scan(&exists)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("account %v exists: %w", id, err)
+	}
+	return true, nil
+}

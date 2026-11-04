@@ -1,10 +1,8 @@
 package api
 
 import (
-	"math"
 	"net/http"
 	"slices"
-	"strings"
 
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/deposits"
@@ -105,16 +103,6 @@ func withHistory(item depositResponse, changes []deposits.StatusChange) depositR
 	return item
 }
 
-// depositParam parses the {deposit_id} path value, as Node's depositParamsSchema does it (and
-// accountParam an account's).
-func depositParam(r *http.Request) (ids.DepositID, []ValidationError) {
-	deposit, err := ids.FromTypeID[ids.Deposit](r.PathValue("deposit_id"))
-	if err != nil {
-		return ids.DepositID{}, []ValidationError{{Path: "deposit_id", Message: "must be a dep_ ID"}}
-	}
-	return deposit, nil
-}
-
 // depositsQuery is the list's validated ?limit, ?before, ?include, ?status and
 // ?network_transaction_id.
 type depositsQuery struct {
@@ -125,61 +113,27 @@ type depositsQuery struct {
 	networkTransactionID *string
 }
 
-// statusFilterMessage: a ValidationError message with all deposits.BookedStatuses values
-// correctly formatted.
-var statusFilterMessage = func() string {
-	statuses := deposits.BookedStatuses()
-	quoted := make([]string, len(statuses))
-	for i, s := range statuses {
-		quoted[i] = `"` + string(s) + `"`
-	}
-	return "Invalid option: expected one of " + strings.Join(quoted, "|")
-}()
-
-// parseDepositsQuery validates the query as Node's depositsQuerySchema: limit a whole number from 1
-// to 200 (default 50), read as JavaScript's Number() reads it (see jsNumber); before a deposit's
-// TypeID; include "history". Unknown parameters are ignored. A parameter given twice is invalid
-// (Node's parser makes it an array, which no rule accepts). Every problem is reported, in the
-// contract's parameter order (slice 4 decision 68), as Node's schema lists its keys; the messages
-// are Zod's, though only the paths are part of the contract.
+// parseDepositsQuery validates the deposits list's query, as Node's depositsQuerySchema: the list's
+// limit, before (a deposit's ID) and include (query.go), then its filters (decision 70): status,
+// one of deposits.BookedStatuses(), and network_transaction_id, as the incoming-payment webhook
+// accepts it (1 to 255 characters). Unknown parameters are ignored. Every problem is reported at
+// once, in the contract's parameter order (slice 4 decision 68).
 func parseDepositsQuery(raw string) (depositsQuery, []ValidationError) {
 	query := parseQuery(raw)
-	parsed := depositsQuery{limit: 50}
-	var errs []ValidationError
+	parsed := depositsQuery{}
+	var errs, invalid []ValidationError
 
-	if values, ok := query["limit"]; ok {
-		n := math.NaN()
-		if len(values) == 1 {
-			n = jsNumber(values[0])
-		}
-		invalid := limitErrors(n)
-		errs = append(errs, invalid...)
-		if len(invalid) == 0 {
-			parsed.limit = int(n)
-		}
-	}
-
-	if values, ok := query["before"]; ok {
-		before, err := ids.FromTypeID[ids.Deposit](values[0])
-		if len(values) == 1 && err == nil {
-			parsed.before = &before
-		} else {
-			errs = append(errs, ValidationError{Path: "before", Message: "must be a dep_ ID"})
-		}
-	}
-
-	history, invalid := includeHistory(query)
-	parsed.history = history
+	parsed.limit, invalid = parseLimit(query)
 	errs = append(errs, invalid...)
 
-	if values, ok := query["status"]; ok {
-		s := deposits.Status(values[0])
-		if len(values) == 1 && slices.Contains(deposits.BookedStatuses(), s) {
-			parsed.status = &s
-		} else {
-			errs = append(errs, ValidationError{Path: "status", Message: statusFilterMessage})
-		}
-	}
+	parsed.before, invalid = parseBefore[ids.Deposit](query)
+	errs = append(errs, invalid...)
+
+	parsed.history, invalid = includeHistory(query)
+	errs = append(errs, invalid...)
+
+	parsed.status, invalid = parseStatusFilter(query, deposits.BookedStatuses())
+	errs = append(errs, invalid...)
 
 	if values, ok := query["network_transaction_id"]; ok {
 		length := zodLen(values[0])
@@ -198,10 +152,13 @@ func parseDepositsQuery(raw string) (depositsQuery, []ValidationError) {
 	return parsed, errs
 }
 
-// GET /accounts/{account_id}/deposits/{deposit_id}: the deposit itself, as a client sees it.
+// GET /accounts/{account_id}/deposits/{deposit_id}: the deposit, read with its account in one
+// query: another account's deposit is a 404, the same as one that doesn't exist, whether or not the
+// account exists (decision 64). ?include=history adds its status history. Every problem with the
+// request at once, the IDs then the query (decision 68).
 func (d depositRoutes) get(w http.ResponseWriter, r *http.Request) error {
-	account, acctErrs := accountParam(r)
-	depositID, depErrs := depositParam(r)
+	account, acctErrs := idParam[ids.Account](r, "account_id")
+	depositID, depErrs := idParam[ids.Deposit](r, "deposit_id")
 	history, queryErrs := includeHistory(parseQuery(r.URL.RawQuery))
 	if invalid := slices.Concat(acctErrs, depErrs, queryErrs); len(invalid) > 0 {
 		writeProblem(w, invalidRequest(invalid))
@@ -233,7 +190,7 @@ func (d depositRoutes) get(w http.ResponseWriter, r *http.Request) error {
 // Every problem with the request at once, the path then the query (decision 68). A list checks
 // its account: an unknown one is a 404, an empty list an account without deposits.
 func (d depositRoutes) list(w http.ResponseWriter, r *http.Request) error {
-	account, pathErrs := accountParam(r)
+	account, pathErrs := idParam[ids.Account](r, "account_id")
 	query, queryErrs := parseDepositsQuery(r.URL.RawQuery)
 	if invalid := slices.Concat(pathErrs, queryErrs); len(invalid) > 0 {
 		writeProblem(w, invalidRequest(invalid))

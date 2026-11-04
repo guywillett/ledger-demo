@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/guywillett/ledger-demo/go/internal/accounts"
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/ids"
 	"github.com/guywillett/ledger-demo/go/internal/money"
@@ -85,8 +86,6 @@ type Page struct {
 	NextBefore *ids.DepositID
 }
 
-const accountExistsSQL = `SELECT 1 FROM accounts WHERE id = $1`
-
 // listSQL generates SQL allowing for multiple filters and pagination cursor.
 // Condition values are always parameters. A missing filter/cursor is no condition
 // at all, so each statement is easy to plan.
@@ -131,15 +130,12 @@ func ListPage(
 	before *ids.DepositID,
 	filter Filter,
 ) (Page, bool, error) {
-	// Node's statement; its row, if any, is read and discarded (Exec would also work, through the
-	// SELECT's row count, but Querier documents Exec for statements that return no rows).
-	var one int
-	err := q.QueryRow(ctx, accountExistsSQL, account).Scan(&one)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Page{}, false, nil
-	}
+	exists, err := accounts.Exists(ctx, q, account)
 	if err != nil {
-		return Page{}, false, fmt.Errorf("account %v: %w", account, err)
+		return Page{}, false, err
+	}
+	if !exists {
+		return Page{}, false, nil
 	}
 	// Build listSQL WHERE conditions, with matching numbered placeholders for associated params
 	// position. Limit is one more than the page size, to know whether there is a next page.

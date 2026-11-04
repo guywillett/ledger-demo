@@ -39,18 +39,9 @@ type accountResponse struct {
 	CreatedAt timestamp.Time `json:"created_at"`
 }
 
-// accountParam parses the {account_id} path value, as Node's accountParamsSchema.
-func accountParam(r *http.Request) (ids.AccountID, []ValidationError) {
-	account, err := ids.FromTypeID[ids.Account](r.PathValue("account_id"))
-	if err != nil {
-		return ids.AccountID{}, []ValidationError{{Path: "account_id", Message: "must be a acct_ ID"}}
-	}
-	return account, nil
-}
-
 // GET /accounts/{account_id}/balance
 func (a accountRoutes) balance(w http.ResponseWriter, r *http.Request) error {
-	account, invalid := accountParam(r)
+	account, invalid := idParam[ids.Account](r, "account_id")
 	if invalid != nil {
 		writeProblem(w, invalidRequest(invalid))
 		return nil
@@ -74,7 +65,7 @@ func (a accountRoutes) balance(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (a accountRoutes) account(w http.ResponseWriter, r *http.Request) error {
-	accountID, invalid := accountParam(r)
+	accountID, invalid := idParam[ids.Account](r, "account_id")
 	if invalid != nil {
 		writeProblem(w, invalidRequest(invalid))
 		return nil
