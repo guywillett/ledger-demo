@@ -214,17 +214,21 @@ func parseStatusFilter[S ~string](query map[string][]string, valid []S) (*S, []V
 	return &s, nil
 }
 
+// arrayMessage is Zod's message for a parameter given twice where one string is due: Node's query
+// parser makes the parameter an array, which z.string() refuses with this.
+const arrayMessage = "Invalid input: expected string, received array"
+
 // parseBefore reads ?before, a list's cursor (slice 4 decision 66): absent is nil (the first page);
-// otherwise exactly one TypeID of kind K (see parseTypeID), the parameter given twice being the
-// same problem. A position in time, never looked up: another account's ID, or one that names
-// nothing, is accepted.
+// otherwise exactly one TypeID of kind K (see parseTypeID); given twice, arrayMessage, as Node's
+// typeIdSchema (a z.string()) answers. A position in time, never looked up: another account's ID,
+// or one that names nothing, is accepted.
 func parseBefore[K ids.Kind](query map[string][]string) (*ids.ID[K], []ValidationError) {
 	values, ok := query["before"]
 	if !ok {
 		return nil, nil
 	}
 	if len(values) != 1 {
-		return nil, typeIDProblem[K]("before")
+		return nil, []ValidationError{{Path: "before", Message: arrayMessage}}
 	}
 	before, invalid := parseTypeID[K](values[0], "before")
 	if invalid != nil {

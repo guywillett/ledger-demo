@@ -161,6 +161,8 @@ func TestWithdrawalsInvalidQueryIs400(t *testing.T) {
 		{"limit=lots", "limit", "Invalid input: expected number, received NaN"},
 		{"before=" + ids.New[ids.Deposit]().TypeID(), "before", "must be a wd_ ID"},
 		{"before=", "before", "must be a wd_ ID"},
+		{"before=" + ids.New[ids.Withdrawal]().TypeID() + "&before=" + ids.New[ids.Withdrawal]().TypeID(),
+			"before", "Invalid input: expected string, received array"}, // Zod's, for the array
 		{"include=everything", "include", `Invalid input: expected "history"`},
 		{"status=nope", "status", withdrawalStatusMessage},
 		{"status=", "status", withdrawalStatusMessage},

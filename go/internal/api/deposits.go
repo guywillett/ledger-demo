@@ -140,7 +140,7 @@ func parseDepositsQuery(raw string) (depositsQuery, []ValidationError) {
 		path := "network_transaction_id"
 		switch {
 		case len(values) > 1:
-			errs = append(errs, ValidationError{Path: path, Message: "Invalid input: expected string, received array"})
+			errs = append(errs, ValidationError{Path: path, Message: arrayMessage})
 		case length == 0:
 			errs = append(errs, ValidationError{Path: path, Message: "Too small: expected string to have >=1 characters"})
 		case length > 255:

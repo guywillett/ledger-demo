@@ -314,6 +314,7 @@ for q in limit=0 limit=1 limit=200 limit=201 limit=abc limit=-1 limit=1.5 limit=
   "limit=1&limit=2" limit=%31 limit=99999999999999999999 \
   before=nope "before=wd_${first_deposit#dep_}" "before=dep_8${first_deposit#dep_?}" \
   "before=$(unknown_id "$first_deposit")" "before=$first_deposit" before= \
+  "before=$first_deposit&before=$first_deposit" \
   include=history include=nope include= "include=history&include=history" foo=bar \
   "limit=1&foo=bar"; do
   compare GET "$T?$q"
@@ -391,6 +392,7 @@ for status in held submitted executed failed; do
 done
 for q in status=nope status= status=HELD "status=held&status=failed" status=unmatched limit=0 \
   limit=201 limit=abc before=nope "before=dep_${id#wd_}" "before=$(unknown_id "$id")" "before=$id" \
+  "before=$id&before=$id" \
   include=history include=nope "include=history&include=history" foo=bar; do
   compare GET "$W?$q"
 done

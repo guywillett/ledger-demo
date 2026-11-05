@@ -660,6 +660,11 @@ describe('GET /accounts/:account_id/withdrawals', () => {
     ['limit=lots', 'limit', 'Invalid input: expected number, received NaN'],
     [`before=${toTypeId('dep', newUuid('dep'))}`, 'before', 'must be a wd_ ID'],
     ['before=', 'before', 'must be a wd_ ID'],
+    [
+      `before=${toTypeId('wd', newUuid('wd'))}&before=${toTypeId('wd', newUuid('wd'))}`,
+      'before',
+      'Invalid input: expected string, received array',
+    ],
     ['include=everything', 'include', 'Invalid input: expected "history"'],
     ['status=nope', 'status', STATUS_MESSAGE],
     ['status=', 'status', STATUS_MESSAGE],

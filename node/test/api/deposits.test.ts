@@ -188,6 +188,18 @@ describe('GET /accounts/:id/deposits', () => {
     ]);
   });
 
+  // before given twice: the query parser makes it an array, which typeIdSchema (a z.string())
+  // refuses with Zod's message for it.
+  it("answers a repeated before with Zod's array message", async () => {
+    const account = await createTestAccount(pool);
+    const twice = `before=${toTypeId('dep', newUuid('dep'))}&before=${toTypeId('dep', newUuid('dep'))}`;
+    const response = await getJson(app, `/accounts/${account.typeId}/deposits?${twice}`, DEPOSITS);
+    expect(response.statusCode).toBe(400);
+    expect(response.json.errors).toEqual([
+      { path: 'before', message: 'Invalid input: expected string, received array' },
+    ]);
+  });
+
   it('ignores unknown query parameters', async () => {
     const account = await createTestAccount(pool);
     const response = await getJson(app, `/accounts/${account.typeId}/deposits?sort=asc`, DEPOSITS);

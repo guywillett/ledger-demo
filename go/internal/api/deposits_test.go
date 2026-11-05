@@ -174,6 +174,19 @@ func TestDepositsInvalidQueryIs400(t *testing.T) {
 	}
 }
 
+// before given twice: Node's parser makes it an array, which typeIdSchema (a z.string()) refuses
+// with Zod's message for it, not the TypeID's.
+func TestDepositsRepeatedBeforeIsZodsArrayMessage(t *testing.T) {
+	a := newTestAPI(t)
+	account := testdb.NewAccount(t, a.pool)
+	r := a.get(t, depositsPath(account.ID, "before="+ids.New[ids.Deposit]().TypeID()+"&before="+ids.New[ids.Deposit]().TypeID()))
+	want := `{"type":"urn:ledger-demo:problem:invalid-request","title":"Invalid request","status":400,` +
+		`"errors":[{"path":"before","message":"Invalid input: expected string, received array"}]}`
+	if r.status != 400 || r.body != want {
+		t.Errorf("got %d %s\nwant %s", r.status, r.body, want)
+	}
+}
+
 // Zod's message for each kind of bad limit, as Node's API answers (measured): only the path is part
 // of the contract, but the messages are Zod's too, so a client sees the same either way.
 func TestDepositsLimitMessagesAreZods(t *testing.T) {
