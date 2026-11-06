@@ -4,6 +4,7 @@ import type pg from 'pg';
 import type { Logger } from '../shared/logger.ts';
 import { registerAccountRoutes } from './accounts.ts';
 import { registerDepositRoutes } from './deposits.ts';
+import { registerTransactionRoutes } from './transactions.ts';
 import { problemErrorHandler } from './errors.ts';
 import { registerHealthRoute } from './health.ts';
 import { problems, sendProblem } from './problem.ts';
@@ -96,6 +97,7 @@ export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
   registerHealthRoute(app, { pool: deps.pool });
   registerAccountRoutes(app, { db: deps.pool });
   registerDepositRoutes(app, { db: deps.pool });
+  registerTransactionRoutes(app, { db: deps.pool });
   registerWithdrawalRoutes(app, { pool: deps.pool });
   registerWebhookRoutes(app, { pool: deps.pool });
   return app;

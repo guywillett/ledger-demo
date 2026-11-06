@@ -336,6 +336,69 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /accounts/{account_id}/transactions:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: The account's deposits and withdrawals together, newest first, a page at a time
+      description: |
+        Deposits and withdrawals in one list (slice 4 decision 67), newest first by when each was
+        created (not when it settled): `data` holds the page, `next_before` the cursor for the
+        next, older page (null on the last). Each item is exactly what its own endpoint returns,
+        `type` telling them apart. The cursor is the last item's ID, a deposit's or a
+        withdrawal's: a position in time (decision 66), so a `before` of either kind, another
+        account's or one that names nothing, is accepted and never looked up.
+
+        No `include=history` and no filters here: they are the per-resource lists' (decision 67).
+        Not documented for this operation, they are unknown parameters, ignored as every
+        operation ignores them, so the items never carry a history.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/Limit'
+        - name: before
+          in: query
+          required: false
+          description: Only items older than this one (a previous page's next_before), a deposit's or a withdrawal's ID. Anything else is a 400, "must be a dep_ or wd_ ID".
+          schema:
+            type: string
+            pattern: '^(dep|wd)_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+      responses:
+        '200':
+          description: A page of deposits and withdrawals
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionList'
+        '400':
+          description: Invalid account_id or query parameter
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such account (type urn:ledger-demo:problem:account-not-found)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /accounts/{account_id}/withdrawals:
     parameters:
       - $ref: '#/components/parameters/RequestId'
@@ -986,6 +1049,26 @@ components:
         at:
           type: string
           format: date-time
+    TransactionList:
+      type: object
+      additionalProperties: false
+      required: [data, next_before]
+      properties:
+        data:
+          type: array
+          items:
+            description: A deposit or a withdrawal, exactly as its own endpoint returns it.
+            oneOf:
+              - $ref: '#/components/schemas/Deposit'
+              - $ref: '#/components/schemas/Withdrawal'
+            discriminator:
+              propertyName: type
+        next_before:
+          description: Pass as `before` for the next page (the last item's ID, of either kind); null on the last page.
+          oneOf:
+            - type: string
+              pattern: '^(dep|wd)_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+            - type: 'null'
     WithdrawalList:
       type: object
       additionalProperties: false

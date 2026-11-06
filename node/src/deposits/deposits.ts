@@ -182,6 +182,22 @@ export async function getDeposit(
   return row === undefined ? undefined : depositFromRow(row);
 }
 
+// Several of the account's deposits by ID, one statement (for the transactions list, which has
+// decided its page on IDs alone: transactions/transactions.ts).
+const GET_MANY_SQL = 'SELECT * FROM deposits WHERE account_id = $1 AND id = ANY($2)';
+
+// The account's deposits among ids, in no particular order; an ID the account has no deposit for
+// is simply absent (the caller decides what that means).
+export async function getDeposits(
+  db: Queryable,
+  accountId: Uuid<'acct'>,
+  ids: readonly Uuid<'dep'>[],
+): Promise<Deposit[]> {
+  if (ids.length === 0) return [];
+  const result = await db.query<DepositRow>(GET_MANY_SQL, [accountId, ids]);
+  return result.rows.map(depositFromRow);
+}
+
 const EXISTS_SQL = 'SELECT 1 FROM deposits WHERE id = $1';
 
 // For classifying an outcome after the fact (e.g. an event whose transitions all skipped:

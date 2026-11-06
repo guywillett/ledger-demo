@@ -34,7 +34,11 @@ const addFormats = (
   'default' in addFormatsModule ? addFormatsModule.default : addFormatsModule
 ) as (ajv: Ajv2020) => Ajv2020;
 
-const ajv = new Ajv2020({ allErrors: true });
+// discriminator: the contract's lists of either kind (TransactionList) name their items' type
+// property with OpenAPI's discriminator keyword, which Ajv knows but only accepts with this option
+// (it is otherwise an unknown keyword, refused in strict mode). Ajv then checks the item against
+// the one subschema its type names.
+const ajv = new Ajv2020({ allErrors: true, discriminator: true });
 addFormats(ajv);
 ajv.addSchema({ $id: SCHEMAS_ID, $defs: retarget(contract.components.schemas) });
 

@@ -14,7 +14,7 @@
 # page's cursor used on the other implementation too, filtered and not), the query parameters' and
 # the filters' edge cases, single deposits (found, another account's, unknown, malformed IDs),
 # the same for withdrawals (every page of each account's list, the status filter, withdrawals in
-# each final status), unknown and malformed IDs, unknown routes and wrong methods,
+# each final status), every page of each account's transactions (both kinds' cursors), unknown and malformed IDs, unknown routes and wrong methods,
 # and replays of the demo's withdrawal requests (the same key and body, then the same key and
 # another amount: writes that change nothing). It compares the status code, the body byte for
 # byte, and the headers: names case-insensitively, ignoring date, x-request-id and the transport
@@ -425,6 +425,32 @@ for bad in nope wd_123 "dep_${id#wd_}" "acct_${id#wd_}" "wd_8${id#wd_?}" \
 done
 compare GET "/accounts/nope/withdrawals/nope?include=nope"
 
+say "Transactions: every page, each cursor used on both implementations"
+# Deposits and withdrawals together (slice 4 decision 67): carol's list has both, so a small page
+# gives cursors of both kinds, each taken alternately from one implementation's answer.
+for account in $ACCOUNTS; do
+  for first in a b; do
+    walk "/accounts/$account/transactions" "limit=3" "$first"
+  done
+  walk "/accounts/$account/transactions" "" a
+done
+
+say "Transactions: query parameters"
+read -r account withdrawal <<< "$executed"
+T="/accounts/$account/transactions"
+# before of each kind, of another account (a position: decision 66), naming nothing, and the
+# invalid ones; limit's edges; include and the filters, which this list ignores.
+for q in "before=$withdrawal" "before=$first_deposit" "before=$(unknown_id "$withdrawal")" \
+  "before=$(unknown_id "$first_deposit")" before=nope before= "before=dep_x" "before=acct_${withdrawal#wd_}" \
+  "before=$(printf '%s' "$withdrawal" | tr 'a-z' 'A-Z')" "before=$withdrawal&before=$first_deposit" \
+  limit=0 limit=1 limit=200 limit=201 limit=abc "limit=1&limit=2" \
+  include=history status=held "network_transaction_id=x&include=history"; do
+  compare GET "$T?$q"
+done
+compare HEAD "$T?limit=1"
+compare GET "/accounts/$(unknown_id "$account")/transactions"
+compare GET "/accounts/nope/transactions?before=nope&limit=0"
+
 say "Unknown routes and wrong methods"
 for path in / /nope /accounts "/accounts/$ALICE/" "/accounts/$ALICE/balance/" \
   "/accounts/$ALICE/nope" /withdrawals /withdrawals/ "/withdrawals/${executed#* }" \
@@ -437,7 +463,7 @@ for m in POST PUT PATCH DELETE OPTIONS; do
   compare "$m" "/accounts/$ALICE/balance"
 done
 compare POST "/accounts/$ALICE/deposits"
-compare GET "/accounts/$ALICE/transactions" # removed in slice 4 step 3; back in step 5
+compare POST "/accounts/$ALICE/transactions"
 compare DELETE "/accounts/${executed% *}/withdrawals/${executed#* }"
 compare PUT "/accounts/${executed% *}/withdrawals/${executed#* }"
 compare PUT "/accounts/$ALICE/withdrawals"

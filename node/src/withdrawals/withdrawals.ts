@@ -183,6 +183,22 @@ export async function getWithdrawalInAccount(
   return row === undefined ? undefined : withdrawalFromRow(row);
 }
 
+// Several of the account's withdrawals by ID, one statement (for the transactions list, which has
+// decided its page on IDs alone: transactions/transactions.ts).
+const GET_MANY_SQL = 'SELECT * FROM withdrawals WHERE account_id = $1 AND id = ANY($2)';
+
+// The account's withdrawals among ids, in no particular order; an ID the account has no
+// withdrawal for is simply absent (the caller decides what that means).
+export async function getWithdrawals(
+  db: Queryable,
+  accountId: Uuid<'acct'>,
+  ids: readonly Uuid<'wd'>[],
+): Promise<Withdrawal[]> {
+  if (ids.length === 0) return [];
+  const result = await db.query<WithdrawalRow>(GET_MANY_SQL, [accountId, ids]);
+  return result.rows.map(withdrawalFromRow);
+}
+
 // A page of an account's withdrawals, newest first.
 export type WithdrawalPage = {
   readonly withdrawals: readonly Withdrawal[];

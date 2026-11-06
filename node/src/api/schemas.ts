@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { toTypeId, type TypeIdString } from '../shared/ids.ts';
+import { fromTypeId, toTypeId, type TypeIdString } from '../shared/ids.ts';
+import type { TransactionRef } from '../transactions/transactions.ts';
 import {
   ibanSchema,
   optionalSepaTextSchema,
@@ -266,6 +267,42 @@ export function toWithdrawalResponse(
     ...(history === undefined ? {} : { history: history.map(toWithdrawalStatusChangeResponse) }),
   };
 }
+
+// The transactions list's cursor: a deposit's or a withdrawal's TypeID (slice 4 decision 67). A
+// z.union of the two typeIdSchemas would answer Zod's unhelpful "Invalid input" for anything else,
+// so one custom message names both. Built on z.string(), so a repeated parameter (an array) gets
+// Zod's own message, as every other before does.
+const TRANSACTION_CURSOR_MESSAGE = 'must be a dep_ or wd_ ID';
+const transactionCursorSchema = z.string().transform((value, ctx): TransactionRef => {
+  for (const [prefix, type] of [
+    ['dep', 'deposit'],
+    ['wd', 'withdrawal'],
+  ] as const) {
+    if (!value.startsWith(`${prefix}_`)) continue;
+    try {
+      return type === 'deposit'
+        ? { type, id: fromTypeId('dep', value) }
+        : { type, id: fromTypeId('wd', value) };
+    } catch {
+      break; // the right prefix, but not a valid TypeID
+    }
+  }
+  ctx.issues.push({ code: 'custom', message: TRANSACTION_CURSOR_MESSAGE, input: value });
+  return z.NEVER;
+});
+
+// The transactions list's query, in the contract's parameter order (decision 68): limit and
+// before only. include and the filters are the per-resource lists' (decision 67), so here they
+// are unknown parameters, ignored as every operation ignores them (z.object strips them).
+export const transactionsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  before: transactionCursorSchema.optional(),
+});
+
+export type TransactionListResponse = {
+  readonly data: readonly (DepositResponse | WithdrawalResponse)[];
+  readonly next_before: TypeIdString<'dep'> | TypeIdString<'wd'> | null;
+};
 
 export type WithdrawalListResponse = {
   readonly data: readonly WithdrawalResponse[];
