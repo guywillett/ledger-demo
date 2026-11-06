@@ -54,10 +54,8 @@ type depositStatusChangeResponse struct {
 	At         timestamp.Time   `json:"at"`
 }
 
-type depositListResponse struct {
-	Data       []depositResponse `json:"data"`
-	NextBefore *ids.DepositID    `json:"next_before"`
-}
+// depositListResponse is the deposits list's body (see listResponse).
+type depositListResponse = listResponse[depositResponse, ids.DepositID]
 
 // depositFailureReason is the one client-facing reason for a deposit that failed (slice 4 decisions
 // 69 and 76): the same fixed, non-disclosing text for rejected and returned, whatever the internal

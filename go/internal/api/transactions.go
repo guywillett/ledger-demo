@@ -32,12 +32,10 @@ type transactionItem interface {
 func (depositResponse) isTransactionItem()    {}
 func (withdrawalResponse) isTransactionItem() {}
 
-// transactionsResponse is the list's body: each item exactly its own endpoint's representation
-// (depositResponse or withdrawalResponse, telling themselves apart by type), never with history.
-type transactionsResponse struct {
-	Data       []transactionItem    `json:"data"`
-	NextBefore *transactions.Cursor `json:"next_before"`
-}
+// transactionsResponse is the list's body (see listResponse): each item exactly its own
+// endpoint's representation (depositResponse or withdrawalResponse, telling themselves apart by
+// type), never with history.
+type transactionsResponse = listResponse[transactionItem, transactions.Cursor]
 
 // parseTransactionsQuery validates the transactions list's query, as Node's
 // transactionsQuerySchema: limit, and before, a deposit's or a withdrawal's ID (parseCursor). No

@@ -113,16 +113,16 @@ type Page struct {
 // that many of the merged page can come from one table. The conditions (the account, and the
 // cursor if any) are the same in both branches. type breaks a tie between equal IDs, so the order
 // is total. Built from fixed fragments, the values always parameters.
-func listSQL(conditions []string) string {
+func listSQL(where string) string {
 	return `
 SELECT type, id FROM (
   (SELECT 'deposit' AS type, id FROM deposits
-   WHERE ` + strings.Join(conditions, " AND ") + `
+   WHERE ` + where + `
    ORDER BY id DESC
    LIMIT $1)
   UNION ALL
   (SELECT 'withdrawal' AS type, id FROM withdrawals
-   WHERE ` + strings.Join(conditions, " AND ") + `
+   WHERE ` + where + `
    ORDER BY id DESC
    LIMIT $1)
 ) AS page
@@ -166,21 +166,17 @@ func ListPage(
 	if !exists {
 		return Page{}, false, nil
 	}
-	// Step 1: the page, decided on IDs. listSQL's conditions, each with the next numbered placeholder
-	// for its value. Limit is one more than the page size, to know whether there is a next page.
-	params := []any{limit + 1, account}
-	conditions := []string{"account_id = $2"}
-	where := func(column, op string, value any) {
-		params = append(params, value)
-		conditions = append(conditions, fmt.Sprintf("%s %s $%d", column, op, len(params)))
-	}
+	// Step 1: the page, decided on IDs. listSQL's conditions, the same in both branches. Limit is one
+	// more than the page size, to know whether there is a next page.
+	where := db.NewConditions(limit + 1) // $1
+	where.Where("account_id", "=", account)
 	if v, ok := before.uuid(); ok {
 		// Seek pagination on the item's ID: UUIDv7 IDs sort by creation time across both tables, so
 		// "older than the last one seen" is id < $before in each branch, whichever kind it was.
-		where("id", "<", v)
+		where.Where("id", "<", v)
 	}
 
-	rows, err := q.Query(ctx, listSQL(conditions), params...)
+	rows, err := q.Query(ctx, listSQL(where.SQL()), where.Params()...)
 	if err != nil {
 		return Page{}, false, fmt.Errorf("transactions of %v: %w", account, err)
 	}

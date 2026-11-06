@@ -81,10 +81,8 @@ func toWithdrawalResponse(w withdrawals.Withdrawal) withdrawalResponse {
 	}
 }
 
-type withdrawalListResponse struct {
-	Data       []withdrawalResponse `json:"data"`
-	NextBefore *ids.WithdrawalID    `json:"next_before"`
-}
+// withdrawalListResponse is the withdrawals list's body (see listResponse).
+type withdrawalListResponse = listResponse[withdrawalResponse, ids.WithdrawalID]
 
 // idempotencyKeyPattern is Node's: 1-255 characters from a plain set (the key ends up in logs).
 var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,255}$`)

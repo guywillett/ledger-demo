@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -86,13 +85,12 @@ type Page struct {
 	NextBefore *ids.DepositID
 }
 
-// listSQL generates SQL allowing for multiple filters and pagination cursor.
-// Condition values are always parameters. A missing filter/cursor is no condition
-// at all, so each statement is easy to plan.
-func listSQL(conditions []string) string {
+// listSQL is the list's statement, its conditions (a db.Conditions' SQL: the account, the cursor
+// and the filters present) after WHERE, LIMIT $1 one more than the page size.
+func listSQL(where string) string {
 	return `
 SELECT ` + columns + ` FROM deposits
-WHERE ` + strings.Join(conditions, " AND ") + `
+WHERE ` + where + `
 ORDER BY id DESC
 LIMIT $1
 `
@@ -170,27 +168,23 @@ func ListPage(
 	if !exists {
 		return Page{}, false, nil
 	}
-	// Build listSQL WHERE conditions, with matching numbered placeholders for associated params
-	// position. Limit is one more than the page size, to know whether there is a next page.
-	params := []any{limit + 1, account}
-	conditions := []string{"account_id = $2"}
-	where := func(column, op string, value any) {
-		params = append(params, value)
-		conditions = append(conditions, fmt.Sprintf("%s %s $%d", column, op, len(params)))
-	}
+	// listSQL's conditions. Limit is one more than the page size, to know whether there is a next
+	// page.
+	where := db.NewConditions(limit + 1) // $1
+	where.Where("account_id", "=", account)
 	if before != nil {
 		// Seek pagination on the deposit ID: UUIDv7 IDs sort by creation time, so "older than the
 		// last one seen" is id < $before, served by the (account_id, id DESC) index.
-		where("id", "<", *before)
+		where.Where("id", "<", *before)
 	}
 	if filter.Status != nil {
-		where("status", "=", *filter.Status)
+		where.Where("status", "=", *filter.Status)
 	}
 	if filter.NetworkTransactionID != nil {
-		where("network_transaction_id", "=", *filter.NetworkTransactionID)
+		where.Where("network_transaction_id", "=", *filter.NetworkTransactionID)
 	}
 
-	rows, err := q.Query(ctx, listSQL(conditions), params...)
+	rows, err := q.Query(ctx, listSQL(where.SQL()), where.Params()...)
 	if err != nil {
 		return Page{}, false, fmt.Errorf("deposits of %v: %w", account, err)
 	}

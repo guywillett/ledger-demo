@@ -64,6 +64,17 @@ func handle(h handlerFunc) http.Handler {
 	})
 }
 
+// listResponse is every list's body, one shape for all (slice 4 decision 66): Data, the page's
+// items ([] when empty: make it non-nil), and NextBefore, the next page's cursor (null on the last
+// page). Each list names its instantiation once as a type alias (depositListResponse =
+// listResponse[depositResponse, ids.DepositID]), so the pairing of item and cursor types is
+// written in one place, and the instantiated type is as specific as a hand-written struct: Data is
+// a []depositResponse, not a []any.
+type listResponse[T any, C any] struct {
+	Data       []T `json:"data"`
+	NextBefore *C  `json:"next_before"`
+}
+
 // writeJSON answers with v as JSON, byte for byte as Node's JSON.stringify writes it: no HTML
 // escaping (encoding/json writes <, > and & as <… by default, safe inside HTML but not what
 // Node writes) and no trailing newline (json.Encoder adds one).
