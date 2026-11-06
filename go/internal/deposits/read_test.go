@@ -1,6 +1,7 @@
 package deposits_test
 
 import (
+	"cmp"
 	"context"
 	"reflect"
 	"slices"
@@ -172,5 +173,45 @@ func TestListPagePagesThroughAFilteredList(t *testing.T) {
 	if len(cursors) != 3 || cursors[0] == nil || *cursors[0] != received[1] ||
 		cursors[1] == nil || *cursors[1] != received[3] || cursors[2] != nil {
 		t.Errorf("cursors %v, want the 2nd and 4th received deposits, then nil", cursors)
+	}
+}
+
+// deposits.GetMany: the account's deposits among the IDs, in one statement; another account's and
+// an unknown ID simply absent.
+func TestGetManyReadsTheAccountsDepositsByID(t *testing.T) {
+	pool := testdb.Pool(t)
+	ctx := context.Background()
+	account := testdb.NewAccount(t, pool)
+	other := testdb.NewAccount(t, pool)
+	first := testdb.NewDeposit(t, pool, account, 1250)
+	second := testdb.NewDeposit(t, pool, account, 1250)
+	notThis := testdb.NewDeposit(t, pool, other, 1250)
+
+	got, err := deposits.GetMany(ctx, pool, account.ID,
+		[]ids.DepositID{second, notThis, ids.New[ids.Deposit](), first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []ids.DepositID
+	for _, d := range got {
+		found = append(found, d.ID)
+	}
+	slices.SortFunc(found, func(a, b ids.DepositID) int { return cmp.Compare(a.TypeID(), b.TypeID()) })
+	if !slices.Equal(found, []ids.DepositID{first, second}) {
+		t.Errorf("GetMany = %v, want [first second] (another account's and an unknown ID absent)", found)
+	}
+	// The rows as the other reads give them.
+	one, _, err := deposits.Get(ctx, pool, account.ID, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range got {
+		if d.ID == first && !reflect.DeepEqual(d, one) {
+			t.Errorf("GetMany's row %+v\nGet's        %+v", d, one)
+		}
+	}
+
+	if none, err := deposits.GetMany(ctx, pool, account.ID, nil); err != nil || len(none) != 0 {
+		t.Errorf("GetMany(none) = %v, %v; want nothing and no query's error", none, err)
 	}
 }

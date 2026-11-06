@@ -26,6 +26,7 @@ func newHandler(pool *pgxpool.Pool, logger *slog.Logger, webhooks webhookRoutes)
 	accountsAPI := accountRoutes{db: pool}
 	depositsAPI := depositRoutes{db: pool}
 	withdrawalsAPI := withdrawalRoutes{pool: pool}
+	transactionsAPI := transactionRoutes{db: pool}
 	health := healthRoutes{db: pool}
 	// "GET" in a pattern matches HEAD too, as Fastify's GET routes do: net/http then sends the
 	// headers (Content-Length included) without the body.
@@ -36,6 +37,7 @@ func newHandler(pool *pgxpool.Pool, logger *slog.Logger, webhooks webhookRoutes)
 	mux.Handle("POST /accounts/{account_id}/withdrawals", handle(withdrawalsAPI.create))
 	mux.Handle("GET /accounts/{account_id}/withdrawals", handle(withdrawalsAPI.list))
 	mux.Handle("GET /accounts/{account_id}/withdrawals/{withdrawal_id}", handle(withdrawalsAPI.get))
+	mux.Handle("GET /accounts/{account_id}/transactions", handle(transactionsAPI.list))
 	mux.Handle("POST /provider/incoming-payments", handle(webhooks.incomingPayment))
 	mux.Handle("POST /provider/transfer-updates", handle(webhooks.transferUpdate))
 	mux.Handle("GET /health", quietOnSuccess(handle(health.health)))

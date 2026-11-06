@@ -1,7 +1,9 @@
 package withdrawals_test
 
 import (
+	"cmp"
 	"context"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -148,5 +150,44 @@ func TestListPagePagesThroughAFilteredList(t *testing.T) {
 	if len(cursors) != 3 || cursors[0] == nil || *cursors[0] != executed[1] ||
 		cursors[1] == nil || *cursors[1] != executed[3] || cursors[2] != nil {
 		t.Errorf("cursors %v, want the 2nd and 4th executed withdrawals, then nil", cursors)
+	}
+}
+
+// withdrawals.GetMany: the account's withdrawals among the IDs, in one statement; another
+// account's and an unknown ID simply absent.
+func TestGetManyReadsTheAccountsWithdrawalsByID(t *testing.T) {
+	pool := testdb.Pool(t)
+	ctx := context.Background()
+	account := testdb.NewAccount(t, pool)
+	other := testdb.NewAccount(t, pool)
+	first := testdb.NewWithdrawal(t, pool, account, 100)
+	second := testdb.NewWithdrawal(t, pool, account, 100)
+	notThis := testdb.NewWithdrawal(t, pool, other, 100)
+
+	got, err := withdrawals.GetMany(ctx, pool, account.ID,
+		[]ids.WithdrawalID{second, notThis, ids.New[ids.Withdrawal](), first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []ids.WithdrawalID
+	for _, w := range got {
+		found = append(found, w.ID)
+	}
+	slices.SortFunc(found, func(a, b ids.WithdrawalID) int { return cmp.Compare(a.TypeID(), b.TypeID()) })
+	if !slices.Equal(found, []ids.WithdrawalID{first, second}) {
+		t.Errorf("GetMany = %v, want [first second] (another account's and an unknown ID absent)", found)
+	}
+	one, _, err := withdrawals.GetInAccount(ctx, pool, account.ID, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range got {
+		if w.ID == first && !reflect.DeepEqual(w, one) {
+			t.Errorf("GetMany's row %+v\nGetInAccount's %+v", w, one)
+		}
+	}
+
+	if none, err := withdrawals.GetMany(ctx, pool, account.ID, nil); err != nil || len(none) != 0 {
+		t.Errorf("GetMany(none) = %v, %v; want nothing", none, err)
 	}
 }

@@ -514,16 +514,12 @@ func accountWithStatuses(t *testing.T, pool *pgxpool.Pool) (testdb.Account, map[
 }
 
 // listedIDs are the IDs of a list response's items. Fatal (to this test only, not a panic that
-// would stop the package's other tests) if the response isn't a list.
+// would stop the package's other tests) if the response isn't a list of objects (see objects).
 func listedIDs(t *testing.T, r response) []any {
 	t.Helper()
-	data, ok := r.json(t)["data"].([]any)
-	if !ok {
-		t.Fatalf("not a list: %d %s", r.status, r.body)
-	}
 	var found []any
-	for _, d := range data {
-		found = append(found, d.(map[string]any)["id"])
+	for _, item := range objects(t, r.json(t), "data") {
+		found = append(found, item["id"])
 	}
 	return found
 }

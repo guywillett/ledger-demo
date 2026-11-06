@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/guywillett/ledger-demo/go/internal/ids"
+	"github.com/guywillett/ledger-demo/go/internal/transactions"
 )
 
 // The parsing of a request's parameters, the query string's and the path's IDs, by Node's rules
@@ -235,6 +236,26 @@ func parseBefore[K ids.Kind](query map[string][]string) (*ids.ID[K], []Validatio
 		return nil, invalid
 	}
 	return &before, nil
+}
+
+// parseCursor reads the transactions list's ?before: absent is nil; one TypeID of either kind
+// (the item's position, decision 66); given twice, arrayMessage; anything else, Node's
+// "must be a dep_ or wd_ ID".
+func parseCursor(query map[string][]string) (*transactions.Cursor, []ValidationError) {
+	values, ok := query["before"]
+	switch {
+	case !ok:
+		return nil, nil
+	case len(values) != 1:
+		return nil, []ValidationError{{Path: "before", Message: arrayMessage}}
+	}
+	if d, err := ids.FromTypeID[ids.Deposit](values[0]); err == nil {
+		return transactions.DepositCursor(d), nil
+	}
+	if w, err := ids.FromTypeID[ids.Withdrawal](values[0]); err == nil {
+		return transactions.WithdrawalCursor(w), nil
+	}
+	return nil, []ValidationError{{Path: "before", Message: "must be a dep_ or wd_ ID"}}
 }
 
 // defaultLimit is a list's page size when ?limit is absent (slice 4 decision 66: every list keeps

@@ -162,6 +162,39 @@ func Get(ctx context.Context, q db.Querier, id ids.WithdrawalID) (Withdrawal, bo
 
 const getInAccountSQL = `SELECT ` + Columns + ` FROM withdrawals WHERE id = $1 AND account_id = $2`
 
+const getManySQL = `SELECT ` + Columns + ` FROM withdrawals WHERE account_id = $1 AND id = ANY($2)`
+
+// GetMany reads the account's withdrawals among list, in one statement, in no particular order; an
+// ID the account has no withdrawal for is simply absent, and the caller decides what that means.
+// For the transactions list, which decides its page on IDs alone and then reads each kind's rows
+// by ID (slice 4 decision 67). Node: getWithdrawals.
+func GetMany(
+	ctx context.Context,
+	q db.Querier,
+	account ids.AccountID,
+	list []ids.WithdrawalID,
+) ([]Withdrawal, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	// As text, as StatusHistories passes them: Postgres reads the elements as the column's uuid.
+	uuids := make([]string, len(list))
+	for i, id := range list {
+		uuids[i] = id.UUID().String()
+	}
+	rows, err := q.Query(ctx, getManySQL, account, uuids)
+	if err != nil {
+		return nil, fmt.Errorf("withdrawals of %v by ID: %w", account, err)
+	}
+	found, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Withdrawal, error) {
+		return Scan(row)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("withdrawals of %v by ID: %w", account, err)
+	}
+	return found, nil
+}
+
 // GetInAccount reads a withdrawal of the account; false if the account has no such withdrawal,
 // whether there is none or it is another account's (slice 4 decision 64: one statement decides).
 // Node: getWithdrawalInAccount.

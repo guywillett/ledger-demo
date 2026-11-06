@@ -100,6 +100,39 @@ LIMIT $1
 
 const getSQL = `SELECT ` + columns + ` FROM deposits WHERE id = $1 AND account_id = $2`
 
+const getManySQL = `SELECT ` + columns + ` FROM deposits WHERE account_id = $1 AND id = ANY($2)`
+
+// GetMany reads the account's deposits among list, in one statement, in no particular order; an ID
+// the account has no deposit for is simply absent, and the caller decides what that means. For the
+// transactions list, which decides its page on IDs alone and then reads each kind's rows by ID
+// (slice 4 decision 67). Node: getDeposits.
+func GetMany(
+	ctx context.Context,
+	q db.Querier,
+	account ids.AccountID,
+	list []ids.DepositID,
+) ([]Deposit, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	// As text, as StatusHistories passes them: Postgres reads the elements as the column's uuid.
+	uuids := make([]string, len(list))
+	for i, id := range list {
+		uuids[i] = id.UUID().String()
+	}
+	rows, err := q.Query(ctx, getManySQL, account, uuids)
+	if err != nil {
+		return nil, fmt.Errorf("deposits of %v by ID: %w", account, err)
+	}
+	found, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Deposit, error) {
+		return scanDeposit(row)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("deposits of %v by ID: %w", account, err)
+	}
+	return found, nil
+}
+
 // Get reads a deposit of the account; false if the account has no such deposit, whether there is
 // none or it is another account's (slice 4 decision 64: one statement decides). An unmatched
 // deposit has no account, so it is never found.
