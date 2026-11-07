@@ -10,3 +10,5 @@
   tooling.
 - [`guarantees.md`](guarantees.md): each guarantee, how it is kept, and the Node and Go tests
   that show it.
+- [`next-steps.md`](next-steps.md): where the project could go next, grouped by what each step would
+  show.
