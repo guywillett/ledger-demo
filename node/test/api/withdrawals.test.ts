@@ -6,7 +6,8 @@ import { withTransaction } from '../../src/shared/db.ts';
 import { fromTypeId, newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { expectEventMatchesContract } from '../contract.ts';
 import {
-  balancesOf,
+  apiBalances,
+  apiWithdrawals,
   capturingLogger,
   createTestAccount,
   createTestApp,
@@ -45,14 +46,11 @@ async function fundedAccount(amountMinor = 1000n): Promise<TestAccount> {
 const withdrawalIdOf = (response: { json: Record<string, unknown> }): Uuid<'wd'> =>
   fromTypeId('wd', String(response.json.id));
 
+// How many withdrawals the account's list shows.
 async function withdrawalsOf(account: TestAccount): Promise<number> {
-  const result = await pool.query<{ n: number }>(
-    'SELECT count(*)::int AS n FROM withdrawals WHERE account_id = $1',
-    [account.id],
-  );
-  return result.rows[0]?.n ?? 0;
+  return (await apiWithdrawals(app, account.typeId)).length;
 }
-
+// The ledger's hold movements for the account: the journal isn't in the client API.
 async function holdsOf(account: TestAccount): Promise<number> {
   const result = await pool.query<{ n: number }>(
     `SELECT count(*)::int AS n FROM balance_movements
@@ -100,11 +98,6 @@ describe('POST /accounts/:account_id/withdrawals', () => {
       `/accounts/${account.typeId}/withdrawals/${String(response.json.id)}`,
     );
 
-    expect(await balancesOf(pool, account.id)).toEqual({
-      pendingIn: 0n,
-      available: 600n,
-      held: 400n,
-    });
     expect(await holdsOf(account)).toBe(1);
     const balance = await getJson(
       app,
@@ -159,7 +152,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
     expect(new Set(responses.map((r) => r.json.id)).size).toBe(1);
     expect(await withdrawalsOf(account)).toBe(1);
     expect(await holdsOf(account)).toBe(1);
-    expect(await balancesOf(pool, account.id)).toMatchObject({ available: 600n, held: 400n });
+    expect(await apiBalances(app, account.typeId)).toMatchObject({ available: 600n, held: 400n });
   });
 
   it('treats a repeat that differs only in trimmed whitespace or blank remittance as the same', async () => {
@@ -212,7 +205,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
       differing_fields: [field],
     });
     expect(await withdrawalsOf(account)).toBe(1);
-    expect(await balancesOf(pool, account.id)).toMatchObject({ available: 600n, held: 400n });
+    expect(await apiBalances(app, account.typeId)).toMatchObject({ available: 600n, held: 400n });
     const stored = await getJson(
       app,
       `/accounts/${account.typeId}/withdrawals/${String(first.json.id)}`,
@@ -230,7 +223,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
     expect(refused.json.type).toBe('urn:ledger-demo:problem:insufficient-funds');
     expect(await withdrawalsOf(account)).toBe(0);
     expect(await heldEventsOf(account.typeId)).toBe(0);
-    expect(await balancesOf(pool, account.id)).toEqual({
+    expect(await apiBalances(app, account.typeId)).toEqual({
       pendingIn: 0n,
       available: 300n,
       held: 0n,
@@ -240,7 +233,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
     await fundTestAccount(pool, account, 200n);
     const retried = await postWithdrawal(app, account.typeId, withdrawalBody(), key);
     expect(retried.statusCode).toBe(201);
-    expect(await balancesOf(pool, account.id)).toMatchObject({ available: 100n, held: 400n });
+    expect(await apiBalances(app, account.typeId)).toMatchObject({ available: 100n, held: 400n });
   });
 
   it('lets exactly one of two concurrent withdrawals that together exceed available through', async () => {
@@ -252,7 +245,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
 
     expect(responses.map((r) => r.statusCode).sort((a, b) => a - b)).toEqual([201, 422]);
     expect(await withdrawalsOf(account)).toBe(1);
-    expect(await balancesOf(pool, account.id)).toEqual({
+    expect(await apiBalances(app, account.typeId)).toEqual({
       pendingIn: 0n,
       available: 300n,
       held: 700n,

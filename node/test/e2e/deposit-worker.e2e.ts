@@ -1,17 +1,17 @@
 import { jetstreamManager } from '@nats-io/jetstream';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import type { Uuid } from '../../src/shared/ids.ts';
+import { fromTypeId, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { reconcile } from '../../src/reconciliation/reconcile.ts';
 import { CONSUMERS, STREAMS } from '../../src/shared/nats.ts';
 import {
-  balancesOf,
+  apiBalances,
+  apiDeposits,
   connectTestNats,
   createTestAccount,
   createTestApp,
+  getJson,
   notificationBody,
-  depositByNetworkId,
   postIncomingPayment,
-  statusOf,
   type TestAccount,
 } from '../helpers.ts';
 import { cleanStart, kill, startChild, waitFor, type Child } from './children.ts';
@@ -20,7 +20,9 @@ import { cleanStart, kill, startChild, waitFor, type Child } from './children.ts
 // src/deposit-worker/main.ts), against the test database and the test NATS, as in production:
 // deposits are posted through the API app, which stores deposit.created in the outbox; the relay
 // publishes it, and the deposit-worker consumes it through the durable `deposit-worker` consumer.
-// One relay runs for the whole file; workers are started (and killed) per test.
+// One relay runs for the whole file; workers are started (and killed) per test. Deposits and
+// balances are read through the client API; the ledger's movements, the delivery log and the
+// consumer's state, which it doesn't show, from the database and JetStream.
 
 const testApp = await createTestApp();
 const { app, pool } = testApp;
@@ -46,10 +48,21 @@ async function post(account: TestAccount): Promise<Uuid<'dep'>> {
   if (!accountsUsed.includes(account.id)) accountsUsed.push(account.id);
   const body = notificationBody({ creditor_iban: account.iban });
   expect((await postIncomingPayment(app, body)).statusCode).toBe(204);
-  // The webhook answers 204 with no body: the deposit is read from the database.
-  const deposit = await depositByNetworkId(pool, body.network_transaction_id);
-  if (deposit === undefined) throw new Error('deposit not stored');
-  return deposit.id;
+  // The webhook answers 204 with no body: the deposit is found in the account's list by its
+  // network ID. Its UUID, for the database's reads below.
+  const [deposit] = await apiDeposits(app, account.typeId, body.network_transaction_id);
+  if (deposit === undefined) throw new Error('deposit not listed');
+  return fromTypeId('dep', String(deposit.id));
+}
+
+// The deposit's status, as the client API shows it.
+async function statusOf(account: TestAccount, depositId: Uuid<'dep'>): Promise<string> {
+  const response = await getJson(
+    app,
+    `/accounts/${account.typeId}/deposits/${toTypeId('dep', depositId)}`,
+    '/accounts/{account_id}/deposits/{deposit_id}',
+  );
+  return String(response.json.status);
 }
 
 async function movementSteps(depositId: Uuid<'dep'>): Promise<string[]> {
@@ -103,8 +116,8 @@ describe('deposit-worker process', () => {
     const account = await createTestAccount(pool);
     const depositId = await post(account);
 
-    await waitFor(async () => (await statusOf(pool, depositId)) === 'credited', 'credited');
-    expect(await balancesOf(pool, account.id)).toEqual({
+    await waitFor(async () => (await statusOf(account, depositId)) === 'credited', 'credited');
+    expect(await apiBalances(app, account.typeId)).toEqual({
       pendingIn: 0n,
       available: 1250n,
       held: 0n,
@@ -123,19 +136,19 @@ describe('deposit-worker process', () => {
     const account = await createTestAccount(pool);
     const depositId = await post(account);
 
-    await waitFor(async () => (await statusOf(pool, depositId)) === 'under_review', 'review');
+    await waitFor(async () => (await statusOf(account, depositId)) === 'under_review', 'review');
     first.process.kill('SIGKILL'); // no chance to ack, nak or record an outcome
     await first.exited;
-    expect(await statusOf(pool, depositId)).toBe('under_review');
+    expect(await statusOf(account, depositId)).toBe('under_review');
     expect(await deliveriesFor(depositId)).toEqual([
       { outcome: 'in_progress', delivery_attempt: 1 },
     ]);
 
     // JetStream redelivers once ack_wait (10 s) has passed since the last working() signal.
     await startDepositWorker({ REVIEW_DELAY_MS: '5000' });
-    await waitFor(async () => (await statusOf(pool, depositId)) === 'credited', 'credited');
+    await waitFor(async () => (await statusOf(account, depositId)) === 'credited', 'credited');
 
-    expect(await balancesOf(pool, account.id)).toEqual({
+    expect(await apiBalances(app, account.typeId)).toEqual({
       pendingIn: 0n,
       available: 1250n,
       held: 0n,
@@ -155,11 +168,11 @@ describe('deposit-worker process', () => {
     for (let i = 0; i < 6; i++) depositIds.push(await post(account));
 
     await waitFor(async () => {
-      const statuses = await Promise.all(depositIds.map((id) => statusOf(pool, id)));
+      const statuses = await Promise.all(depositIds.map((id) => statusOf(account, id)));
       return statuses.every((s) => s === 'credited');
     }, 'all credited');
 
-    expect(await balancesOf(pool, account.id)).toEqual({
+    expect(await apiBalances(app, account.typeId)).toEqual({
       pendingIn: 0n,
       available: 6n * 1250n,
       held: 0n,
@@ -192,7 +205,7 @@ describe('deposit-worker process', () => {
 
     await waitFor(
       async () => {
-        const statuses = await Promise.all(deposits.map((id) => statusOf(pool, id)));
+        const statuses = await Promise.all(deposits.map((id) => statusOf(account, id)));
         return statuses.every((s) => s === 'credited');
       },
       'all credited',

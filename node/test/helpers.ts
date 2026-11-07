@@ -222,7 +222,87 @@ export type StoredDeposit = {
   created_at: Date;
 };
 
-// The deposit stored under a network transaction ID (SEPA), if any.
+// The account's deposits with a network transaction ID, through the client API (the deposits
+// list's filter, slice 4 decision 70), checked against the contract: [] if it has none, [deposit]
+// once one is recorded. With include: 'history', each with its history.
+export async function apiDeposits(
+  app: App,
+  accountTypeId: string,
+  networkTransactionId: unknown,
+  options: { include?: 'history' } = {},
+): Promise<Record<string, unknown>[]> {
+  const query = new URLSearchParams({ network_transaction_id: String(networkTransactionId) });
+  if (options.include !== undefined) query.set('include', options.include);
+  const response = await getJson(
+    app,
+    `/accounts/${accountTypeId}/deposits?${query.toString()}`,
+    '/accounts/{account_id}/deposits',
+  );
+  if (response.statusCode !== 200) {
+    throw new Error(`deposits of ${accountTypeId}: ${response.statusCode} ${response.body}`);
+  }
+  return response.json.data as Record<string, unknown>[];
+}
+
+// The account's withdrawals (the newest 200; a test account has a few), through the client API,
+// checked against the contract.
+export async function apiWithdrawals(
+  app: App,
+  accountTypeId: string,
+): Promise<Record<string, unknown>[]> {
+  const response = await getJson(
+    app,
+    `/accounts/${accountTypeId}/withdrawals?limit=200`,
+    '/accounts/{account_id}/withdrawals',
+  );
+  if (response.statusCode !== 200) {
+    throw new Error(`withdrawals of ${accountTypeId}: ${response.statusCode} ${response.body}`);
+  }
+  return response.json.data as Record<string, unknown>[];
+}
+
+// One withdrawal of the account, through the client API, checked against the contract.
+export async function apiWithdrawal(
+  app: App,
+  accountTypeId: string,
+  withdrawalTypeId: string,
+): Promise<Record<string, unknown>> {
+  const response = await getJson(
+    app,
+    `/accounts/${accountTypeId}/withdrawals/${withdrawalTypeId}`,
+    '/accounts/{account_id}/withdrawals/{withdrawal_id}',
+  );
+  if (response.statusCode !== 200) {
+    throw new Error(`withdrawal ${withdrawalTypeId}: ${response.statusCode} ${response.body}`);
+  }
+  return response.json;
+}
+
+// The account's balance through the client API, checked against the contract, as balancesOf
+// gives it (BigInts), so a test compares either the same way.
+export async function apiBalances(
+  app: App,
+  accountTypeId: string,
+): Promise<{ pendingIn: bigint; available: bigint; held: bigint }> {
+  const response = await getJson(
+    app,
+    `/accounts/${accountTypeId}/balance`,
+    '/accounts/{account_id}/balance',
+  );
+  if (response.statusCode !== 200) {
+    throw new Error(`balance of ${accountTypeId}: ${response.statusCode} ${response.body}`);
+  }
+  const { pending_in, available, held } = response.json;
+  return {
+    pendingIn: BigInt(String(pending_in)),
+    available: BigInt(String(available)),
+    held: BigInt(String(held)),
+  };
+}
+
+// The deposit stored under a network transaction ID (SEPA), if any: from the database, for what
+// the client API doesn't show (an unmatched deposit, in no account's list; provider_account_id,
+// slice 4 decision 69; a row stored nowhere at all).
 export async function depositByNetworkId(
   pool: pg.Pool,
   networkTransactionId: unknown,
@@ -457,6 +537,8 @@ export async function createTestWithdrawal(
   });
 }
 
+// The account's balance row from the database: for tests below the API (the ledger, the
+// workers); API and e2e tests read apiBalances.
 export async function balancesOf(
   pool: pg.Pool,
   accountId: Uuid<'acct'>,
