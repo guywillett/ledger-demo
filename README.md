@@ -178,7 +178,7 @@ docs/             slice specs with their decisions; decisions/ for cross-cutting
 
 ## Known gaps
 
-A selection, all deliberate. The full lists, each gap with its evolution path, are under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md), [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md), [slice 3](docs/slices/slice-3-go.md) and [slice 4](docs/slices/slice-4-api.md) specs.
+A selection, all deliberate. The full lists, each gap with its evolution path, are under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md), [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md), [slice 3](docs/slices/slice-3-go.md) and [slice 4](docs/slices/slice-4-api.md) specs. Where the project could go next: [`docs/next-steps.md`](docs/next-steps.md).
 
 - **Security:** no webhook signatures, client authentication, rate limiting, NATS credentials, per-service database roles or encryption. By design, events carry no personal data, and consumers act only on rows already in the database through conditional transitions, so a forged event can't create a deposit or move money.
 - **A customer ledger, not a general ledger:** the books explain customer balances, not the bank's; there are no company-side accounts. In production: cash at the bank = customer balances + suspense + treasury.
