@@ -83,6 +83,20 @@ Steps 3 and 4 may split (list, then single) if a review gets large.
   - scripts: withdrawals read from the database and their TypeIDs computed in awk (`differential.sh`); deposits found by listing 200 and grepping (`demo.sh`, `shared-consumer.sh`); "is anything unfinished" scanned from full lists; seed IBANs hard-coded; readiness probed through alice's balance; provider-sim's transfers and request counts read from its logs
   - tests (both suites): deposits found by network ID in the database; withdrawal counts per account; deposit status in e2e; balances and withdrawal statuses read through data-access functions in API and e2e tests where the API answers
   - provider-sim's log reads in Node's e2e tests
+
+  What stays, and why (each is something the client API deliberately doesn't show, or isn't its job; the scripts and tests say so where they do it):
+  - **Internal state**, read from the database (or JetStream):
+    - suspense: an unmatched deposit has no account, so it is in no account's list (the webhook tests; the demo finds it in the reconciliation report);
+    - provider identifiers: `provider_account_id` and `provider_transfer_id` (decision 69);
+    - the outbox and its events, and "one transaction" (`xmin`);
+    - the ledger's movements (`hold`, `execute`, `book`, `credit`): there is no statement (*Out of scope*);
+    - conflict records, transfer-update rows, the delivery log and the consumer's delivery count;
+    - "stored nowhere at all" after a webhook's 400: a row with no account would be in no list, so the database is the only place to show its absence;
+    - the schema's CHECKs, tested directly.
+  - **Logs of internal behaviour:** the API's own log lines, where the log is the behaviour under test; the workers' lines in the e2e tests and the shared-consumer check (started, "deposit processed" by implementation, "event published", "shutting down"); the submitter's delivery attempt on a redelivery (`demo.sh` step 13) and its "provider outcome unknown; will retry" (e2e).
+  - **Reconciliation:** the scripts' and the e2e tests' final checks, which also cover the outbox and the books (Go's `expectConsistent` stands in for it, decision 50). `demo.sh` now waits for its deposits through the status filter, and reconciles once at the end.
+  - **Direct set-up:** accounts, funding, deposits and withdrawals created by SQL or the ledger's functions (there is no account creation, and tests need states the API can't produce on demand); the seed accounts' IDs as constants (there is no account list).
+  - **provider-sim's container ID** (`demo.sh` step 13): its state is in memory, so the request count means "one call" only if the same container answered throughout.
 - [ ] Node's e2e tests read state through the client API where it answers
 - [ ] The demo passes on every stack in CI; the differential check passes, covering every new read
 - [ ] README, `docs/development.md` and `docs/guarantees.md` describe the new API

@@ -136,31 +136,6 @@ field() {
   printf '%s' "$1" | grep -oE "\"$2\":(\"[^\"\\\\]*\"|null)" | head -1 | sed 's/^"[^"]*"://; s/^"//; s/"$//' || true
 }
 
-# typeid_suffix <uuid>: the UUID's TypeID suffix (without the prefix): two zero bits, then the 128
-# bits, five at a time in Crockford's base32, lower case: 26 characters.
-typeid_suffix() {
-  printf '%s\n' "$1" | awk '
-    BEGIN {
-      split("0000 0001 0010 0011 0100 0101 0110 0111 1000 1001 1010 1011 1100 1101 1110 1111", b, " ")
-      split("0 1 2 3 4 5 6 7 8 9 a b c d e f", h, " ")
-      for (i = 1; i <= 16; i++) nibble[h[i]] = b[i]
-      alphabet = "0123456789abcdefghjkmnpqrstvwxyz"
-    }
-    {
-      hex = tolower($1)
-      gsub(/-/, "", hex)
-      bits = "00"
-      for (i = 1; i <= 32; i++) bits = bits nibble[substr(hex, i, 1)]
-      out = ""
-      for (i = 1; i <= 130; i += 5) {
-        n = 0
-        for (j = 0; j < 5; j++) n = n * 2 + substr(bits, i + j, 1)
-        out = out substr(alphabet, n + 1, 1)
-      }
-      print out
-    }'
-}
-
 # A well-formed ID that names nothing: the same prefix and a different last character (the low
 # bits of the random part, so still a UUIDv7).
 unknown_id() {
@@ -170,76 +145,54 @@ unknown_id() {
 curl -sf -o /dev/null "$API/health" ||
   { echo "The API isn't ready at $API: run docker compose up -d --build first."; exit 3; }
 
-# deposit_with <status> <account> <list body>: "<account> <deposit id>" for the list's first
-# deposit in that status, or nothing. A deposit object has no nested braces without history.
-deposit_with() {
-  local id
-  id=$(printf '%s' "$3" | grep -o "{[^{}]*\"status\":\"$1\"[^{}]*}" | head -1 |
-    grep -o '"id":"dep_[0-9a-z]*"' | sed 's/.*:"//; s/"//' || true)
-  [ -z "$id" ] || printf '%s %s' "$2" "$id"
-}
+# first_id <path>: the ID of the first item in the api's list at the path; nothing if it's empty.
+first_id() { field "$(curl -s "$API$1")" id; }
 
 say "What there is to compare"
-# Every deposit of the demo accounts, read from the api a page of 200 at a time.
-statuses=""
-deposit_ids=""
-multi_page=0
+# Through the lists' status filters, for each demo account: no deposit or withdrawal still in
+# progress (one changing between the two APIs' answers would be a false difference), one of each
+# final status for the single reads (as "<account> <id>"), and an account whose list takes several
+# pages.
 credited_deposit=""
 returned_deposit=""
-first_ntx=""
-for account in $ACCOUNTS; do
-  before=""
-  count=0
-  while :; do
-    body=$(curl -s "$API/accounts/$account/deposits?limit=200${before:+&before=$before}")
-    # The first deposit's network_transaction_id (alice's newest), for the filter.
-    [ -n "$first_ntx" ] || first_ntx=$(field "$body" network_transaction_id)
-    # One credited and one returned deposit, as "<account> <deposit>", for the single reads.
-    [ -n "$credited_deposit" ] || credited_deposit=$(deposit_with credited "$account" "$body")
-    [ -n "$returned_deposit" ] || returned_deposit=$(deposit_with returned "$account" "$body")
-    statuses="$statuses $(printf '%s' "$body" | grep -o '"status":"[a-z_]*"' | sed 's/.*:"//; s/"//' | tr '\n' ' ')"
-    ids=$(printf '%s' "$body" | grep -o '"id":"dep_[0-9a-z]*"' | sed 's/.*:"//; s/"//' | tr '\n' ' ')
-    deposit_ids="$deposit_ids $ids"
-    count=$((count + $(printf '%s\n' $ids | grep -c . || true)))
-    before=$(field "$body" next_before)
-    [ -z "$before" ] || [ "$before" = null ] && break
-  done
-  [ "$count" -gt "$PAGE" ] && multi_page=$((multi_page + 1))
-done
-for s in created received under_review approved rejected; do
-  case " $statuses " in *" $s "*) too_little "a deposit is still $s: wait until every deposit has finished" ;; esac
-done
-deposit_statuses=""
-for s in credited returned; do
-  case " $statuses " in *" $s "*) deposit_statuses="$deposit_statuses $s" ;; *) too_little "no $s deposit" ;; esac
-done
-[ "$multi_page" -gt 0 ] || too_little "no account has more than $PAGE deposits, so no list takes several pages"
-
-# The withdrawals' IDs and accounts are read from the database (as reconciliation reads it), which
-# depends on neither API under test; slice 4 step 7 reads them from the lists instead. (demo.sh
-# knows its withdrawals' IDs from its POST responses; this script, run after it, has none.)
-withdrawals=$(docker compose exec -T postgres psql -U ledger -d ledger -Atc \
-  "SELECT status, id, account_id FROM withdrawals ORDER BY id" 2>/dev/null | tr '|' ' ') ||
-  { echo "Couldn't read the withdrawals from the database (is postgres up?)"; exit 3; }
 executed=""
 failed=""
-while read -r status uuid account_uuid; do
-  [ -n "$uuid" ] || continue
-  id="wd_$(typeid_suffix "$uuid")"
-  # "<account> <withdrawal>", as the single reads take them.
-  pair="acct_$(typeid_suffix "$account_uuid") $id"
-  case "$status" in
-    executed) [ -n "$executed" ] || executed=$pair ;;
-    failed) [ -n "$failed" ] || failed=$pair ;;
-    *) too_little "withdrawal $id is still $status: wait until it has finished" ;;
+multi_page=0
+for account in $ACCOUNTS; do
+  for s in created received under_review approved rejected; do
+    [ -z "$(first_id "/accounts/$account/deposits?status=$s&limit=1")" ] ||
+      too_little "a deposit of $account is still $s: wait until every deposit has finished"
+  done
+  for s in held submitted; do
+    [ -z "$(first_id "/accounts/$account/withdrawals?status=$s&limit=1")" ] ||
+      too_little "a withdrawal of $account is still $s: wait until it has finished"
+  done
+  id=$(first_id "/accounts/$account/deposits?status=credited&limit=1")
+  [ -n "$credited_deposit" ] || [ -z "$id" ] || credited_deposit="$account $id"
+  id=$(first_id "/accounts/$account/deposits?status=returned&limit=1")
+  [ -n "$returned_deposit" ] || [ -z "$id" ] || returned_deposit="$account $id"
+  id=$(first_id "/accounts/$account/withdrawals?status=executed&limit=1")
+  [ -n "$executed" ] || [ -z "$id" ] || executed="$account $id"
+  id=$(first_id "/accounts/$account/withdrawals?status=failed&limit=1")
+  [ -n "$failed" ] || [ -z "$id" ] || failed="$account $id"
+  # More than one page: the first page names a next one.
+  case "$(field "$(curl -s "$API/accounts/$account/deposits?limit=$PAGE")" next_before)" in
+    dep_*) multi_page=$((multi_page + 1)) ;;
   esac
-done <<< "$withdrawals"
+done
+[ -n "$credited_deposit" ] || too_little "no credited deposit"
+[ -n "$returned_deposit" ] || too_little "no returned deposit"
 [ -n "$executed" ] || too_little "no executed withdrawal"
 [ -n "$failed" ] || too_little "no failed withdrawal"
-# The first ID, read without a pipe: printf | head -1 fails under pipefail (a broken pipe) once
-# the list outgrows the pipe's buffer.
-read -r first_deposit _ <<< "$deposit_ids"
-echo "   deposits:$deposit_statuses; withdrawals: executed ${executed#* }, failed ${failed#* }"
+[ "$multi_page" -gt 0 ] || too_little "no account has more than $PAGE deposits, so no list takes several pages"
+# alice's newest deposit: its ID, for the cursors' edge cases, and its network_transaction_id,
+# for the filter.
+newest=$(curl -s "$API/accounts/$ALICE/deposits?limit=1")
+first_deposit=$(field "$newest" id)
+first_ntx=$(field "$newest" network_transaction_id)
+[ -n "$first_deposit" ] || too_little "alice has no deposits"
+echo "   deposits: credited ${credited_deposit#* }, returned ${returned_deposit#* };" \
+  "withdrawals: executed ${executed#* }, failed ${failed#* }"
 
 say "Starting a $other_impl API beside the $main_impl one, on port ${API_OTHER##*:}"
 docker compose --profile differential up -d --no-deps api-other > /dev/null 2>&1

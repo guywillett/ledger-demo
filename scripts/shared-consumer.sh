@@ -39,10 +39,11 @@ post() {
     true
 }
 
-# deposit <account> <network_transaction_id>: the deposit's JSON from the account's list, or nothing
-# (as demo.sh's: the API's JSON has no spaces and a deposit object no nested braces).
+# deposit <account> <network_transaction_id>: the deposit's JSON from the account's deposits with
+# that network ID (the list's filter), or nothing (as demo.sh's: the API's JSON has no spaces and a
+# deposit object no nested braces).
 deposit() {
-  curl -s "$API/accounts/$1/deposits?limit=200" |
+  curl -s "$API/accounts/$1/deposits?network_transaction_id=$2" |
     grep -o "{[^{}]*\"network_transaction_id\":\"$2\"[^{}]*}" || true
 }
 
