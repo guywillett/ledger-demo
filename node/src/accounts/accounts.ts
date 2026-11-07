@@ -41,3 +41,13 @@ export async function getAccount(db: Queryable, id: Uuid<'acct'>): Promise<Accou
   const row = result.rows[0];
   return row === undefined ? undefined : accountFromRow(row);
 }
+
+const EXISTS_SQL = 'SELECT 1 FROM accounts WHERE id = $1';
+
+// Whether the account exists: for a list's 404 (slice 4 decision 64: a list checks its account,
+// so an empty list means an account with nothing in it). A read before a read: nothing is written
+// based on it. Go: accounts.Exists.
+export async function accountExists(db: Queryable, id: Uuid<'acct'>): Promise<boolean> {
+  const result = await db.query(EXISTS_SQL, [id]);
+  return result.rowCount === 1;
+}

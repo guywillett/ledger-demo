@@ -2,6 +2,7 @@ import type { Queryable, Tx } from '../shared/db.ts';
 import type { Iban } from '../shared/iban.ts';
 import { newUuid, type Uuid } from '../shared/ids.ts';
 import { parseWithdrawalStatus, type WithdrawalStatus } from './status.ts';
+import { accountExists } from '../accounts/accounts.ts';
 
 // The withdrawal entity and how it is stored and read. Its lifecycle and transitions are in
 // status.ts; holding the funds, executing and releasing them are ledger postings
@@ -206,8 +207,6 @@ export type WithdrawalPage = {
   readonly nextBefore: Uuid<'wd'> | null;
 };
 
-const ACCOUNT_EXISTS_SQL = 'SELECT 1 FROM accounts WHERE id = $1';
-
 // As the deposits list (deposits/deposits.ts): seek pagination on the ID, served by the
 // (account_id, id DESC) index, and one statement assembled from fixed fragments, one per
 // condition present, the values always parameters.
@@ -232,8 +231,7 @@ export async function listWithdrawals(
     readonly status?: WithdrawalStatus;
   },
 ): Promise<WithdrawalPage | undefined> {
-  const account = await db.query(ACCOUNT_EXISTS_SQL, [accountId]);
-  if (account.rowCount === 0) return undefined;
+  if (!(await accountExists(db, accountId))) return undefined;
 
   // One more than the page size, to know whether there is a next page.
   const params: unknown[] = [page.limit + 1];

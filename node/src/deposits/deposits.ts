@@ -2,6 +2,7 @@ import type { Queryable } from '../shared/db.ts';
 import type { Iban } from '../shared/iban.ts';
 import type { Uuid } from '../shared/ids.ts';
 import { parseStatus, type BookedStatus } from './status.ts';
+import { accountExists } from '../accounts/accounts.ts';
 
 // The deposit entity and how it is read. Its lifecycle and the transitions that move it
 // along are in status.ts; recording a provider notification as a new deposit is in
@@ -109,8 +110,6 @@ export type DepositPage = {
   readonly nextBefore: Uuid<'dep'> | null;
 };
 
-const ACCOUNT_EXISTS_SQL = 'SELECT 1 FROM accounts WHERE id = $1';
-
 // Seek pagination on the deposit ID: UUIDv7 IDs sort by creation time, so "older than the
 // last one seen" is `id < $before`, served by the (account_id, id DESC) index. The filters
 // (slice 4 decision 70) are further conditions on the same index's rows: status is checked row
@@ -143,8 +142,7 @@ export async function listDeposits(
   accountId: Uuid<'acct'>,
   page: { readonly limit: number; readonly before?: Uuid<'dep'> } & DepositFilters,
 ): Promise<DepositPage | undefined> {
-  const account = await db.query(ACCOUNT_EXISTS_SQL, [accountId]);
-  if (account.rowCount === 0) return undefined;
+  if (!(await accountExists(db, accountId))) return undefined;
 
   // One more than the page size, to know whether there is a next page.
   const params: unknown[] = [page.limit + 1];

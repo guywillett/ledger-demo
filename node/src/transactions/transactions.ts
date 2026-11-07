@@ -2,6 +2,7 @@ import { getDeposits, type Deposit } from '../deposits/deposits.ts';
 import type { Queryable } from '../shared/db.ts';
 import { toTypeId, type Uuid } from '../shared/ids.ts';
 import { getWithdrawals, type Withdrawal } from '../withdrawals/withdrawals.ts';
+import { accountExists } from '../accounts/accounts.ts';
 
 // The account's transactions: its deposits and withdrawals together, newest first (slice 4
 // decision 67). A read model over the two entities, so it sits above both modules.
@@ -39,8 +40,6 @@ export type TransactionPage = {
   // Pass as `before` to get the next (older) page; null on the last page.
   readonly nextBefore: TransactionRef | null;
 };
-
-const ACCOUNT_EXISTS_SQL = 'SELECT 1 FROM accounts WHERE id = $1';
 
 // Each branch orders and limits itself, so it stops after limit + 1 rows of its own
 // (account_id, id DESC) index whatever the account's history: no more than that many of the
@@ -82,8 +81,7 @@ export async function listTransactions(
   accountId: Uuid<'acct'>,
   page: { readonly limit: number; readonly before?: TransactionRef },
 ): Promise<TransactionPage | undefined> {
-  const account = await db.query(ACCOUNT_EXISTS_SQL, [accountId]);
-  if (account.rowCount === 0) return undefined;
+  if (!(await accountExists(db, accountId))) return undefined;
 
   // Step 1: the page, decided on IDs. One more than the page size, to know whether there is a
   // next page.

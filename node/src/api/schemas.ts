@@ -101,14 +101,20 @@ export type DepositListResponse = {
 
 export const accountParamsSchema = z.object({ account_id: typeIdSchema('acct') });
 
+// Every list's page size (decision 66): 1 to 200, 50 by default.
+const limitSchema = z.coerce.number().int().min(1).max(200).default(50);
+
+// A single read's or a per-resource list's ?include: only history.
+const includeSchema = z.literal('history').optional();
+
 // Unknown query parameters are ignored (z.object strips them), like unknown body fields.
 // z.coerce: query parameters arrive as strings. The keys are in the contract's parameter order:
 // Zod reports problems in the order of the shape's keys, and the API reports them in the
 // contract's order (slice 4 decision 68).
 export const depositsQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+  limit: limitSchema,
   before: typeIdSchema('dep').optional(),
-  include: z.literal('history').optional(),
+  include: includeSchema,
   // The filters (slice 4 decision 70). status: one an account's deposit can have (not unmatched).
   // network_transaction_id: as the incoming-payment webhook accepts it (webhooks/schemas.ts), so
   // a value no deposit could have is a 400 rather than an empty list.
@@ -122,7 +128,7 @@ export const depositParamsSchema = z.object({
   deposit_id: typeIdSchema('dep'),
 });
 
-export const depositQuerySchema = z.object({ include: z.literal('history').optional() });
+export const depositQuerySchema = z.object({ include: includeSchema });
 
 export type AccountResponse = {
   readonly id: TypeIdString<'acct'>;
@@ -204,14 +210,14 @@ export const withdrawalParamsSchema = z.object({
   withdrawal_id: typeIdSchema('wd'),
 });
 
-export const withdrawalQuerySchema = z.object({ include: z.literal('history').optional() });
+export const withdrawalQuerySchema = z.object({ include: includeSchema });
 
 // The withdrawals list's query, in the contract's parameter order (decision 68), as the
 // deposits list's. status: any withdrawal status (every withdrawal has an account).
 export const withdrawalsQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+  limit: limitSchema,
   before: typeIdSchema('wd').optional(),
-  include: z.literal('history').optional(),
+  include: includeSchema,
   status: z.enum(WITHDRAWAL_STATUSES).optional(),
 });
 
@@ -295,7 +301,7 @@ const transactionCursorSchema = z.string().transform((value, ctx): TransactionRe
 // before only. include and the filters are the per-resource lists' (decision 67), so here they
 // are unknown parameters, ignored as every operation ignores them (z.object strips them).
 export const transactionsQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+  limit: limitSchema,
   before: transactionCursorSchema.optional(),
 });
 
