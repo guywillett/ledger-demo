@@ -124,7 +124,7 @@ func TestBalanceStartsAtZero(t *testing.T) {
 	if r.status != 200 {
 		t.Fatalf("status = %d", r.status)
 	}
-	// Byte for byte Node's body: account_id first (slice 4, step 2).
+	// Byte for byte Node's body: account_id first (the contract's order).
 	if want := `{"account_id":"` + account.ID.TypeID() + `","pending_in":"0","available":"0","held":"0","currency":"EUR"}`; r.body != want {
 		t.Errorf("body = %s\nwant   %s", r.body, want)
 	}

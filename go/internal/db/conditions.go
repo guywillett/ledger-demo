@@ -29,7 +29,8 @@ func (c *Conditions) Where(column, op string, value any) {
 	c.parts = append(c.parts, fmt.Sprintf("%s %s $%d", column, op, len(c.params)))
 }
 
-// SQL is the conditions joined with AND, for after WHERE.
+// SQL is the conditions joined with AND, for after WHERE. At least one condition is required
+// (every list's first is its account): with none it is "", and the statement a syntax error.
 func (c *Conditions) SQL() string {
 	return strings.Join(c.parts, " AND ")
 }

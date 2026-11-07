@@ -105,7 +105,7 @@ describe('GET /accounts/:id', () => {
 });
 
 describe('GET /accounts/:id/balance', () => {
-  // The body byte for byte: account_id first (slice 4, step 2), as Go writes it.
+  // The body byte for byte: account_id first (the contract's order), as Go writes it.
   it('starts at zero', async () => {
     const account = await createTestAccount(pool);
     const response = await balanceOf(account);
