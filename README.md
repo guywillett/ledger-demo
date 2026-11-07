@@ -68,7 +68,7 @@ provider ──POST /provider/transfer-updates (webhook)──► API ──► 
                                        update recorded + withdrawal settled:
                                        executed (held → external) or failed (held → available)
 
-  GET /accounts/:id/balance, /transactions, /withdrawals/:id        reconciliation: do the books agree?
+  GET /accounts/:id and its balance, deposits, withdrawals, transactions   reconciliation: do the books agree?
 ```
 
 ## What it demonstrates
@@ -129,7 +129,7 @@ All Node by default; the variables below choose Go per service.
 docker compose up -d --build     # Postgres, NATS, migrations, stream setup, API, relay, deposit-worker, submitter, provider-sim
 scripts/demo.sh                  # deposits: duplicates, conflicts, suspense, a killed deposit-worker, two workers;
                                  # withdrawals: repeats, insufficient funds, provider failures, a killed submitter; then reconciles
-curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance    # alice
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=5'   # alice's latest
 ```
 
 `scripts/demo.sh` takes about a minute and exits `0` only if every expectation holds and the books agree ([details](docs/development.md#the-demo)).
@@ -178,7 +178,7 @@ docs/             slice specs with their decisions; decisions/ for cross-cutting
 
 ## Known gaps
 
-A selection, all deliberate. The full lists, each gap with its evolution path, are under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md), [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md) and [slice 3](docs/slices/slice-3-go.md) specs.
+A selection, all deliberate. The full lists, each gap with its evolution path, are under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md), [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md), [slice 3](docs/slices/slice-3-go.md) and [slice 4](docs/slices/slice-4-api.md) specs.
 
 - **Security:** no webhook signatures, client authentication, rate limiting, NATS credentials, per-service database roles or encryption. By design, events carry no personal data, and consumers act only on rows already in the database through conditional transitions, so a forged event can't create a deposit or move money.
 - **A customer ledger, not a general ledger:** the books explain customer balances, not the bank's; there are no company-side accounts. In production: cash at the bank = customer balances + suspense + treasury.
@@ -187,7 +187,7 @@ A selection, all deliberate. The full lists, each gap with its evolution path, a
 - **Observability:** structured JSON logs only, with `alert: true` where alerting would hook in; no metrics or tracing.
 - **One provider, one scheme, one currency:** SEPA in EUR only; the SEPA country list isn't yet verified against the EPC's.
 - **Housekeeping:** published outbox rows and idempotency keys are kept for ever; the relay polls (up to 1 s).
-- **Simplifications:** random approve/reject; one IBAN per account; no compliance checks on withdrawals; no health endpoint.
+- **Simplifications:** random approve/reject; one IBAN per account; no compliance checks on withdrawals.
 
 ## How this was built
 

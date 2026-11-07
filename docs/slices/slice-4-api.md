@@ -1,6 +1,6 @@
 # Slice 4 — A rounded client API
 
-Status: in progress
+Status: done; every item under *Done when* is met, except the tag, which follows the review and merge
 Implementation: Node and Go together, step by step, from `v0.3-go`
 Builds on: slices 1–3 and [ADR 0002](../decisions/0002-deposits-and-withdrawals.md). Their decisions hold unless this spec says otherwise.
 
@@ -76,10 +76,10 @@ Steps 3 and 4 may split (list, then single) if a review gets large.
 
 ## Done when
 
-- [ ] Every operation in *The client API after this slice* is in the contract, implemented in Node and Go, and every test response is checked against the contract in both
-- [ ] The consistency rules (decisions 66–70) hold for every client operation, old and new
-- [ ] No internal reason reaches the client API (decision 76): a rejected or returned deposit shows only the neutral reason in its body, and none in its history
-- [ ] Each workaround in the inventory is gone, or recorded below as legitimately outside the client API, with its reason:
+- [x] Every operation in *The client API after this slice* is in the contract, implemented in Node and Go, and every test response is checked against the contract in both: `contracts/openapi.yaml` (0.4.0); Node `test/api/` (`health`, `accounts`, `deposits`, `withdrawals`, `transactions`), each response through `getJson` / `postWithdrawal`; Go `internal/api/` (`health_test.go`, `accounts_test.go`, `deposits_test.go`, `withdrawals_list_test.go`, `withdrawals_test.go`, `transactions_test.go`), each through `testAPI.get` / `postRaw` (`contracttest.Check`)
+- [x] The consistency rules (decisions 66–70) hold for every client operation, old and new: each operation's tests above (the list shape and its cursors, another account's resource as a 404, "reports every problem at once", the filters), and `scripts/differential.sh` both ways (every page with cursors taken from either implementation, the filters' and parameters' edge cases, byte for byte)
+- [x] No internal reason reaches the client API (decision 76): a rejected or returned deposit shows only the neutral reason in its body, and none in its history: `deposits.test.ts` (`includes the status history with include=history, with no reasons`, `uses "returned to the sender" as the neutral text`), Go `TestDepositsIncludesHistoryWithoutReasons`
+- [x] Each workaround in the inventory is gone, or recorded below as legitimately outside the client API, with its reason (step 7a's three commits):
   - scripts: withdrawals read from the database and their TypeIDs computed in awk (`differential.sh`); deposits found by listing 200 and grepping (`demo.sh`, `shared-consumer.sh`); "is anything unfinished" scanned from full lists; seed IBANs hard-coded; readiness probed through alice's balance; provider-sim's transfers and request counts read from its logs
   - tests (both suites): deposits found by network ID in the database; withdrawal counts per account; deposit status in e2e; balances and withdrawal statuses read through data-access functions in API and e2e tests where the API answers
   - provider-sim's log reads in Node's e2e tests
@@ -97,10 +97,10 @@ Steps 3 and 4 may split (list, then single) if a review gets large.
   - **Reconciliation:** the scripts' and the e2e tests' final checks, which also cover the outbox and the books (Go's `expectConsistent` stands in for it, decision 50). `demo.sh` now waits for its deposits through the status filter, and reconciles once at the end.
   - **Direct set-up:** accounts, funding, deposits and withdrawals created by SQL or the ledger's functions (there is no account creation, and tests need states the API can't produce on demand); the seed accounts' IDs as constants (there is no account list).
   - **provider-sim's container ID** (`demo.sh` step 13): its state is in memory, so the request count means "one call" only if the same container answered throughout.
-- [ ] Node's e2e tests read state through the client API where it answers
-- [ ] The demo passes on every stack in CI; the differential check passes, covering every new read
-- [ ] README, `docs/development.md` and `docs/guarantees.md` describe the new API
-- [ ] Tag `v0.4-api` on the merge commit
+- [x] Node's e2e tests read state through the client API where it answers: `e2e/deposit-worker.e2e.ts` and `e2e/submitter.e2e.ts` (deposits, withdrawals and balances through the API, provider-sim's transfers through its test-only endpoint)
+- [x] The demo passes on every stack in CI; the differential check passes, covering every new read: CI on `d2c60a9` (the four demo legs, `shared-consumer.sh`, `differential.sh`); locally, at step 7, also `differential.sh` the other way (Go API against Node; 2,460 requests, all the same)
+- [x] README, `docs/development.md` and `docs/guarantees.md` describe the new API (step 7b; every test and file `guarantees.md` cites, and every relative link in the four documents, checked to resolve)
+- [x] Tag `v0.4-api` on the merge commit (after the review and merge)
 
 ## Known gaps (deliberate)
 

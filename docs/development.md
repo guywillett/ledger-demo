@@ -213,7 +213,7 @@ Exit code `0` means the books agree, `1` that they disagree, `2` stuck deposits,
 
 ## The demo
 
-`scripts/demo.sh` exercises the running stack the way the slices' *Done when* lists describe (duplicates, conflicts, suspense, a deposit-worker killed mid-review, two workers; withdrawal repeats, insufficient funds, provider failures, the submitter killed mid-call), then reconciles. Its header comment lists each step. It exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (deposits, withdrawals held or submitted, unpublished events); `1` if an expectation failed or the books disagree, `2` if something didn't finish within the wait, or carol (the account the withdrawals use) couldn't be funded; `3` if it couldn't run. The final check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so the same script runs against any stack. It takes about a minute.
+`scripts/demo.sh` exercises the running stack the way the slices' *Done when* lists describe (duplicates, conflicts, suspense, a deposit-worker killed mid-review, two workers; withdrawal repeats, insufficient funds, provider failures, the submitter killed mid-call), then reconciles. Its header comment lists each step. It exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (deposits, withdrawals held or submitted, unpublished events); `1` if an expectation failed or the books disagree, `2` if something didn't finish within the wait, or carol (the account the withdrawals use) couldn't be funded; `3` if it couldn't run. The final check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP (the API, and provider-sim's test-only `GET /_test/transfers`) and through compose (reconciliation runs as its own compose service, reading the shared database; the submitter's log shows what a redelivery did), so the same script runs against any stack. It takes about a minute.
 
 ## Checks across implementations
 
@@ -276,10 +276,10 @@ curl -i -X POST localhost:3000/provider/incoming-payments -H 'content-type: appl
   "currency": "EUR",
   "network": "SEPA"
 }'
-curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits?limit=1'   # the effect
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits?network_transaction_id=NTX-0001'   # the effect
 ```
 
-Read an account (alice here; TypeIDs of the demo accounts are listed under *Demo accounts*):
+Read an account (alice here; TypeIDs of the demo accounts are listed under *Demo accounts*). Every client operation is under `/accounts/{account_id}`, and every list answers `{"data": [...], "next_before": …}`; the full list, with every parameter and answer, is [`contracts/openapi.yaml`](../contracts/openapi.yaml):
 
 ```sh
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx           # id, name, iban, created_at
@@ -287,7 +287,6 @@ curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance
 curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits?limit=10&include=history'
 # next page: add &before=<next_before from the previous response>
 curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits?status=returned'           # filtered
-curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits?network_transaction_id=NTX-0001'
 curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=10'   # deposits and withdrawals together
 curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits/dep_…?include=history'   # one deposit
 ```
