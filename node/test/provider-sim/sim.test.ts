@@ -341,3 +341,232 @@ describe('webhook delivery', () => {
     }
   });
 });
+
+// GET /_test/transfers (slice 4 decision 73): what provider-sim has seen for a reference. Every
+// test below submits with a random Idempotency-Key (submit's default) and reads by reference, so
+// none relies on the two being the same.
+describe('GET /_test/transfers', () => {
+  const REFERENCE = 'wd_01m5jjt69mec4t28vcqmrkmf79'; // body()'s
+
+  async function seen(
+    sim: ReturnType<typeof setup>['sim'],
+    query: Record<string, string | string[]> = { reference: REFERENCE },
+  ): Promise<{ status: number; json: Record<string, unknown> }> {
+    const response = await sim.app.inject({ method: 'GET', url: '/_test/transfers', query });
+    return {
+      status: response.statusCode,
+      json: JSON.parse(response.body) as Record<string, unknown>,
+    };
+  }
+
+  // The transfer as body() describes it, executed and reported once.
+  function transferOf(transferId: unknown): Record<string, unknown> {
+    return {
+      transfer_id: transferId,
+      amount_minor: '2500',
+      currency: 'EUR',
+      creditor_iban: FOREIGN_IBAN,
+      creditor_name: 'Jane Doe',
+      remittance_info: 'Rent October',
+      outcome: 'executed',
+      failure_reason: null,
+      reports_twice: false,
+    };
+  }
+
+  it('answers 404 for a reference no request has carried', async () => {
+    const { sim } = setup();
+    await submit(sim, body({ reference: 'wd_other' }));
+    const response = await seen(sim);
+    expect(response.status).toBe(404);
+    expect(response.json).toEqual({ error: expect.any(String) });
+  });
+
+  it.each([
+    ['no reference', {}],
+    ['an empty reference', { reference: '' }],
+    ['a reference over 35 characters', { reference: 'x'.repeat(36) }],
+    ['a repeated reference', { reference: [REFERENCE, REFERENCE] }],
+  ])('answers 400 for %s', async (_case, query) => {
+    const { sim } = setup();
+    await submit(sim, body());
+    const response = await seen(sim, query);
+    expect(response.status).toBe(400);
+    expect(response.json.error).toEqual(expect.any(String));
+  });
+
+  it('gives a created transfer: one request, its fields as normalised, executed', async () => {
+    const { sim } = setup();
+    // Spaced, lower-case IBAN and a padded name: stored as normalised.
+    const created = await submit(
+      sim,
+      body({ creditor_iban: 'de75 5121 0800 1245 1261 99', creditor_name: ' Jane Doe ' }),
+    );
+    expect(await seen(sim)).toEqual({
+      status: 200,
+      json: {
+        reference: REFERENCE,
+        requests: 1,
+        transfer: transferOf(created.json.transfer_id),
+        refused: false,
+        errored: false,
+      },
+    });
+  });
+
+  it('gives remittance_info as null when the request had none', async () => {
+    const { sim } = setup();
+    await submit(sim, body({ remittance_info: undefined }));
+    expect((await seen(sim)).json.transfer).toMatchObject({ remittance_info: null });
+  });
+
+  it('counts a repeat with the same key and body, the transfer unchanged', async () => {
+    const { sim } = setup();
+    const key = randomUUID();
+    const created = await submit(sim, body(), key);
+    await submit(sim, body(), key);
+    const response = await seen(sim);
+    expect(response.json).toMatchObject({
+      requests: 2,
+      transfer: transferOf(created.json.transfer_id),
+    });
+  });
+
+  it('counts a 409 key conflict, the transfer unchanged', async () => {
+    const { sim } = setup();
+    const key = randomUUID();
+    const created = await submit(sim, body(), key);
+    expect((await submit(sim, body({ amount_minor: '2501' }), key)).status).toBe(409);
+    expect((await seen(sim)).json).toMatchObject({
+      requests: 2,
+      transfer: transferOf(created.json.transfer_id),
+    });
+  });
+
+  it("doesn't count a 400, whose body couldn't be read, nor one without an Idempotency-Key", async () => {
+    const { sim } = setup();
+    expect((await submit(sim, body(), null)).status).toBe(400);
+    expect((await seen(sim)).status).toBe(404);
+
+    await submit(sim, body());
+    expect((await submit(sim, body({ creditor_iban: 'DE00512108001245126199' }))).status).toBe(400);
+    expect((await seen(sim)).json.requests).toBe(1);
+  });
+
+  // A 409 carrying a new reference under another reference's key: counted for its own reference,
+  // which has no transfer.
+  it("doesn't show another reference's transfer for a 409 with a new reference", async () => {
+    const { sim } = setup();
+    const key = randomUUID();
+    await submit(sim, body(), key);
+    expect((await submit(sim, body({ reference: 'wd_other' }), key)).status).toBe(409);
+    expect((await seen(sim, { reference: 'wd_other' })).json).toEqual({
+      reference: 'wd_other',
+      requests: 1,
+      transfer: null,
+      refused: false,
+      errored: false,
+    });
+  });
+
+  // The same for a 503: a 409 carrying B under a key whose first request (A) was answered 503
+  // (then created on A's retry) doesn't make B errored.
+  it("doesn't show another reference's 503 for a 409 with a new reference", async () => {
+    const { sim } = setup();
+    const key = randomUUID();
+    const payload = body({ remittance_info: 'SIM ERROR' });
+    expect((await submit(sim, payload, key)).status).toBe(503);
+    expect((await submit(sim, payload, key)).status).toBe(201);
+    expect((await submit(sim, { ...payload, reference: 'wd_other' }, key)).status).toBe(409);
+    expect((await seen(sim, { reference: 'wd_other' })).json).toEqual({
+      reference: 'wd_other',
+      requests: 1,
+      transfer: null,
+      refused: false,
+      errored: false,
+    });
+    expect((await seen(sim)).json).toMatchObject({ requests: 2, errored: true });
+  });
+
+  it('keeps each reference apart', async () => {
+    const { sim } = setup();
+    await submit(sim, body());
+    await submit(sim, body());
+    const other = await submit(sim, body({ reference: 'wd_other', amount_minor: '99' }));
+    expect((await seen(sim)).json.requests).toBe(2);
+    expect((await seen(sim, { reference: 'wd_other' })).json).toMatchObject({
+      reference: 'wd_other',
+      requests: 1,
+      transfer: { transfer_id: other.json.transfer_id, amount_minor: '99' },
+    });
+  });
+
+  it('SIM FAIL: outcome failed, with its reason', async () => {
+    const { sim } = setup();
+    await submit(sim, body({ remittance_info: 'SIM FAIL' }));
+    expect((await seen(sim)).json.transfer).toMatchObject({
+      outcome: 'failed',
+      failure_reason: 'rejected by the beneficiary bank',
+      reports_twice: false,
+    });
+  });
+
+  it('SIM DUPLICATE: reports_twice', async () => {
+    const { sim } = setup();
+    await submit(sim, body({ remittance_info: 'SIM DUPLICATE' }));
+    expect((await seen(sim)).json.transfer).toMatchObject({
+      outcome: 'executed',
+      reports_twice: true,
+    });
+  });
+
+  it('SIM REFUSE: refused, no transfer, and the repeat counted', async () => {
+    const { sim } = setup();
+    const key = randomUUID();
+    await submit(sim, body({ remittance_info: 'SIM REFUSE' }), key);
+    expect((await seen(sim)).json).toEqual({
+      reference: REFERENCE,
+      requests: 1,
+      transfer: null,
+      refused: true,
+      errored: false,
+    });
+    await submit(sim, body({ remittance_info: 'SIM REFUSE' }), key);
+    expect((await seen(sim)).json).toMatchObject({ requests: 2, refused: true, transfer: null });
+  });
+
+  it('SIM ERROR: errored with no transfer, then created on the retry', async () => {
+    const { sim } = setup();
+    const key = randomUUID();
+    const payload = body({ remittance_info: 'SIM ERROR' });
+    await submit(sim, payload, key);
+    expect((await seen(sim)).json).toEqual({
+      reference: REFERENCE,
+      requests: 1,
+      transfer: null,
+      refused: false,
+      errored: true,
+    });
+    const created = await submit(sim, payload, key);
+    expect((await seen(sim)).json).toMatchObject({
+      requests: 2,
+      transfer: { transfer_id: created.json.transfer_id, outcome: 'executed' },
+      errored: true,
+    });
+  });
+
+  it('SIM SLOW: the transfer and its request are seen while the answer is still delayed', async () => {
+    const { sim } = setup({ holdMs: SLOW_DELAY_MS });
+    void submit(sim, body({ remittance_info: 'SIM SLOW' })); // never answered (holdMs)
+    // Until the request has reached its handler (inject takes a few turns of the event loop).
+    let response = await seen(sim);
+    for (let turns = 0; response.status === 404 && turns < 100; turns++) {
+      await new Promise((resolve) => setImmediate(resolve));
+      response = await seen(sim);
+    }
+    expect(response.json).toMatchObject({
+      requests: 1,
+      transfer: { transfer_id: expect.stringMatching(/^tr_/) },
+    });
+  });
+});

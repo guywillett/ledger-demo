@@ -109,6 +109,12 @@ curl -s -X POST localhost:4000/transfers -H 'content-type: application/json' \
 docker compose logs provider-sim            # the transfers, and their results 2 s later
 ```
 
+`GET /_test/transfers?reference=<reference>` shows what provider-sim has seen for a reference: how many `POST /transfers` requests carried it (any answer but a 400), the transfer if one was created (its fields, `outcome`, `failure_reason`, `reports_twice`), and whether it was `refused` or `errored` (answered 503). `404` if no request carried it. It is test-only: for tests and scripts, never called by the system under test, which learns outcomes from the transfer call's answer and the webhook.
+
+```sh
+curl -s 'localhost:4000/_test/transfers?reference=wd_01m5jjt69mec4t28vcqmrkmf79'
+```
+
 ## Relay
 
 `docker compose up -d` starts one relay. It claims unpublished events from the `outbox` table in batches (`RELAY_BATCH_SIZE`, default 10, leased for `RELAY_LEASE_MS`, default 30 s), publishes each with its `msg_id` as the `Nats-Msg-Id`, and marks it published; a failed publish is retried with backoff. When it has caught up it polls every 200 ms to 1 s.
