@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -136,10 +137,18 @@ func count(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) int {
 	return n
 }
 
-func withdrawalsOf(t *testing.T, pool *pgxpool.Pool, account testdb.Account) int {
-	return count(t, pool, `SELECT count(*)::int FROM withdrawals WHERE account_id = $1`, account.ID)
+// apiWithdrawalCount is how many withdrawals the account's list shows (the newest 200; a test
+// account has a few).
+func (a testAPI) apiWithdrawalCount(t *testing.T, account testdb.Account) int {
+	t.Helper()
+	r := a.get(t, withdrawalsPath(account.ID, "limit=200"))
+	if r.status != 200 {
+		t.Fatalf("withdrawals: %d %s", r.status, r.body)
+	}
+	return len(objects(t, r.json(t), "data"))
 }
 
+// holdsOf counts the ledger's hold movements for the account: the journal isn't in the client API.
 func holdsOf(t *testing.T, pool *pgxpool.Pool, account testdb.Account) int {
 	return count(t, pool, `
 SELECT count(*)::int FROM balance_movements
@@ -155,16 +164,24 @@ SELECT count(*)::int FROM outbox WHERE subject = 'withdrawal.held' AND payload->
 
 type balanceRow struct{ pendingIn, available, held int64 }
 
-func balancesOf(t *testing.T, pool *pgxpool.Pool, account testdb.Account) balanceRow {
+// apiBalances is the account's balance through the client API, its digit strings as numbers so a
+// test compares a balanceRow.
+func (a testAPI) apiBalances(t *testing.T, account testdb.Account) balanceRow {
 	t.Helper()
-	var b balanceRow
-	err := pool.QueryRow(t.Context(), `
-SELECT pending_in, available, held FROM account_balances WHERE account_id = $1`, account.ID).
-		Scan(&b.pendingIn, &b.available, &b.held)
-	if err != nil {
-		t.Fatal(err)
+	r := a.get(t, "/accounts/"+account.ID.TypeID()+"/balance")
+	if r.status != 200 {
+		t.Fatalf("balance: %d %s", r.status, r.body)
 	}
-	return b
+	got := r.json(t)
+	bucket := func(name string) int64 {
+		s, _ := got[name].(string)
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			t.Fatalf("balance %s: %v", name, got[name])
+		}
+		return n
+	}
+	return balanceRow{bucket("pending_in"), bucket("available"), bucket("held")}
 }
 
 func TestCreatesTheWithdrawalAndHoldsItsFunds201WithALocationHeader(t *testing.T) {
@@ -200,9 +217,6 @@ func TestCreatesTheWithdrawalAndHoldsItsFunds201WithALocationHeader(t *testing.T
 	}
 	if loc := r.header.Get("Location"); loc != "/accounts/"+account.ID.TypeID()+"/withdrawals/"+id {
 		t.Errorf("Location = %q", loc)
-	}
-	if b := balancesOf(t, a.pool, account); b != (balanceRow{0, 600, 400}) {
-		t.Errorf("balances %+v", b)
 	}
 	if n := holdsOf(t, a.pool, account); n != 1 {
 		t.Errorf("holds %d", n)
@@ -249,10 +263,10 @@ func TestAnswersARepeatedRequestWithTheSameWithdrawalOne201Then200sOneHold(t *te
 	if !slices.Equal(codes, []int{201, 200, 200, 200, 200}) || len(ids) != 1 {
 		t.Errorf("codes %v, ids %v", codes, ids)
 	}
-	if withdrawalsOf(t, a.pool, account) != 1 || holdsOf(t, a.pool, account) != 1 {
+	if a.apiWithdrawalCount(t, account) != 1 || holdsOf(t, a.pool, account) != 1 {
 		t.Error("more than one withdrawal or hold")
 	}
-	if b := balancesOf(t, a.pool, account); b.available != 600 || b.held != 400 {
+	if b := a.apiBalances(t, account); b.available != 600 || b.held != 400 {
 		t.Errorf("balances %+v", b)
 	}
 }
@@ -298,7 +312,7 @@ func TestCreatesOneWithdrawalFor10ConcurrentRequestsWithOneKey(t *testing.T) {
 	if !slices.Equal(codes, want) || len(ids) != 1 {
 		t.Errorf("codes %v, ids %v", codes, ids)
 	}
-	if withdrawalsOf(t, a.pool, account) != 1 || holdsOf(t, a.pool, account) != 1 ||
+	if a.apiWithdrawalCount(t, account) != 1 || holdsOf(t, a.pool, account) != 1 ||
 		heldEventsOf(t, a.pool, account.ID.TypeID()) != 1 {
 		t.Error("not exactly one withdrawal, hold and event")
 	}
@@ -322,10 +336,10 @@ func TestRefusesTheSameKeyWithADifferentDetail409NothingChanged(t *testing.T) {
 			!reflect.DeepEqual(got["differing_fields"], []any{field}) {
 			t.Errorf("%s: %d %s", field, conflict.status, conflict.body)
 		}
-		if withdrawalsOf(t, a.pool, account) != 1 {
+		if a.apiWithdrawalCount(t, account) != 1 {
 			t.Errorf("%s: a second withdrawal", field)
 		}
-		if b := balancesOf(t, a.pool, account); b.available != 600 || b.held != 400 {
+		if b := a.apiBalances(t, account); b.available != 600 || b.held != 400 {
 			t.Errorf("%s: balances %+v", field, b)
 		}
 		stored := a.get(t, withdrawalPath(account.ID, first.json(t)["id"].(string), ""))
@@ -344,10 +358,10 @@ func TestRefusesInsufficientFundsWith422StoringNothingAndTheKeyStaysFree(t *test
 		refused.json(t)["type"] != "urn:ledger-demo:problem:insufficient-funds" {
 		t.Fatalf("got %d %s", refused.status, refused.body)
 	}
-	if withdrawalsOf(t, a.pool, account) != 0 || heldEventsOf(t, a.pool, account.ID.TypeID()) != 0 {
+	if a.apiWithdrawalCount(t, account) != 0 || heldEventsOf(t, a.pool, account.ID.TypeID()) != 0 {
 		t.Error("something was stored")
 	}
-	if b := balancesOf(t, a.pool, account); b != (balanceRow{0, 300, 0}) {
+	if b := a.apiBalances(t, account); b != (balanceRow{0, 300, 0}) {
 		t.Errorf("balances %+v", b)
 	}
 
@@ -356,7 +370,7 @@ func TestRefusesInsufficientFundsWith422StoringNothingAndTheKeyStaysFree(t *test
 	if retried := a.withdraw(t, account, nil, key); retried.status != 201 {
 		t.Errorf("retried: %d %s", retried.status, retried.body)
 	}
-	if b := balancesOf(t, a.pool, account); b.available != 100 || b.held != 400 {
+	if b := a.apiBalances(t, account); b.available != 100 || b.held != 400 {
 		t.Errorf("balances %+v", b)
 	}
 }
@@ -380,10 +394,10 @@ func TestLetsExactlyOneOfTwoConcurrentWithdrawalsThatTogetherExceedAvailableThro
 	if !slices.Equal(codes, []int{201, 422}) {
 		t.Errorf("codes %v", codes)
 	}
-	if withdrawalsOf(t, a.pool, account) != 1 {
+	if a.apiWithdrawalCount(t, account) != 1 {
 		t.Error("not exactly one withdrawal")
 	}
-	if b := balancesOf(t, a.pool, account); b != (balanceRow{0, 300, 700}) {
+	if b := a.apiBalances(t, account); b != (balanceRow{0, 300, 700}) {
 		t.Errorf("balances %+v", b)
 	}
 }
@@ -442,7 +456,7 @@ func TestAnswers400StoringNothing(t *testing.T) {
 			!hasErrorAt(got, tt.path) {
 			t.Errorf("%s: %d %s", tt.name, r.status, r.body)
 		}
-		if withdrawalsOf(t, a.pool, account) != 0 {
+		if a.apiWithdrawalCount(t, account) != 0 {
 			t.Errorf("%s: a withdrawal was stored", tt.name)
 		}
 	}
@@ -791,7 +805,7 @@ func TestTheAccountStaysConsistentAfterWithdrawalsThroughTheAPI(t *testing.T) {
 	a.withdraw(t, account, map[string]any{"amount_minor": "900"}, "c") // 422
 
 	expectConsistent(t, a.pool, account)
-	if n := withdrawalsOf(t, a.pool, account); n != 2 {
+	if n := a.apiWithdrawalCount(t, account); n != 2 {
 		t.Errorf("%d withdrawals, want 2", n)
 	}
 }
