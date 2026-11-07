@@ -48,7 +48,11 @@ docker compose down             # remove containers and network; data volumes ar
 
 `migrate` runs once on `up` after Postgres is healthy, applies any pending migrations, and exits; `nats-setup` does the same for the JetStream streams once NATS is healthy. It's normal for both to show as exited. The `api` starts only after `migrate` has succeeded; the `relay`, `deposit-worker` and `submitter` after both (the `submitter` also after `provider-sim` has started).
 
-There's no health endpoint yet (see *Known gaps* in the slice spec); `docker compose logs api` shows "Server listening" once it's up.
+The API is ready when `GET /health` answers `200` with `{"status":"ok"}`: it runs `SELECT 1` on the database and answers `503` with a problem (`urn:ledger-demo:problem:not-ready`) if the database doesn't answer within 1 s (slice 4 decision 72). The scripts (`wait-for-stack.sh`, the demo and the cross-implementation checks) wait on it. Only a failing check is logged (an error line with its cause, then the access line), so probes don't fill the access log. The workers have no HTTP surface: `docker compose logs <service>` shows each one's "started" line.
+
+```sh
+curl -i localhost:3000/health
+```
 
 ## Mixing implementations
 
@@ -103,6 +107,12 @@ curl -s -X POST localhost:4000/transfers -H 'content-type: application/json' \
   "remittance_info": "SIM REFUSE", "reference": "wd_test"
 }'                                          # 422 {"reason":"creditor account closed"}
 docker compose logs provider-sim            # the transfers, and their results 2 s later
+```
+
+`GET /_test/transfers?reference=<reference>` shows what provider-sim has seen for a reference: how many `POST /transfers` requests carried it (any answer but a 400), the transfer if one was created (its fields, `outcome`, `failure_reason`, `reports_twice`), and whether it was `refused` or `errored` (answered 503). `404` if no request carried it. It is test-only: for tests and scripts, never called by the system under test, which learns outcomes from the transfer call's answer and the webhook.
+
+```sh
+curl -s 'localhost:4000/_test/transfers?reference=wd_01m5jjt69mec4t28vcqmrkmf79'
 ```
 
 ## Relay
@@ -203,14 +213,14 @@ Exit code `0` means the books agree, `1` that they disagree, `2` stuck deposits,
 
 ## The demo
 
-`scripts/demo.sh` exercises the running stack the way the slices' *Done when* lists describe (duplicates, conflicts, suspense, a deposit-worker killed mid-review, two workers; withdrawal repeats, insufficient funds, provider failures, the submitter killed mid-call), then reconciles. Its header comment lists each step. It exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (deposits, withdrawals held or submitted, unpublished events); `1` if an expectation failed or the books disagree, `2` if something didn't finish within the wait, or carol (the account the withdrawals use) couldn't be funded; `3` if it couldn't run. The final check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP and through compose (reconciliation runs as its own compose service, reading the shared database), so the same script runs against any stack. It takes about a minute.
+`scripts/demo.sh` exercises the running stack the way the slices' *Done when* lists describe (duplicates, conflicts, suspense, a deposit-worker killed mid-review, two workers; withdrawal repeats, insufficient funds, provider failures, the submitter killed mid-call), then reconciles. Its header comment lists each step. It exits `0` only if every expectation holds and, once everything has finished, the books agree and nothing is stuck (deposits, withdrawals held or submitted, unpublished events); `1` if an expectation failed or the books disagree, `2` if something didn't finish within the wait, or carol (the account the withdrawals use) couldn't be funded; `3` if it couldn't run. The final check covers the whole development database, so something left unfinished by an earlier run fails it too (the report names it); `docker compose down -v` gives a clean slate. The script talks to the system only over HTTP (the API, and provider-sim's test-only `GET /_test/transfers`) and through compose (reconciliation runs as its own compose service, reading the shared database; the submitter's log shows what a redelivery did), so the same script runs against any stack. It takes about a minute.
 
 ## Checks across implementations
 
 Two scripts beside the demo, each against the running stack, with the demo's exit codes (`0` all good, `1` an expectation failed, `3` couldn't run; `shared-consumer.sh` also `2`, deposits unfinished after the wait). Each works out the other implementation from the running service's variable, starts its extra service under its own profile, and removes it however it ends.
 
 - **`scripts/shared-consumer.sh`:** starts `deposit-worker-other` (the opposite of `DEPOSIT_WORKER_IMPL`) on the same durable consumer, posts a burst of 30 deposits, and checks from the two workers' logs that both processed some and none was processed twice; then reconciles. Run it on any stack, after `up -d`; it adds its own deposits.
-- **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: balances, every page of each demo account's transactions (each cursor used on the other implementation too), query-parameter edge cases, withdrawals in each final status, unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
+- **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: the health check, the accounts, balances, every page of each demo account's deposits (each cursor used on the other implementation too, filtered and not), the query parameters' and filters' edge cases, single deposits (found, another account's, unknown, malformed IDs), each account's withdrawals (the list across implementations, the status filter, single withdrawals in each final status), every page of each account's transactions (deposits and withdrawals together, with cursors of both kinds), unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
 
 ## Node
 
@@ -256,7 +266,7 @@ npm run start:api               # without watching
 docker compose start api        # afterwards, back to the container
 ```
 
-The same curl works against either. Send an incoming payment notification for alice to the provider webhook. It answers `204` with no body whatever the notification did (the webhook contract), so look at the effect in alice's transactions: a new deposit (`created`, then booked and reviewed by the deposit-worker), a rising `notification_count` when you repeat it, an unchanged deposit when you change the amount (recorded as a conflict), and nothing in any account for an IBAN that isn't ours (recorded in suspense; `docker compose run --rm reconcile` lists it). Each new deposit's `deposit.created` event goes to the outbox, and the relay publishes it (see *Streams* above to read it back):
+The same curl works against either. Send an incoming payment notification for alice to the provider webhook. It answers `204` with no body whatever the notification did (the webhook contract), so look at the effect in alice's deposits: a new deposit (`created`, then booked and reviewed by the deposit-worker), a rising `notification_count` when you repeat it, an unchanged deposit when you change the amount (recorded as a conflict), and nothing in any account for an IBAN that isn't ours (recorded in suspense; `docker compose run --rm reconcile` lists it). Each new deposit's `deposit.created` event goes to the outbox, and the relay publishes it (see *Streams* above to read it back):
 
 ```sh
 curl -i -X POST localhost:3000/provider/incoming-payments -H 'content-type: application/json' -d '{
@@ -266,15 +276,19 @@ curl -i -X POST localhost:3000/provider/incoming-payments -H 'content-type: appl
   "currency": "EUR",
   "network": "SEPA"
 }'
-curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=1'   # the effect
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits?network_transaction_id=NTX-0001'   # the effect
 ```
 
-Read an account (alice here; TypeIDs of the demo accounts are listed under *Demo accounts*):
+Read an account (alice here; TypeIDs of the demo accounts are listed under *Demo accounts*). Every client operation is under `/accounts/{account_id}`, and every list answers `{"data": [...], "next_before": …}`; the full list, with every parameter and answer, is [`contracts/openapi.yaml`](../contracts/openapi.yaml):
 
 ```sh
+curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx           # id, name, iban, created_at
 curl -s localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance
-curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=10&include=history'
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits?limit=10&include=history'
 # next page: add &before=<next_before from the previous response>
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits?status=returned'           # filtered
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/transactions?limit=10'   # deposits and withdrawals together
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/deposits/dep_…?include=history'   # one deposit
 ```
 
 Request a withdrawal from alice (repeat it with the same key to get `200` and the same withdrawal; change the amount to see a `409`; ask for more than `available` to see a `422`), then read it back with the `Location` it returns. Within a few seconds the submitter sends it to provider-sim (`submitted`) and the provider's result settles it: `executed`, with its amount gone from `held`; put `SIM FAIL` in `remittance_info` to see it `failed` with the funds back in `available`:
@@ -288,7 +302,8 @@ curl -i -X POST localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/withdraw
   "creditor_name": "Jane Doe",
   "remittance_info": "Rent October"
 }'
-curl -s 'localhost:3000/withdrawals/wd_…?include=history'
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/withdrawals/wd_…?include=history'   # the Location
+curl -s 'localhost:3000/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/withdrawals?status=failed'          # the list, filtered
 ```
 
 The provider's webhook can be called by hand too. Every update it can parse gets `204` with no body, whatever it did (applied, a duplicate, a contradiction, an unknown reference); `docker compose logs api` and the `transfer_updates` table show what happened:

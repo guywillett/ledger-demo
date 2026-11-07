@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/guywillett/ledger-demo/go/internal/accounts"
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/ids"
 	"github.com/guywillett/ledger-demo/go/internal/money"
@@ -71,6 +72,12 @@ func scanDeposit(row pgx.Row) (Deposit, error) {
 	return d, nil
 }
 
+// Filter holds values that ListPage should filter results by. A zero value does not filter.
+type Filter struct {
+	Status               *Status
+	NetworkTransactionID *string
+}
+
 // Page is a page of an account's deposits, newest first.
 type Page struct {
 	Deposits []Deposit
@@ -78,24 +85,70 @@ type Page struct {
 	NextBefore *ids.DepositID
 }
 
-const accountExistsSQL = `SELECT 1 FROM accounts WHERE id = $1`
-
-// Seek pagination on the deposit ID: UUIDv7 IDs sort by creation time, so "older than the last one
-// seen" is id < $before, served by the (account_id, id DESC) index. Two fixed statements rather
-// than one with an optional condition, which keeps each one simple to plan.
-const firstPageSQL = `
+// listSQL is the list's statement, its conditions (a db.Conditions' SQL: the account, the cursor
+// and the filters present) after WHERE, LIMIT $1 one more than the page size.
+func listSQL(where string) string {
+	return `
 SELECT ` + columns + ` FROM deposits
-WHERE account_id = $1
+WHERE ` + where + `
 ORDER BY id DESC
-LIMIT $2
+LIMIT $1
 `
+}
 
-const nextPageSQL = `
-SELECT ` + columns + ` FROM deposits
-WHERE account_id = $1 AND id < $3
-ORDER BY id DESC
-LIMIT $2
-`
+const getSQL = `SELECT ` + columns + ` FROM deposits WHERE id = $1 AND account_id = $2`
+
+const getManySQL = `SELECT ` + columns + ` FROM deposits WHERE account_id = $1 AND id = ANY($2)`
+
+// GetMany reads the account's deposits among list, in one statement, in no particular order; an ID
+// the account has no deposit for is simply absent, and the caller decides what that means. For the
+// transactions list, which decides its page on IDs alone and then reads each kind's rows by ID
+// (slice 4 decision 67). Node: getDeposits.
+func GetMany(
+	ctx context.Context,
+	q db.Querier,
+	account ids.AccountID,
+	list []ids.DepositID,
+) ([]Deposit, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	// As text, as StatusHistories passes them: Postgres reads the elements as the column's uuid.
+	uuids := make([]string, len(list))
+	for i, id := range list {
+		uuids[i] = id.UUID().String()
+	}
+	rows, err := q.Query(ctx, getManySQL, account, uuids)
+	if err != nil {
+		return nil, fmt.Errorf("deposits of %v by ID: %w", account, err)
+	}
+	found, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Deposit, error) {
+		return scanDeposit(row)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("deposits of %v by ID: %w", account, err)
+	}
+	return found, nil
+}
+
+// Get reads a deposit of the account; false if the account has no such deposit, whether there is
+// none or it is another account's (slice 4 decision 64: one statement decides). An unmatched
+// deposit has no account, so it is never found.
+func Get(
+	ctx context.Context,
+	q db.Querier,
+	account ids.AccountID,
+	id ids.DepositID,
+) (Deposit, bool, error) {
+	d, err := scanDeposit(q.QueryRow(ctx, getSQL, id, account))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Deposit{}, false, nil
+	}
+	if err != nil {
+		return Deposit{}, false, fmt.Errorf("deposit %v of %v: %w", id, account, err)
+	}
+	return d, true, nil
+}
 
 // ListPage reads a page of at most limit deposits of the account, newest first, older than before
 // if it isn't nil. false if there is no such account (an account without deposits gets an empty
@@ -106,25 +159,32 @@ func ListPage(
 	account ids.AccountID,
 	limit int,
 	before *ids.DepositID,
+	filter Filter,
 ) (Page, bool, error) {
-	// Node's statement; its row, if any, is read and discarded (Exec would also work, through the
-	// SELECT's row count, but Querier documents Exec for statements that return no rows).
-	var one int
-	err := q.QueryRow(ctx, accountExistsSQL, account).Scan(&one)
-	if errors.Is(err, pgx.ErrNoRows) {
+	exists, err := accounts.Exists(ctx, q, account)
+	if err != nil {
+		return Page{}, false, err
+	}
+	if !exists {
 		return Page{}, false, nil
 	}
-	if err != nil {
-		return Page{}, false, fmt.Errorf("account %v: %w", account, err)
+	// listSQL's conditions. Limit is one more than the page size, to know whether there is a next
+	// page.
+	where := db.NewConditions(limit + 1) // $1
+	where.Where("account_id", "=", account)
+	if before != nil {
+		// Seek pagination on the deposit ID: UUIDv7 IDs sort by creation time, so "older than the
+		// last one seen" is id < $before, served by the (account_id, id DESC) index.
+		where.Where("id", "<", *before)
+	}
+	if filter.Status != nil {
+		where.Where("status", "=", *filter.Status)
+	}
+	if filter.NetworkTransactionID != nil {
+		where.Where("network_transaction_id", "=", *filter.NetworkTransactionID)
 	}
 
-	// One more than the page size, to know whether there is a next page.
-	var rows pgx.Rows
-	if before == nil {
-		rows, err = q.Query(ctx, firstPageSQL, account, limit+1)
-	} else {
-		rows, err = q.Query(ctx, nextPageSQL, account, limit+1, *before)
-	}
+	rows, err := q.Query(ctx, listSQL(where.SQL()), where.Params()...)
 	if err != nil {
 		return Page{}, false, fmt.Errorf("deposits of %v: %w", account, err)
 	}

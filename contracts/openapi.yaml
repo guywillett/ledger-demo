@@ -1,14 +1,64 @@
 openapi: 3.1.1
 info:
   title: ledger-demo API
-  version: 0.1.0
+  # Matches the release tag's minor version (slice 4 decision 65).
+  version: 0.4.0
   description: |
     Hand-written contract, shared by the Node and Go implementations. Both are tested against
     it. Amounts are integer minor units as digit strings; IDs are TypeIDs.
-    Errors are RFC 9457 problem details (application/problem+json).
-    A path with an empty segment (e.g. /withdrawals/, /accounts//balance) matches no route: 404.
+    Errors are RFC 9457 problem details (application/problem+json): a URN type
+    (urn:ledger-demo:problem:…) for this API's own problems, `about:blank` for plain HTTP errors,
+    whose title is the status's phrase (413's is "Payload Too Large").
+
+    Rules for every operation, stated here once:
+
+    - Request IDs: a request may send `x-request-id`. It is reused as the request's ID if it is
+      sent once and is 1-64 characters from A-Z a-z 0-9 . _ : -; otherwise one is generated.
+      Every response carries the ID in `x-request-id`: successes, errors and unknown routes alike.
+    - HEAD is answered on every GET path: the GET's status and headers (Content-Length included),
+      without the body.
+    - Unknown routes: a path matching no operation, a known path with another method, or a path
+      that isn't in its clean form (an empty segment such as /accounts//balance or
+      /accounts/x/deposits/, a trailing slash, a `.` or `..` segment) answers 404 with an
+      `about:blank` problem, whatever the body.
+    - Query parameters: unknown ones are ignored; a documented one given more than once is
+      invalid (400).
+    - Validation reports every problem at once (slice 4 decision 68): one 400 `invalid-request`
+      problem, its `errors` in a defined order: the path parameters, then the headers, then the
+      query parameters, each in the order the operation lists them, then the body. Each entry
+      names where the problem is (`path`) and what is wrong (`message`), never the value sent.
 paths:
+  /health:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: Readiness of the API
+      description: |
+        Runs `SELECT 1` on the database: 200 if it answers within 1 s, 503 if it doesn't (an error,
+        or no answer in time; slice 4 decision 72). For probes (scripts, a load balancer, an
+        orchestrator), outside the account scope. Only a failure is logged.
+      responses:
+        '200':
+          description: Ready
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: Not ready, the database didn't answer within 1 s (type urn:ledger-demo:problem:not-ready)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /provider/incoming-payments:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     post:
       summary: The provider's notification of an incoming payment (its webhook)
       description: |
@@ -22,13 +72,6 @@ paths:
         IBAN included; 500 when a retry can help. The response never says what the
         notification did, so the endpoint can't be used to probe accounts or deposits. Unknown
         fields are ignored (tolerant reader).
-      parameters:
-        - name: x-request-id
-          in: header
-          required: false
-          description: Reused as the request ID if it matches the pattern; otherwise one is generated.
-          schema:
-            type: string
       requestBody:
         required: true
         content:
@@ -50,17 +93,72 @@ paths:
               $ref: '#/components/headers/RequestId'
         '400':
           description: The body can't be used (malformed, oversized or not JSON) or doesn't parse (an invalid IBAN included)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Not recorded; a retry can help (e.g. once a bug is fixed)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /accounts/{account_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: The account
+      description: |
+        The account itself (slice 4 decision 71): its ID, its unique name, its IBAN (for incoming
+        payments) and when it was created. Its balance is a sub-resource of its own.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: The account
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          description: account_id is not an acct_ ID
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such account (type urn:ledger-demo:problem:account-not-found)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
   /accounts/{account_id}/balance:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     get:
       summary: The account's balances
       parameters:
@@ -68,44 +166,56 @@ paths:
       responses:
         '200':
           description: Balances in integer minor units, as digit strings
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Balance'
         '400':
           description: account_id is not an acct_ ID
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
           description: No such account
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
-  /accounts/{account_id}/transactions:
+  /accounts/{account_id}/deposits:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     get:
       summary: The account's deposits, newest first, a page at a time
       description: |
-        Paginated by seeking on the deposit ID (UUIDv7 IDs sort by creation time): pass the
-        previous page's next_before as `before` to get the next, older page.
+        A list (slice 4 decision 66): `data` holds the page, `next_before` the cursor for the next,
+        older page (null on the last). Paginated by seeking on the deposit ID (UUIDv7 IDs sort by
+        creation time). The filters (status, network_transaction_id) combine with each other and with
+        pagination: limit and before apply within the filtered list, and next_before is the last
+        deposit of the filtered page. A `before` naming another account's deposit, or none, is a position in
+        time, not a reference: accepted, never looked up. An unknown account is a 404; an account
+        without deposits an empty list.
       parameters:
         - $ref: '#/components/parameters/AccountId'
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 200
-            default: 50
+        - $ref: '#/components/parameters/Limit'
         - name: before
           in: query
           required: false
@@ -113,38 +223,248 @@ paths:
           schema:
             type: string
             pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
-        - name: include
+        - $ref: '#/components/parameters/IncludeHistory'
+        - name: status
           in: query
           required: false
-          description: '`history` adds each deposit''s status history.'
+          description: |
+            Only deposits in this status (slice 4 decision 70): one of the statuses an account's
+            deposit can have. Any other value is a 400, `unmatched` included: a deposit in suspense
+            has no account, so no account's list could hold one.
           schema:
-            const: history
+            $ref: '#/components/schemas/DepositStatus'
+        - name: network_transaction_id
+          in: query
+          required: false
+          description: |
+            Only the deposit with this network transaction ID, the payment's reference (exact
+            match; slice 4 decision 70). Valid as the incoming-payment webhook accepts the field:
+            1 to 255 characters (counted in Unicode code points), any characters; anything else is
+            a 400, since no deposit could have it.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
       responses:
         '200':
           description: A page of deposits
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TransactionList'
+                $ref: '#/components/schemas/DepositList'
         '400':
           description: Invalid account_id or query parameter
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
-          description: No such account
+          description: No such account (type urn:ledger-demo:problem:account-not-found)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /accounts/{account_id}/deposits/{deposit_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: One of the account's deposits
+      description: |
+        Read within the account (slice 4 decision 64): a deposit of another account answers as
+        one that doesn't exist, whether or not the account in the path exists.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - name: deposit_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        - $ref: '#/components/parameters/IncludeHistory'
+      responses:
+        '200':
+          description: The deposit
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deposit'
+        '400':
+          description: Invalid account_id, deposit_id or query parameter
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such deposit in this account (type urn:ledger-demo:problem:deposit-not-found)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /accounts/{account_id}/transactions:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: The account's deposits and withdrawals together, newest first, a page at a time
+      description: |
+        Deposits and withdrawals in one list (slice 4 decision 67), newest first by when each was
+        created (not when it settled): `data` holds the page, `next_before` the cursor for the
+        next, older page (null on the last). Each item is exactly what its own endpoint returns,
+        `type` telling them apart. The cursor is the last item's ID, a deposit's or a
+        withdrawal's: a position in time (decision 66), so a `before` of either kind, another
+        account's or one that names nothing, is accepted and never looked up.
+
+        No `include=history` and no filters here: they are the per-resource lists' (decision 67).
+        Not documented for this operation, they are unknown parameters, ignored as every
+        operation ignores them, so the items never carry a history.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/Limit'
+        - name: before
+          in: query
+          required: false
+          description: Only items older than this one (a previous page's next_before), a deposit's or a withdrawal's ID. Anything else is a 400, "must be a dep_ or wd_ ID".
+          schema:
+            type: string
+            pattern: '^(dep|wd)_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+      responses:
+        '200':
+          description: A page of deposits and withdrawals
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionList'
+        '400':
+          description: Invalid account_id or query parameter
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such account (type urn:ledger-demo:problem:account-not-found)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
   /accounts/{account_id}/withdrawals:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: The account's withdrawals, newest first, a page at a time
+      description: |
+        A list (slice 4 decision 66), as the deposits list: `data` holds the page, `next_before`
+        the cursor for the next, older page (null on the last), seeking on the withdrawal ID. A
+        `before` naming another account's withdrawal, or none, is a position in time: accepted,
+        never looked up. The status filter combines with pagination: limit and before apply
+        within the filtered list, and next_before is the last withdrawal of the filtered page. An
+        unknown account is a 404; an account without withdrawals an empty list.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/Limit'
+        - name: before
+          in: query
+          required: false
+          description: Only withdrawals older than this one (a previous page's next_before).
+          schema:
+            type: string
+            pattern: '^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        - $ref: '#/components/parameters/IncludeHistory'
+        - name: status
+          in: query
+          required: false
+          description: Only withdrawals in this status (slice 4 decision 70); any other value is a 400.
+          schema:
+            $ref: '#/components/schemas/WithdrawalStatus'
+      responses:
+        '200':
+          description: A page of withdrawals
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalList'
+        '400':
+          description: Invalid account_id or query parameter
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No such account (type urn:ledger-demo:problem:account-not-found)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
     post:
       summary: Request a withdrawal (a SEPA transfer out of the account)
       description: |
@@ -169,12 +489,6 @@ paths:
           schema:
             type: string
             pattern: '^[A-Za-z0-9._:-]{1,255}$'
-        - name: x-request-id
-          in: header
-          required: false
-          description: Reused as the request ID if it matches the pattern; otherwise one is generated.
-          schema:
-            type: string
       requestBody:
         required: true
         content:
@@ -192,7 +506,7 @@ paths:
           description: Withdrawal created, funds held (status held)
           headers:
             location:
-              description: The withdrawal's URL, /withdrawals/{withdrawal_id}
+              description: The withdrawal's URL, /accounts/{account_id}/withdrawals/{withdrawal_id}
               schema:
                 type: string
             x-request-id:
@@ -212,88 +526,124 @@ paths:
                 $ref: '#/components/schemas/Withdrawal'
         '400':
           description: Invalid Idempotency-Key, account_id or body (including an unknown field)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
           description: No such account
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '409':
           description: The Idempotency-Key was used for a withdrawal with other details
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/IdempotencyKeyConflictProblem'
         '413':
           description: Body too large
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '415':
           description: Unsupported content type
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '422':
           description: Insufficient available funds; nothing stored
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Unexpected failure; nothing stored
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
-  /withdrawals/{withdrawal_id}:
+  /accounts/{account_id}/withdrawals/{withdrawal_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     get:
-      summary: A withdrawal in its current status
+      summary: One of the account's withdrawals, in its current status
+      description: |
+        Read within the account (slice 4 decision 64): a withdrawal of another account answers as
+        one that doesn't exist, whether or not the account in the path exists.
       parameters:
+        - $ref: '#/components/parameters/AccountId'
         - name: withdrawal_id
           in: path
           required: true
           schema:
             type: string
             pattern: '^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$'
-        - name: include
-          in: query
-          required: false
-          description: '`history` adds the withdrawal''s status history.'
-          schema:
-            const: history
+        - $ref: '#/components/parameters/IncludeHistory'
       responses:
         '200':
           description: The withdrawal
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Withdrawal'
         '400':
-          description: withdrawal_id is not a wd_ ID, or an invalid query parameter
+          description: Invalid account_id, withdrawal_id or query parameter
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
-          description: No such withdrawal
+          description: No such withdrawal in this account (type urn:ledger-demo:problem:withdrawal-not-found)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Unexpected failure (a read changes nothing)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
   /provider/transfer-updates:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
     post:
       summary: The provider's result for a transfer we sent (its webhook)
       description: |
@@ -319,20 +669,58 @@ paths:
       responses:
         '204':
           description: Recorded or deliberately handled (whatever it did)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
         '400':
           description: The body can't be used (malformed, oversized or not JSON) or doesn't parse
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Not recorded; a retry can help (e.g. once a bug is fixed)
+          headers:
+            x-request-id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
 components:
   parameters:
+    RequestId:
+      name: x-request-id
+      in: header
+      required: false
+      description: Reused as the request's ID if usable (see the rules above); otherwise one is generated.
+      schema:
+        type: string
+    IncludeHistory:
+      name: include
+      in: query
+      required: false
+      description: '`history` adds the status history (each item''s, in a list).'
+      schema:
+        const: history
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        The page size: a whole number from 1 to 200. The value is read as JavaScript's Number()
+        reads a string, in both implementations (slice 3 decision 54): surrounding whitespace is
+        ignored; a decimal may have a sign, a fraction and an exponent (+2, 2.0, 1e2, .5e1);
+        0x, 0o and 0b prefixes are hexadecimal, octal and binary; Infinity is a number; an empty
+        value is 0. Whatever it reads as must then be a whole number from 1 to 200, else 400.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
     AccountId:
       name: account_id
       in: path
@@ -342,10 +730,17 @@ components:
         pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
   headers:
     RequestId:
-      description: The request ID used in logs
+      description: The request's ID, used in every log line about it
       schema:
         type: string
   schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          const: ok
     AmountMinor:
       description: Integer minor units (cents) as a string of digits, greater than zero.
       type: string
@@ -390,25 +785,27 @@ components:
           const: EUR
         network:
           const: SEPA
-    # The fields of a deposit in an account's transaction list. Transaction closes itself with
-    # unevaluatedProperties: false, which (unlike additionalProperties) also counts the
-    # properties described through allOf.
-    DepositFields:
+    Deposit:
       type: object
+      additionalProperties: false
       required:
+        - type
         - id
         - account_id
         - creditor_iban
-        - provider_account_id
         - amount_minor
         - currency
         - network
         - network_transaction_id
         - status
+        - failure_reason
         - notification_count
         - created_at
         - updated_at
       properties:
+        type:
+          description: What the object is (slice 4 decision 67).
+          const: deposit
         id:
           type: string
           pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
@@ -419,8 +816,6 @@ components:
           type: string
           description: Normalised (no separators, upper case).
           pattern: '^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$'
-        provider_account_id:
-          type: [string, 'null']
         amount_minor:
           $ref: '#/components/schemas/AmountMinor'
         currency:
@@ -428,9 +823,16 @@ components:
         network:
           const: SEPA
         network_transaction_id:
+          description: The payment's reference, the one identifier payer and payee both know (slice 4 decision 69).
           type: string
         status:
           $ref: '#/components/schemas/DepositStatus'
+        failure_reason:
+          description: |
+            One fixed, non-disclosing text while the deposit is rejected or returned
+            ("returned to the sender"); null otherwise. Never the internal reason (slice 4
+            decision 76).
+          type: [string, 'null']
         notification_count:
           type: integer
           minimum: 1
@@ -440,19 +842,12 @@ components:
         updated_at:
           type: string
           format: date-time
-    Transaction:
-      description: A deposit in an account's transaction list.
-      type: object
-      allOf:
-        - $ref: '#/components/schemas/DepositFields'
-      properties:
         history:
           description: Present with include=history. Oldest change first.
           type: array
           items:
-            $ref: '#/components/schemas/StatusChange'
-      unevaluatedProperties: false
-    StatusChange:
+            $ref: '#/components/schemas/DepositStatusChange'
+    DepositStatusChange:
       type: object
       additionalProperties: false
       required: [from_status, to_status, reason, at]
@@ -465,30 +860,55 @@ components:
         to_status:
           $ref: '#/components/schemas/DepositStatus'
         reason:
+          description: |
+            A client-facing reason for the change. A deposit's transitions have none (the
+            compliance decision's reason is internal: slice 4 decision 76), so it is null.
           type: [string, 'null']
         at:
           type: string
           format: date-time
-    TransactionList:
+    DepositList:
       type: object
       additionalProperties: false
-      required: [deposits, next_before]
+      required: [data, next_before]
       properties:
-        deposits:
+        data:
           type: array
           items:
-            $ref: '#/components/schemas/Transaction'
+            $ref: '#/components/schemas/Deposit'
         next_before:
           description: Pass as `before` for the next page; null on the last page.
           oneOf:
             - type: string
               pattern: '^dep_[0-7][0-9a-hjkmnp-tv-z]{25}$'
             - type: 'null'
+    Account:
+      type: object
+      additionalProperties: false
+      required: [id, name, iban, created_at]
+      properties:
+        id:
+          type: string
+          pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+        name:
+          description: The account's unique label.
+          type: string
+          minLength: 1
+        iban:
+          type: string
+          description: The account's IBAN, normalised (no separators, upper case).
+          pattern: '^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$'
+        created_at:
+          type: string
+          format: date-time
     Balance:
       type: object
       additionalProperties: false
-      required: [pending_in, available, held, currency]
+      required: [account_id, pending_in, available, held, currency]
       properties:
+        account_id:
+          type: string
+          pattern: '^acct_[0-7][0-9a-hjkmnp-tv-z]{25}$'
         pending_in:
           description: Booked but not yet credited (under review, or decided and not yet posted).
           $ref: '#/components/schemas/Money'
@@ -548,6 +968,7 @@ components:
       type: object
       additionalProperties: false
       required:
+        - type
         - id
         - account_id
         - idempotency_key
@@ -561,6 +982,9 @@ components:
         - created_at
         - updated_at
       properties:
+        type:
+          description: What the object is (slice 4 decision 67).
+          const: withdrawal
         id:
           type: string
           pattern: '^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$'
@@ -617,10 +1041,49 @@ components:
         to_status:
           $ref: '#/components/schemas/WithdrawalStatus'
         reason:
+          description: |
+            Set on the change to failed: the provider's reason (from its transfer update, or its
+            refusal of the transfer), or a generic text when it gave none. Meant for the customer
+            (slice 4 decision 76). null on every other change.
           type: [string, 'null']
         at:
           type: string
           format: date-time
+    TransactionList:
+      type: object
+      additionalProperties: false
+      required: [data, next_before]
+      properties:
+        data:
+          type: array
+          items:
+            description: A deposit or a withdrawal, exactly as its own endpoint returns it.
+            oneOf:
+              - $ref: '#/components/schemas/Deposit'
+              - $ref: '#/components/schemas/Withdrawal'
+            discriminator:
+              propertyName: type
+        next_before:
+          description: Pass as `before` for the next page (the last item's ID, of either kind); null on the last page.
+          oneOf:
+            - type: string
+              pattern: '^(dep|wd)_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+            - type: 'null'
+    WithdrawalList:
+      type: object
+      additionalProperties: false
+      required: [data, next_before]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Withdrawal'
+        next_before:
+          description: Pass as `before` for the next page; null on the last page.
+          oneOf:
+            - type: string
+              pattern: '^wd_[0-7][0-9a-hjkmnp-tv-z]{25}$'
+            - type: 'null'
     TransferUpdate:
       type: object
       description: Unknown fields are ignored (tolerant reader).

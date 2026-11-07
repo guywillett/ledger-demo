@@ -47,6 +47,12 @@ export const problems = {
     title: 'Account not found',
     status: 404,
   }),
+  // Also for another account's deposit (slice 4 decision 64: the account in the path is a scope).
+  depositNotFound: () => ({
+    type: 'urn:ledger-demo:problem:deposit-not-found',
+    title: 'Deposit not found',
+    status: 404,
+  }),
   withdrawalNotFound: () => ({
     type: 'urn:ledger-demo:problem:withdrawal-not-found',
     title: 'Withdrawal not found',
@@ -69,6 +75,14 @@ export const problems = {
       'Use a new key for a new withdrawal.',
     differing_fields: differingFields,
   }),
+  // GET /health when the database doesn't answer (slice 4 decision 72). The detail names the
+  // dependency, not the error: the cause is in the log line.
+  notReady: () => ({
+    type: 'urn:ledger-demo:problem:not-ready',
+    title: 'Not ready',
+    status: 503,
+    detail: 'The database did not answer.',
+  }),
   // A plain HTTP error (Fastify's own 4xx, unknown routes, unexpected 500s).
   http: (status: number, detail?: string) => ({
     type: 'about:blank',
@@ -85,6 +99,15 @@ export function validationErrors(error: z.ZodError): ValidationError[] {
     path: issue.path.map(String).join('.'),
     message: issue.message,
   }));
+}
+
+// A 400's `errors` for a request whose parts were parsed separately (path, headers, query, body),
+// in the order given: the order the problems are reported in (slice 4 decision 68: the path,
+// then the headers, then the query, then the body).
+export function requestErrors(
+  ...results: readonly z.ZodSafeParseResult<unknown>[]
+): ValidationError[] {
+  return results.flatMap((result) => (result.success ? [] : validationErrors(result.error)));
 }
 
 export function sendProblem(reply: FastifyReply, problem: Problem): FastifyReply {

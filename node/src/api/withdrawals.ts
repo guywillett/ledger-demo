@@ -4,18 +4,23 @@ import { withTransaction } from '../shared/db.ts';
 import { maskIban } from '../shared/iban.ts';
 import { toTypeId } from '../shared/ids.ts';
 import { requestWithdrawal, type RequestResult } from '../withdrawals/requests.ts';
-import { withdrawalStatusHistory } from '../withdrawals/status.ts';
-import { AccountNotFoundError, getWithdrawal } from '../withdrawals/withdrawals.ts';
-import { problems, sendProblem, validationErrors, type ValidationError } from './problem.ts';
+import { withdrawalStatusHistories, withdrawalStatusHistory } from '../withdrawals/status.ts';
+import {
+  AccountNotFoundError,
+  getWithdrawalInAccount,
+  listWithdrawals,
+} from '../withdrawals/withdrawals.ts';
+import { problems, requestErrors, sendProblem } from './problem.ts';
 import {
   accountParamsSchema,
   idempotencyKeyHeadersSchema,
   toNewWithdrawal,
   toWithdrawalResponse,
-  toWithdrawalStatusChangeResponse,
   withdrawalBodySchema,
   withdrawalParamsSchema,
   withdrawalQuerySchema,
+  withdrawalsQuerySchema,
+  type WithdrawalListResponse,
 } from './schemas.ts';
 import type { App } from './types.ts';
 
@@ -27,16 +32,12 @@ import type { App } from './types.ts';
 // Logs never contain the creditor name or remittance text, and the IBAN only masked.
 export function registerWithdrawalRoutes(app: App, deps: { pool: pg.Pool }): void {
   app.post('/accounts/:account_id/withdrawals', async (request, reply) => {
-    // Every problem with the request at once: path, header and body.
+    // Every problem with the request at once: path, header and body (slice 4 decision 68).
     const params = accountParamsSchema.safeParse(request.params);
     const headers = idempotencyKeyHeadersSchema.safeParse(request.headers);
     const body = withdrawalBodySchema.safeParse(request.body);
     if (!params.success || !headers.success || !body.success) {
-      const errors: ValidationError[] = [
-        ...(params.success ? [] : validationErrors(params.error)),
-        ...(headers.success ? [] : validationErrors(headers.error)),
-        ...(body.success ? [] : validationErrors(body.error)),
-      ];
+      const errors = requestErrors(params, headers, body);
       request.log.warn({ errors }, 'invalid withdrawal request');
       return sendProblem(reply, problems.invalidRequest(errors));
     }
@@ -87,7 +88,7 @@ export function registerWithdrawalRoutes(app: App, deps: { pool: pg.Pool }): voi
         );
         return reply
           .code(201)
-          .header('location', `/withdrawals/${id}`)
+          .header('location', `/accounts/${context.account_id}/withdrawals/${id}`)
           .send(toWithdrawalResponse(result.withdrawal));
       }
       case 'repeat': {
@@ -116,25 +117,62 @@ export function registerWithdrawalRoutes(app: App, deps: { pool: pg.Pool }): voi
     }
   });
 
-  // The withdrawal in its current status; ?include=history adds its status history.
-  app.get('/withdrawals/:withdrawal_id', async (request, reply) => {
-    const params = withdrawalParamsSchema.safeParse(request.params);
-    if (!params.success) {
-      return sendProblem(reply, problems.invalidRequest(validationErrors(params.error)));
-    }
-    const query = withdrawalQuerySchema.safeParse(request.query);
-    if (!query.success) {
-      return sendProblem(reply, problems.invalidRequest(validationErrors(query.error)));
+  // The account's withdrawals, newest first, a page at a time: ?limit, ?before=<next_before>,
+  // ?include=history and the ?status filter, as the deposits list (decisions 66 and 70).
+  app.get('/accounts/:account_id/withdrawals', async (request, reply) => {
+    // Every problem at once, path then query (decision 68).
+    const params = accountParamsSchema.safeParse(request.params);
+    const query = withdrawalsQuerySchema.safeParse(request.query);
+    if (!params.success || !query.success) {
+      return sendProblem(reply, problems.invalidRequest(requestErrors(params, query)));
     }
 
-    const withdrawal = await getWithdrawal(deps.pool, params.data.withdrawal_id);
+    const page = await listWithdrawals(deps.pool, params.data.account_id, {
+      limit: query.data.limit,
+      ...(query.data.before === undefined ? {} : { before: query.data.before }),
+      ...(query.data.status === undefined ? {} : { status: query.data.status }),
+    });
+    // A list checks its account: an unknown one is a 404, an empty list an account without any.
+    if (page === undefined) return sendProblem(reply, problems.accountNotFound());
+
+    const histories =
+      query.data.include === 'history'
+        ? await withdrawalStatusHistories(
+            deps.pool,
+            page.withdrawals.map((w) => w.id),
+          )
+        : undefined;
+    const response: WithdrawalListResponse = {
+      data: page.withdrawals.map((withdrawal) =>
+        toWithdrawalResponse(
+          withdrawal,
+          histories === undefined ? undefined : (histories.get(withdrawal.id) ?? []),
+        ),
+      ),
+      next_before: page.nextBefore === null ? null : toTypeId('wd', page.nextBefore),
+    };
+    return reply.send(response);
+  });
+
+  // One withdrawal in its current status, read with its account in one query: another
+  // account's withdrawal is a 404, the same as one that doesn't exist, whether or not the
+  // account exists (decision 64). ?include=history adds its status history.
+  app.get('/accounts/:account_id/withdrawals/:withdrawal_id', async (request, reply) => {
+    const params = withdrawalParamsSchema.safeParse(request.params);
+    const query = withdrawalQuerySchema.safeParse(request.query);
+    if (!params.success || !query.success) {
+      return sendProblem(reply, problems.invalidRequest(requestErrors(params, query)));
+    }
+
+    const withdrawal = await getWithdrawalInAccount(
+      deps.pool,
+      params.data.account_id,
+      params.data.withdrawal_id,
+    );
     if (withdrawal === undefined) return sendProblem(reply, problems.withdrawalNotFound());
 
     if (query.data.include !== 'history') return reply.send(toWithdrawalResponse(withdrawal));
     const history = await withdrawalStatusHistory(deps.pool, withdrawal.id);
-    return reply.send({
-      ...toWithdrawalResponse(withdrawal),
-      history: history.map(toWithdrawalStatusChangeResponse),
-    });
+    return reply.send(toWithdrawalResponse(withdrawal, history));
   });
 }

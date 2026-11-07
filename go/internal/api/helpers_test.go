@@ -57,6 +57,25 @@ func (r response) json(t *testing.T) map[string]any {
 	return v
 }
 
+// objects returns the JSON array under key in v (a decoded JSON object), each item an object.
+// Fatal, to this test only, if there is none or it holds something else: a panic would stop the
+// package's other tests too (a type assertion that fails without its ok form panics), so an
+// unexpected response, e.g. a 500 problem where a list was due, would hide every later result.
+func objects(t *testing.T, v map[string]any, key string) []map[string]any {
+	t.Helper()
+	list, ok := v[key].([]any)
+	if !ok {
+		t.Fatalf("no %s array in %v", key, v)
+	}
+	found := make([]map[string]any, len(list))
+	for i, item := range list {
+		if found[i], ok = item.(map[string]any); !ok {
+			t.Fatalf("%s[%d] is not an object: %v", key, i, item)
+		}
+	}
+	return found
+}
+
 // do sends a request through the handler with net/http/httptest: NewRequest builds an incoming
 // request, as the server would have parsed it, and NewRecorder is a ResponseWriter that keeps
 // what's written. No network: the counterpart of Fastify's inject.
@@ -120,6 +139,26 @@ func process(t *testing.T, pool *pgxpool.Pool, deposit ids.DepositID, decision d
 			return err
 		}
 		_, err := ledger.PostDecision(ctx, tx, deposit)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// decideOnly takes a deposit through the lifecycle to its decision without posting it: approved
+// or rejected, not yet credited or returned.
+func decideOnly(t *testing.T, pool *pgxpool.Pool, deposit ids.DepositID, decision deposits.Transition, reason string) {
+	t.Helper()
+	ctx := context.Background()
+	err := db.InTx(ctx, pool, func(tx db.Tx) error {
+		if _, err := ledger.Book(ctx, tx, deposit); err != nil {
+			return err
+		}
+		if _, _, err := deposits.TransitionStatus(ctx, tx, deposit, deposits.StartReview, ""); err != nil {
+			return err
+		}
+		_, _, err := deposits.TransitionStatus(ctx, tx, deposit, decision, reason)
 		return err
 	})
 	if err != nil {

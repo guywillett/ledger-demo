@@ -10,14 +10,16 @@
 #
 # Starts api-other (the compose profile "differential", host port 3001) in the implementation
 # opposite to the running api's (API_IMPL, node by default), and sends each request to both:
-# balances, every page of each demo account's transactions (each page's cursor used on the other
-# implementation too), the query parameters' edge cases, withdrawals in each final status, unknown
-# and malformed IDs, unknown routes and wrong methods, and replays of the demo's withdrawal requests
-# (the same key and body, then the same key and another amount: writes that change nothing). It
-# compares the status code, the body byte for byte, and the headers: names case-insensitively,
-# ignoring date, x-request-id and the transport headers. A difference is printed (the request, the
-# headers side by side, a diff of the bodies) and the check carries on. Stops api-other however it
-# ends.
+# the health check, the accounts, balances, every page of each demo account's deposits (each
+# page's cursor used on the other implementation too, filtered and not), the query parameters' and
+# the filters' edge cases, single deposits (found, another account's, unknown, malformed IDs),
+# the same for withdrawals (every page of each account's list, the status filter, withdrawals in
+# each final status), every page of each account's transactions (both kinds' cursors), unknown and malformed IDs, unknown routes and wrong methods,
+# and replays of the demo's withdrawal requests (the same key and body, then the same key and
+# another amount: writes that change nothing). It compares the status code, the body byte for
+# byte, and the headers: names case-insensitively, ignoring date, x-request-id and the transport
+# headers. A difference is printed (the request, the headers side by side, a diff of the bodies)
+# and the check carries on. Stops api-other however it ends.
 #
 # Exit codes, as the other scripts': 0 every response the same; 1 a difference, or a request there
 # to succeed (a page, a replay) that didn't; 3 couldn't run (an API isn't up, or too little data:
@@ -134,98 +136,91 @@ field() {
   printf '%s' "$1" | grep -oE "\"$2\":(\"[^\"\\\\]*\"|null)" | head -1 | sed 's/^"[^"]*"://; s/^"//; s/"$//' || true
 }
 
-# typeid_suffix <uuid>: the UUID's TypeID suffix (without the prefix): two zero bits, then the 128
-# bits, five at a time in Crockford's base32, lower case: 26 characters.
-typeid_suffix() {
-  printf '%s\n' "$1" | awk '
-    BEGIN {
-      split("0000 0001 0010 0011 0100 0101 0110 0111 1000 1001 1010 1011 1100 1101 1110 1111", b, " ")
-      split("0 1 2 3 4 5 6 7 8 9 a b c d e f", h, " ")
-      for (i = 1; i <= 16; i++) nibble[h[i]] = b[i]
-      alphabet = "0123456789abcdefghjkmnpqrstvwxyz"
-    }
-    {
-      hex = tolower($1)
-      gsub(/-/, "", hex)
-      bits = "00"
-      for (i = 1; i <= 32; i++) bits = bits nibble[substr(hex, i, 1)]
-      out = ""
-      for (i = 1; i <= 130; i += 5) {
-        n = 0
-        for (j = 0; j < 5; j++) n = n * 2 + substr(bits, i + j, 1)
-        out = out substr(alphabet, n + 1, 1)
-      }
-      print out
-    }'
-}
-
 # A well-formed ID that names nothing: the same prefix and a different last character (the low
 # bits of the random part, so still a UUIDv7).
 unknown_id() {
   case "$1" in *0) printf '%s1' "${1%?}" ;; *) printf '%s0' "${1%?}" ;; esac
 }
 
-curl -sf -o /dev/null "$API/accounts/$ALICE/balance" ||
-  { echo "The API isn't answering at $API: run docker compose up -d --build first."; exit 3; }
+curl -sf -o /dev/null "$API/health" ||
+  { echo "The API isn't ready at $API: run docker compose up -d --build first."; exit 3; }
+
+# first_id <path>: the ID of the first item in the api's list at the path; nothing if it's empty.
+first_id() { field "$(curl -s "$API$1")" id; }
 
 say "What there is to compare"
-# Every deposit of the demo accounts, read from the api a page of 200 at a time.
-statuses=""
-deposit_ids=""
-multi_page=0
-for account in $ACCOUNTS; do
-  before=""
-  count=0
-  while :; do
-    body=$(curl -s "$API/accounts/$account/transactions?limit=200${before:+&before=$before}")
-    statuses="$statuses $(printf '%s' "$body" | grep -o '"status":"[a-z_]*"' | sed 's/.*:"//; s/"//' | tr '\n' ' ')"
-    ids=$(printf '%s' "$body" | grep -o '"id":"dep_[0-9a-z]*"' | sed 's/.*:"//; s/"//' | tr '\n' ' ')
-    deposit_ids="$deposit_ids $ids"
-    count=$((count + $(printf '%s\n' $ids | grep -c . || true)))
-    before=$(field "$body" next_before)
-    [ -z "$before" ] || [ "$before" = null ] && break
-  done
-  [ "$count" -gt "$PAGE" ] && multi_page=$((multi_page + 1))
-done
-for s in created received under_review approved rejected; do
-  case " $statuses " in *" $s "*) too_little "a deposit is still $s: wait until every deposit has finished" ;; esac
-done
-deposit_statuses=""
-for s in credited returned; do
-  case " $statuses " in *" $s "*) deposit_statuses="$deposit_statuses $s" ;; *) too_little "no $s deposit" ;; esac
-done
-[ "$multi_page" -gt 0 ] || too_little "no account has more than $PAGE deposits, so no list takes several pages"
-
-# Withdrawals can't be listed through the API: their IDs are read from the database (as
-# reconciliation reads it), which depends on neither API under test. Not from provider-sim's log,
-# as demo.sh finds them: that holds only what the current provider-sim container has seen.
-withdrawals=$(docker compose exec -T postgres psql -U ledger -d ledger -Atc \
-  "SELECT status, id FROM withdrawals ORDER BY id" 2>/dev/null | tr '|' ' ') ||
-  { echo "Couldn't read the withdrawals from the database (is postgres up?)"; exit 3; }
+# Through the lists' status filters, for each demo account: no deposit or withdrawal still in
+# progress (one changing between the two APIs' answers would be a false difference), one of each
+# final status for the single reads (as "<account> <id>"), and an account whose list takes several
+# pages.
+credited_deposit=""
+returned_deposit=""
 executed=""
 failed=""
-while read -r status uuid; do
-  [ -n "$uuid" ] || continue
-  id="wd_$(typeid_suffix "$uuid")"
-  case "$status" in
-    executed) [ -n "$executed" ] || executed=$id ;;
-    failed) [ -n "$failed" ] || failed=$id ;;
-    *) too_little "withdrawal $id is still $status: wait until it has finished" ;;
+multi_page=0
+for account in $ACCOUNTS; do
+  for s in created received under_review approved rejected; do
+    [ -z "$(first_id "/accounts/$account/deposits?status=$s&limit=1")" ] ||
+      too_little "a deposit of $account is still $s: wait until every deposit has finished"
+  done
+  for s in held submitted; do
+    [ -z "$(first_id "/accounts/$account/withdrawals?status=$s&limit=1")" ] ||
+      too_little "a withdrawal of $account is still $s: wait until it has finished"
+  done
+  id=$(first_id "/accounts/$account/deposits?status=credited&limit=1")
+  [ -n "$credited_deposit" ] || [ -z "$id" ] || credited_deposit="$account $id"
+  id=$(first_id "/accounts/$account/deposits?status=returned&limit=1")
+  [ -n "$returned_deposit" ] || [ -z "$id" ] || returned_deposit="$account $id"
+  id=$(first_id "/accounts/$account/withdrawals?status=executed&limit=1")
+  [ -n "$executed" ] || [ -z "$id" ] || executed="$account $id"
+  id=$(first_id "/accounts/$account/withdrawals?status=failed&limit=1")
+  [ -n "$failed" ] || [ -z "$id" ] || failed="$account $id"
+  # More than one page: the first page names a next one.
+  case "$(field "$(curl -s "$API/accounts/$account/deposits?limit=$PAGE")" next_before)" in
+    dep_*) multi_page=$((multi_page + 1)) ;;
   esac
-done <<< "$withdrawals"
+done
+[ -n "$credited_deposit" ] || too_little "no credited deposit"
+[ -n "$returned_deposit" ] || too_little "no returned deposit"
 [ -n "$executed" ] || too_little "no executed withdrawal"
 [ -n "$failed" ] || too_little "no failed withdrawal"
-first_deposit=$(printf '%s\n' $deposit_ids | head -1)
-echo "   deposits:$deposit_statuses; withdrawals: executed $executed, failed $failed"
+[ "$multi_page" -gt 0 ] || too_little "no account has more than $PAGE deposits, so no list takes several pages"
+# alice's newest deposit: its ID, for the cursors' edge cases, and its network_transaction_id,
+# for the filter.
+newest=$(curl -s "$API/accounts/$ALICE/deposits?limit=1")
+first_deposit=$(field "$newest" id)
+first_ntx=$(field "$newest" network_transaction_id)
+[ -n "$first_deposit" ] || too_little "alice has no deposits"
+echo "   deposits: credited ${credited_deposit#* }, returned ${returned_deposit#* };" \
+  "withdrawals: executed ${executed#* }, failed ${failed#* }"
 
 say "Starting a $other_impl API beside the $main_impl one, on port ${API_OTHER##*:}"
 docker compose --profile differential up -d --no-deps api-other > /dev/null 2>&1
 deadline=$((SECONDS + 60))
-until curl -sf -o /dev/null "$API_OTHER/accounts/$ALICE/balance"; do
-  [ "$SECONDS" -lt "$deadline" ] || { echo "   api-other isn't answering at $API_OTHER"; exit 3; }
+until curl -sf -o /dev/null "$API_OTHER/health"; do
+  [ "$SECONDS" -lt "$deadline" ] || { echo "   api-other isn't ready at $API_OTHER"; exit 3; }
   sleep 1
 done
 echo "   started"
+
+say "Health"
+# Ready only: a 503 needs a database that doesn't answer, which this stack can't arrange.
+compare GET /health
+expect_status 200
+compare HEAD /health
+
+say "Accounts"
+for account in $ACCOUNTS; do
+  compare GET "/accounts/$account"
+  expect_status 200
+done
+compare HEAD "/accounts/$ALICE"
+compare GET "/accounts/$(unknown_id "$ALICE")"
+for id in nope acct_123 "acct_${ALICE#acct_}x" "$(printf '%s' "$ALICE" | tr 'a-z' 'A-Z')" \
+  "acct_8${ALICE#acct_?}" "pay_${ALICE#acct_}" "dep_${ALICE#acct_}" "wd_${ALICE#acct_}" \
+  "${ALICE#acct_}" "acct_" "acct%5F${ALICE#acct_}"; do
+  compare GET "/accounts/$id"
+done
 
 say "Balances"
 for account in $ACCOUNTS; do
@@ -240,13 +235,14 @@ for id in nope acct_123 "acct_${ALICE#acct_}x" "$(printf '%s' "$ALICE" | tr 'a-z
   compare GET "/accounts/$id/balance"
 done
 
-say "Transactions: every page, each cursor used on both implementations"
-# walk <account> <query> <first side: a|b>: every page, taking the next page's cursor alternately
-# from one implementation's answer and the other's (both receive every page's request).
+say "Deposits: every page, each cursor used on both implementations"
+# walk <list path> <query> <first side: a|b>: every page, taking the next page's cursor
+# alternately from one implementation's answer and the other's (both receive every page's
+# request).
 walk() {
   local before="" side=$3 pages=0
   while [ "$pages" -lt 500 ]; do
-    compare GET "/accounts/$1/transactions?$2${before:+&before=$before}"
+    compare GET "$1?$2${before:+&before=$before}"
     expect_status 200
     pages=$((pages + 1))
     before=$(field "$(cat "$work/$side.body")" next_before)
@@ -256,45 +252,162 @@ walk() {
 }
 for account in $ACCOUNTS; do
   for first in a b; do
-    walk "$account" "limit=$PAGE" "$first"
-    walk "$account" "limit=$PAGE&include=history" "$first"
+    walk "/accounts/$account/deposits" "limit=$PAGE" "$first"
+    walk "/accounts/$account/deposits" "limit=$PAGE&include=history" "$first"
+    # Filtered: the cursors are the filtered pages' own (slice 4 decision 70).
+    walk "/accounts/$account/deposits" "limit=3&status=credited" "$first"
+    walk "/accounts/$account/deposits" "limit=3&status=returned" "$first"
   done
-  walk "$account" "" a
+  walk "/accounts/$account/deposits" "" a
 done
 
-say "Transactions: query parameters"
-T="/accounts/$ALICE/transactions"
+say "Deposits: query parameters"
+T="/accounts/$ALICE/deposits"
 for q in limit=0 limit=1 limit=200 limit=201 limit=abc limit=-1 limit=1.5 limit= limit=01 \
   "limit=1&limit=2" limit=%31 limit=99999999999999999999 \
   before=nope "before=wd_${first_deposit#dep_}" "before=dep_8${first_deposit#dep_?}" \
   "before=$(unknown_id "$first_deposit")" "before=$first_deposit" before= \
+  "before=$first_deposit&before=$first_deposit" \
   include=history include=nope include= "include=history&include=history" foo=bar \
   "limit=1&foo=bar"; do
   compare GET "$T?$q"
 done
 compare HEAD "$T?limit=1"
-compare GET "/accounts/$(unknown_id "$ALICE")/transactions"
-compare GET "/accounts/nope/transactions"
-compare GET "/accounts/dep_${ALICE#acct_}/transactions"
 
-say "Withdrawals"
-for id in "$executed" "$failed"; do
-  compare GET "/withdrawals/$id"
+say "Deposits: filters"
+# Every status an account's deposit can have (the demo's data has credited and returned; the rest
+# are valid and absent), then the invalid ones: unmatched, unknown, empty, repeated.
+for status in created received under_review approved rejected credited returned; do
+  compare GET "$T?status=$status"
   expect_status 200
-  compare GET "/withdrawals/$id?include=history"
+done
+for q in status=unmatched status=nope status= status=CREDITED "status=credited&status=returned"; do
+  compare GET "$T?$q"
+done
+# network_transaction_id: matching, a valid one that matches nothing, the same with a status that
+# does and one that doesn't, and the invalid ones (empty, 256 characters, repeated).
+compare GET "$T?network_transaction_id=$first_ntx"
+expect_status 200
+compare GET "$T?network_transaction_id=no-such-reference"
+expect_status 200
+for status in credited returned; do
+  compare GET "$T?network_transaction_id=$first_ntx&status=$status"
+done
+compare GET "$T?network_transaction_id="
+compare GET "$T?network_transaction_id=$(printf 'x%.0s' $(seq 1 256))"
+compare GET "$T?network_transaction_id=a&network_transaction_id=b"
+compare GET "/accounts/nope/deposits?network_transaction_id=&status=nope&include=x&before=nope&limit=0"
+compare GET "/accounts/$(unknown_id "$ALICE")/deposits"
+compare GET "/accounts/nope/deposits"
+compare GET "/accounts/dep_${ALICE#acct_}/deposits"
+
+say "Single deposits"
+for pair in "$credited_deposit" "$returned_deposit"; do
+  read -r account id <<< "$pair"
+  compare GET "/accounts/$account/deposits/$id"
   expect_status 200
-  compare GET "/withdrawals/$id?include=nope"
-  compare GET "/withdrawals/$id?foo=bar"
+  compare GET "/accounts/$account/deposits/$id?include=history"
+  expect_status 200
+  for q in include=nope include= "include=history&include=history" foo=bar limit=0 before=nope; do
+    compare GET "/accounts/$account/deposits/$id?$q"
+  done
 done
-compare HEAD "/withdrawals/$executed"
-for id in "$(unknown_id "$executed")" nope wd_123 "dep_${executed#wd_}" "acct_${executed#wd_}" \
-  "wd_8${executed#wd_?}" "$(printf '%s' "$executed" | tr 'a-z' 'A-Z')" "${executed#wd_}"; do
-  compare GET "/withdrawals/$id"
+read -r account id <<< "$credited_deposit"
+compare HEAD "/accounts/$account/deposits/$id"
+# Another account's deposit, a real deposit under an unknown account, an unknown deposit.
+for other in $ACCOUNTS; do
+  [ "$other" = "$account" ] || compare GET "/accounts/$other/deposits/$id"
 done
+compare GET "/accounts/$(unknown_id "$account")/deposits/$id"
+compare GET "/accounts/$account/deposits/$(unknown_id "$id")"
+for bad in nope dep_123 "dep_${id#dep_}x" "$(printf '%s' "$id" | tr 'a-z' 'A-Z')" "dep_8${id#dep_?}" \
+  "wd_${id#dep_}" "acct_${id#dep_}" "${id#dep_}" "dep_" "dep%5F${id#dep_}"; do
+  compare GET "/accounts/$account/deposits/$bad"
+done
+compare GET "/accounts/nope/deposits/nope?include=nope"
+
+say "Withdrawals: every page, each cursor used on both implementations"
+for account in $ACCOUNTS; do
+  for first in a b; do
+    walk "/accounts/$account/withdrawals" "limit=2" "$first"
+    walk "/accounts/$account/withdrawals" "limit=2&include=history" "$first"
+    walk "/accounts/$account/withdrawals" "limit=2&status=executed" "$first"
+  done
+  walk "/accounts/$account/withdrawals" "" a
+done
+
+say "Withdrawals: query parameters and the status filter"
+read -r account id <<< "$executed"
+W="/accounts/$account/withdrawals"
+for status in held submitted executed failed; do
+  compare GET "$W?status=$status"
+  expect_status 200
+done
+for q in status=nope status= status=HELD "status=held&status=failed" status=unmatched limit=0 \
+  limit=201 limit=abc before=nope "before=dep_${id#wd_}" "before=$(unknown_id "$id")" "before=$id" \
+  "before=$id&before=$id" \
+  include=history include=nope "include=history&include=history" foo=bar; do
+  compare GET "$W?$q"
+done
+compare HEAD "$W?limit=1"
+compare GET "/accounts/$(unknown_id "$account")/withdrawals"
+compare GET "/accounts/nope/withdrawals?status=nope&include=x&before=nope&limit=0"
+
+say "Single withdrawals"
+for pair in "$executed" "$failed"; do
+  read -r account id <<< "$pair"
+  compare GET "/accounts/$account/withdrawals/$id"
+  expect_status 200
+  compare GET "/accounts/$account/withdrawals/$id?include=history"
+  expect_status 200
+  for q in include=nope foo=bar limit=0 status=nope; do
+    compare GET "/accounts/$account/withdrawals/$id?$q"
+  done
+done
+read -r account id <<< "$executed"
+compare HEAD "/accounts/$account/withdrawals/$id"
+# Another account's withdrawal, a real withdrawal under an unknown account, an unknown withdrawal.
+for other in $ACCOUNTS; do
+  [ "$other" = "$account" ] || compare GET "/accounts/$other/withdrawals/$id"
+done
+compare GET "/accounts/$(unknown_id "$account")/withdrawals/$id"
+compare GET "/accounts/$account/withdrawals/$(unknown_id "$id")"
+for bad in nope wd_123 "dep_${id#wd_}" "acct_${id#wd_}" "wd_8${id#wd_?}" \
+  "$(printf '%s' "$id" | tr 'a-z' 'A-Z')" "${id#wd_}"; do
+  compare GET "/accounts/$account/withdrawals/$bad"
+done
+compare GET "/accounts/nope/withdrawals/nope?include=nope"
+
+say "Transactions: every page, each cursor used on both implementations"
+# Deposits and withdrawals together (slice 4 decision 67): carol's list has both, so a small page
+# gives cursors of both kinds, each taken alternately from one implementation's answer.
+for account in $ACCOUNTS; do
+  for first in a b; do
+    walk "/accounts/$account/transactions" "limit=3" "$first"
+  done
+  walk "/accounts/$account/transactions" "" a
+done
+
+say "Transactions: query parameters"
+read -r account withdrawal <<< "$executed"
+T="/accounts/$account/transactions"
+# before of each kind, of another account (a position: decision 66), naming nothing, and the
+# invalid ones; limit's edges; include and the filters, which this list ignores.
+for q in "before=$withdrawal" "before=$first_deposit" "before=$(unknown_id "$withdrawal")" \
+  "before=$(unknown_id "$first_deposit")" before=nope before= "before=dep_x" "before=acct_${withdrawal#wd_}" \
+  "before=$(printf '%s' "$withdrawal" | tr 'a-z' 'A-Z')" "before=$withdrawal&before=$first_deposit" \
+  limit=0 limit=1 limit=200 limit=201 limit=abc "limit=1&limit=2" \
+  include=history status=held "network_transaction_id=x&include=history"; do
+  compare GET "$T?$q"
+done
+compare HEAD "$T?limit=1"
+compare GET "/accounts/$(unknown_id "$account")/transactions"
+compare GET "/accounts/nope/transactions?before=nope&limit=0"
 
 say "Unknown routes and wrong methods"
-for path in / /nope /accounts "/accounts/$ALICE" "/accounts/$ALICE/" "/accounts/$ALICE/balance/" \
-  "/accounts/$ALICE/nope" /withdrawals /withdrawals/ "/withdrawals/$executed/" \
+for path in / /nope /accounts "/accounts/$ALICE/" "/accounts/$ALICE/balance/" \
+  "/accounts/$ALICE/nope" /withdrawals /withdrawals/ "/withdrawals/${executed#* }" \
+  "/accounts/${executed% *}/withdrawals/${executed#* }/" "/accounts/$ALICE/withdrawals/" \
   "/Accounts/$ALICE/balance" /accounts//balance "//accounts/$ALICE/balance" \
   "/accounts/$ALICE/../$BOB/balance" /provider /provider/nope; do
   compare GET "$path"
@@ -302,10 +415,10 @@ done
 for m in POST PUT PATCH DELETE OPTIONS; do
   compare "$m" "/accounts/$ALICE/balance"
 done
+compare POST "/accounts/$ALICE/deposits"
 compare POST "/accounts/$ALICE/transactions"
-compare DELETE "/withdrawals/$executed"
-compare PUT "/withdrawals/$executed"
-compare GET "/accounts/$ALICE/withdrawals"
+compare DELETE "/accounts/${executed% *}/withdrawals/${executed#* }"
+compare PUT "/accounts/${executed% *}/withdrawals/${executed#* }"
 compare PUT "/accounts/$ALICE/withdrawals"
 compare GET /provider/incoming-payments
 compare GET /provider/transfer-updates
@@ -315,9 +428,9 @@ say "Replays of the demo's withdrawal requests"
 # The request rebuilt from the withdrawal's own fields (the response holds every field of the
 # request): the same key and body returns the stored withdrawal (200), the same key with another
 # amount the reuse error (409). Neither stores anything.
-for id in "$executed" "$failed"; do
-  w=$(curl -s "$API/withdrawals/$id")
-  account=$(field "$w" account_id)
+for pair in "$executed" "$failed"; do
+  read -r account id <<< "$pair"
+  w=$(curl -s "$API/accounts/$account/withdrawals/$id")
   key=$(field "$w" idempotency_key)
   amount=$(field "$w" amount_minor)
   remittance=$(field "$w" remittance_info)

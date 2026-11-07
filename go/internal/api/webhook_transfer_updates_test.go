@@ -21,7 +21,9 @@ import (
 // node/test/api/transfer-updates.test.ts, and the transfer-updates row of body-errors.test.ts.
 // Every answer to a parseable update is 204 with no body, whatever it did, so each test asserts the
 // recorded effects: the transfer_updates row, balances, movements, the log line. Every response is
-// checked against the contract (postRaw).
+// checked against the contract (postRaw). The withdrawal and the balance are read through the
+// client API; provider_transfer_id, which it doesn't show (slice 4 decision 69), the
+// transfer_updates rows and the movements from the database.
 
 const transferUpdates = "/provider/transfer-updates"
 
@@ -116,17 +118,27 @@ WHERE reference_type = 'withdrawal' AND reference_id = $1 ORDER BY created_at, i
 	return steps
 }
 
-func storedWithdrawal(
-	t *testing.T,
-	pool *pgxpool.Pool,
-	id ids.WithdrawalID,
-) withdrawals.Withdrawal {
+// shown is the withdrawal as the client API shows it.
+func (a testAPI) shown(t *testing.T, w testWithdrawal) map[string]any {
+	t.Helper()
+	r := a.get(t, withdrawalPath(w.account.ID, w.id.TypeID(), ""))
+	if r.status != 200 {
+		t.Fatalf("withdrawal %v: %d %s", w.id, r.status, r.body)
+	}
+	return r.json(t)
+}
+
+// storedTransferID is the transfer ID stored on the withdrawal: not in the client API (decision 69).
+func storedTransferID(t *testing.T, pool *pgxpool.Pool, id ids.WithdrawalID) string {
 	t.Helper()
 	w, found, err := withdrawals.Get(context.Background(), pool, id)
 	if err != nil || !found {
 		t.Fatalf("withdrawal %v: %v %v", id, found, err)
 	}
-	return w
+	if w.ProviderTransferID == nil {
+		return ""
+	}
+	return string(*w.ProviderTransferID)
 }
 
 // updateLog is the last log line about this provider event (not the access log's).
@@ -153,12 +165,10 @@ func TestExecutesASubmittedWithdrawal(t *testing.T) {
 		*row.withdrawal != w.id.UUID().String() {
 		t.Errorf("row %+v", row)
 	}
-	got := storedWithdrawal(t, a.pool, w.id)
-	if got.Status != withdrawals.StatusExecuted || got.ProviderTransferID == nil ||
-		*got.ProviderTransferID != "tr_1" {
-		t.Errorf("withdrawal %+v", got)
+	if got := a.shown(t, w); got["status"] != "executed" || storedTransferID(t, a.pool, w.id) != "tr_1" {
+		t.Errorf("withdrawal %v, transfer ID %q", got, storedTransferID(t, a.pool, w.id))
 	}
-	if b := balancesOf(t, a.pool, w.account); b != (balanceRow{0, 600, 0}) {
+	if b := a.apiBalances(t, w.account); b != (balanceRow{0, 600, 0}) {
 		t.Errorf("balances %+v", b)
 	}
 	if s := stepsOf(t, a.pool, w.id); !slices.Equal(s, []string{"hold", "execute"}) {
@@ -181,12 +191,10 @@ func TestReleasesAFailedOneFundsBackInAvailableTheReasonStored(t *testing.T) {
 	if row.outcome != "applied" {
 		t.Errorf("row %+v", row)
 	}
-	got := storedWithdrawal(t, a.pool, w.id)
-	if got.Status != withdrawals.StatusFailed || got.FailureReason == nil ||
-		*got.FailureReason != "beneficiary account closed" {
-		t.Errorf("withdrawal %+v", got)
+	if got := a.shown(t, w); got["status"] != "failed" || got["failure_reason"] != "beneficiary account closed" {
+		t.Errorf("withdrawal %v", got)
 	}
-	if b := balancesOf(t, a.pool, w.account); b != (balanceRow{0, 1000, 0}) {
+	if b := a.apiBalances(t, w.account); b != (balanceRow{0, 1000, 0}) {
 		t.Errorf("balances %+v", b)
 	}
 	if s := stepsOf(t, a.pool, w.id); !slices.Equal(s, []string{"hold", "release"}) {
@@ -209,9 +217,8 @@ func TestAppliesAnUpdateThatOvertakesTheSubmitterTheLateMarkSubmittedSkips(t *te
 	if err != nil || late != ledger.Skipped {
 		t.Errorf("late MarkSubmitted: %v %v", late, err)
 	}
-	got := storedWithdrawal(t, a.pool, w.id)
-	if got.Status != withdrawals.StatusExecuted || *got.ProviderTransferID != "tr_1" {
-		t.Errorf("withdrawal %+v", got)
+	if got := a.shown(t, w); got["status"] != "executed" || storedTransferID(t, a.pool, w.id) != "tr_1" {
+		t.Errorf("withdrawal %v, transfer ID %q", got, storedTransferID(t, a.pool, w.id))
 	}
 }
 
@@ -282,8 +289,8 @@ func TestRecordsFailedAfterExecutedAsAConflictMovingNothingAndAlerts(t *testing.
 	if row.outcome != "conflict" {
 		t.Errorf("row %+v", row)
 	}
-	if s := storedWithdrawal(t, a.pool, w.id).Status; s != withdrawals.StatusExecuted {
-		t.Errorf("status %s", s)
+	if s := a.shown(t, w)["status"]; s != "executed" {
+		t.Errorf("status %v", s)
 	}
 	if s := stepsOf(t, a.pool, w.id); !slices.Equal(s, []string{"hold", "execute"}) {
 		t.Errorf("steps %v", s)
@@ -308,9 +315,8 @@ func TestRecordsATransferIDMismatchAsAConflictMovingNothing(t *testing.T) {
 	if row.outcome != "conflict" {
 		t.Errorf("row %+v", row)
 	}
-	got := storedWithdrawal(t, a.pool, w.id)
-	if got.Status != withdrawals.StatusSubmitted || *got.ProviderTransferID != "tr_1" {
-		t.Errorf("withdrawal %+v", got)
+	if got := a.shown(t, w); got["status"] != "submitted" || storedTransferID(t, a.pool, w.id) != "tr_1" {
+		t.Errorf("withdrawal %v, transfer ID %q", got, storedTransferID(t, a.pool, w.id))
 	}
 	if s := stepsOf(t, a.pool, w.id); !slices.Equal(s, []string{"hold"}) {
 		t.Errorf("steps %v", s)
@@ -365,7 +371,7 @@ func TestAnswers400RecordingNothing(t *testing.T) {
 		if _, found := updateRowOf(t, a.pool, u["provider_event_id"]); found {
 			t.Errorf("%s: recorded", name)
 		}
-		if s := storedWithdrawal(t, a.pool, w.id).Status; s != withdrawals.StatusSubmitted {
+		if s := a.shown(t, w)["status"]; s != "submitted" {
 			t.Errorf("%s: status %s", name, s)
 		}
 	}
@@ -402,7 +408,7 @@ func TestAnswers500ForAnInvariantViolationRollingEverythingBackAndAlerts(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := balancesOf(t, a.pool, w.account)
+	before := a.apiBalances(t, w.account)
 	u := update(w, nil)
 	if status := a.postUpdate(t, u); status != 500 {
 		t.Fatalf("status %d", status)
@@ -410,10 +416,10 @@ func TestAnswers500ForAnInvariantViolationRollingEverythingBackAndAlerts(t *test
 	if _, found := updateRowOf(t, a.pool, u["provider_event_id"]); found {
 		t.Error("recorded despite the rollback")
 	}
-	if s := storedWithdrawal(t, a.pool, w.id).Status; s != withdrawals.StatusSubmitted {
-		t.Errorf("status %s", s)
+	if s := a.shown(t, w)["status"]; s != "submitted" {
+		t.Errorf("status %v", s)
 	}
-	if b := balancesOf(t, a.pool, w.account); b != before {
+	if b := a.apiBalances(t, w.account); b != before {
 		t.Errorf("balances %+v, before %+v", b, before)
 	}
 	line := a.updateLog(t, u["provider_event_id"])

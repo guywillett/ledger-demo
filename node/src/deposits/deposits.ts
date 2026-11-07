@@ -2,6 +2,7 @@ import type { Queryable } from '../shared/db.ts';
 import type { Iban } from '../shared/iban.ts';
 import type { Uuid } from '../shared/ids.ts';
 import { parseStatus, type BookedStatus } from './status.ts';
+import { accountExists } from '../accounts/accounts.ts';
 
 // The deposit entity and how it is read. Its lifecycle and the transitions that move it
 // along are in status.ts; recording a provider notification as a new deposit is in
@@ -109,43 +110,90 @@ export type DepositPage = {
   readonly nextBefore: Uuid<'dep'> | null;
 };
 
-const ACCOUNT_EXISTS_SQL = 'SELECT 1 FROM accounts WHERE id = $1';
-
 // Seek pagination on the deposit ID: UUIDv7 IDs sort by creation time, so "older than the
-// last one seen" is `id < $before`, served by the (account_id, id DESC) index. Two fixed
-// statements rather than one with an optional condition, which keeps each one simple to plan.
-const FIRST_PAGE_SQL = `
+// last one seen" is `id < $before`, served by the (account_id, id DESC) index. The filters
+// (slice 4 decision 70) are further conditions on the same index's rows: status is checked row
+// by row (a known gap if accounts grow large).
+//
+// One statement assembled from fixed fragments, one per condition present, each with its own
+// placeholder: the values are always parameters, never part of the SQL text. A condition left
+// out entirely, rather than written as `($n IS NULL OR …)`, keeps each statement as simple to
+// plan as the two fixed ones it replaces.
+function listSql(conditions: readonly string[]): string {
+  return `
 SELECT * FROM deposits
-WHERE account_id = $1
+WHERE ${conditions.join(' AND ')}
 ORDER BY id DESC
-LIMIT $2
+LIMIT $1
 `;
-const NEXT_PAGE_SQL = `
-SELECT * FROM deposits
-WHERE account_id = $1 AND id < $3
-ORDER BY id DESC
-LIMIT $2
-`;
+}
+
+export type DepositFilters = {
+  readonly status?: BookedStatus;
+  readonly networkTransactionId?: string;
+};
 
 // undefined if there is no such account (an account without deposits gets an empty page).
-// The existence check is a read before a read: nothing is written based on it.
+// The existence check is a read before a read: nothing is written based on it. The filters and
+// the cursor apply together, so a page holds the next matching deposits older than `before`, and
+// nextBefore is the last of them.
 export async function listDeposits(
   db: Queryable,
   accountId: Uuid<'acct'>,
-  page: { readonly limit: number; readonly before?: Uuid<'dep'> },
+  page: { readonly limit: number; readonly before?: Uuid<'dep'> } & DepositFilters,
 ): Promise<DepositPage | undefined> {
-  const account = await db.query(ACCOUNT_EXISTS_SQL, [accountId]);
-  if (account.rowCount === 0) return undefined;
+  if (!(await accountExists(db, accountId))) return undefined;
 
   // One more than the page size, to know whether there is a next page.
-  const params: unknown[] = [accountId, page.limit + 1];
-  const sql = page.before === undefined ? FIRST_PAGE_SQL : NEXT_PAGE_SQL;
-  if (page.before !== undefined) params.push(page.before);
-  const result = await db.query<DepositRow>(sql, params);
+  const params: unknown[] = [page.limit + 1];
+  const conditions: string[] = [];
+  // Each condition's fragment takes the next placeholder: $2, $3, … in the order pushed.
+  const where = (fragment: (placeholder: string) => string, value: unknown): void => {
+    params.push(value);
+    conditions.push(fragment(`$${params.length}`));
+  };
+  where((p) => `account_id = ${p}`, accountId);
+  if (page.before !== undefined) where((p) => `id < ${p}`, page.before);
+  if (page.status !== undefined) where((p) => `status = ${p}`, page.status);
+  if (page.networkTransactionId !== undefined) {
+    where((p) => `network_transaction_id = ${p}`, page.networkTransactionId);
+  }
+  const result = await db.query<DepositRow>(listSql(conditions), params);
 
   const deposits = result.rows.slice(0, page.limit).map(depositFromRow);
   const hasMore = result.rows.length > page.limit;
   return { deposits, nextBefore: hasMore ? (deposits.at(-1)?.id ?? null) : null };
+}
+
+// The deposit within its account (slice 4 decision 64): one statement, so "no such deposit" and
+// "another account's deposit" are the same answer, decided by the database.
+const GET_SQL = 'SELECT * FROM deposits WHERE id = $1 AND account_id = $2';
+
+// undefined if the account has no such deposit.
+export async function getDeposit(
+  db: Queryable,
+  accountId: Uuid<'acct'>,
+  depositId: Uuid<'dep'>,
+): Promise<Deposit | undefined> {
+  const result = await db.query<DepositRow>(GET_SQL, [depositId, accountId]);
+  const row = result.rows[0];
+  return row === undefined ? undefined : depositFromRow(row);
+}
+
+// Several of the account's deposits by ID, one statement (for the transactions list, which has
+// decided its page on IDs alone: transactions/transactions.ts).
+const GET_MANY_SQL = 'SELECT * FROM deposits WHERE account_id = $1 AND id = ANY($2)';
+
+// The account's deposits among ids, in no particular order; an ID the account has no deposit for
+// is simply absent (the caller decides what that means).
+export async function getDeposits(
+  db: Queryable,
+  accountId: Uuid<'acct'>,
+  ids: readonly Uuid<'dep'>[],
+): Promise<Deposit[]> {
+  if (ids.length === 0) return [];
+  const result = await db.query<DepositRow>(GET_MANY_SQL, [accountId, ids]);
+  return result.rows.map(depositFromRow);
 }
 
 const EXISTS_SQL = 'SELECT 1 FROM deposits WHERE id = $1';

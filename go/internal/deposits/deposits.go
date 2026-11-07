@@ -53,6 +53,13 @@ func ParseStatus(s string) (Status, error) {
 	return "", fmt.Errorf("unknown deposit status in database: %q", s)
 }
 
+// BookedStatuses contains all Statuses except "unmatched", in the order matching Node's lifecycle.
+// A function, rather than a var, to prevent mutation.
+func BookedStatuses() []Status {
+	return []Status{StatusCreated, StatusReceived, StatusUnderReview, StatusApproved,
+		StatusRejected, StatusCredited, StatusReturned}
+}
+
 // Transition is one of the legal status changes, and nothing else: only the constants below exist,
 // each with its from and to status fixed in the table under them.
 //

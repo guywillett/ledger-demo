@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, describe, expect, it } from 'vitest';
+import { execute, markSubmitted, release } from '../../src/ledger/withdrawals.ts';
 import { reconcile } from '../../src/reconciliation/reconcile.ts';
+import { withTransaction } from '../../src/shared/db.ts';
 import { fromTypeId, newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { expectEventMatchesContract } from '../contract.ts';
 import {
-  balancesOf,
+  apiBalances,
+  apiWithdrawals,
   capturingLogger,
   createTestAccount,
   createTestApp,
@@ -16,13 +19,23 @@ import {
   type TestAccount,
 } from '../helpers.ts';
 
-// POST /accounts/:account_id/withdrawals and GET /withdrawals/:id against the test database.
+// POST /accounts/:account_id/withdrawals, the account's withdrawals list and the single
+// withdrawal, against the test database.
 // Every response is checked against contracts/openapi.yaml (postWithdrawal, getJson). Outbox
 // assertions look only at this test's own account or withdrawal, so this file runs in parallel
 // with the others; publishing is tested in test/relay/.
 
 const { app, pool, close } = await createTestApp();
 afterAll(close);
+
+const WITHDRAWALS = '/accounts/{account_id}/withdrawals';
+const WITHDRAWAL = '/accounts/{account_id}/withdrawals/{withdrawal_id}';
+const WITHDRAWAL_NOT_FOUND = {
+  type: 'urn:ledger-demo:problem:withdrawal-not-found',
+  title: 'Withdrawal not found',
+  status: 404,
+};
+const STATUS_MESSAGE = 'Invalid option: expected one of "held"|"submitted"|"executed"|"failed"';
 
 async function fundedAccount(amountMinor = 1000n): Promise<TestAccount> {
   const account = await createTestAccount(pool);
@@ -33,14 +46,11 @@ async function fundedAccount(amountMinor = 1000n): Promise<TestAccount> {
 const withdrawalIdOf = (response: { json: Record<string, unknown> }): Uuid<'wd'> =>
   fromTypeId('wd', String(response.json.id));
 
+// How many withdrawals the account's list shows.
 async function withdrawalsOf(account: TestAccount): Promise<number> {
-  const result = await pool.query<{ n: number }>(
-    'SELECT count(*)::int AS n FROM withdrawals WHERE account_id = $1',
-    [account.id],
-  );
-  return result.rows[0]?.n ?? 0;
+  return (await apiWithdrawals(app, account.typeId)).length;
 }
-
+// The ledger's hold movements for the account: the journal isn't in the client API.
 async function holdsOf(account: TestAccount): Promise<number> {
   const result = await pool.query<{ n: number }>(
     `SELECT count(*)::int AS n FROM balance_movements
@@ -67,7 +77,10 @@ describe('POST /accounts/:account_id/withdrawals', () => {
     const response = await postWithdrawal(app, account.typeId, withdrawalBody(), key);
 
     expect(response.statusCode).toBe(201);
+    // type first (slice 4 decision 67), in every response that carries a withdrawal.
+    expect(response.body.startsWith('{"type":"withdrawal","id":"wd_')).toBe(true);
     expect(response.json).toMatchObject({
+      type: 'withdrawal',
       id: expect.stringMatching(/^wd_/),
       account_id: account.typeId,
       idempotency_key: key,
@@ -81,13 +94,10 @@ describe('POST /accounts/:account_id/withdrawals', () => {
     });
     // Provider identifiers stay at the edge.
     expect(response.json).not.toHaveProperty('provider_transfer_id');
-    expect(response.headers.location).toBe(`/withdrawals/${String(response.json.id)}`);
+    expect(response.headers.location).toBe(
+      `/accounts/${account.typeId}/withdrawals/${String(response.json.id)}`,
+    );
 
-    expect(await balancesOf(pool, account.id)).toEqual({
-      pendingIn: 0n,
-      available: 600n,
-      held: 400n,
-    });
     expect(await holdsOf(account)).toBe(1);
     const balance = await getJson(
       app,
@@ -95,6 +105,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
       '/accounts/{account_id}/balance',
     );
     expect(balance.json).toEqual({
+      account_id: account.typeId,
       pending_in: '0',
       available: '600',
       held: '400',
@@ -141,7 +152,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
     expect(new Set(responses.map((r) => r.json.id)).size).toBe(1);
     expect(await withdrawalsOf(account)).toBe(1);
     expect(await holdsOf(account)).toBe(1);
-    expect(await balancesOf(pool, account.id)).toMatchObject({ available: 600n, held: 400n });
+    expect(await apiBalances(app, account.typeId)).toMatchObject({ available: 600n, held: 400n });
   });
 
   it('treats a repeat that differs only in trimmed whitespace or blank remittance as the same', async () => {
@@ -194,11 +205,11 @@ describe('POST /accounts/:account_id/withdrawals', () => {
       differing_fields: [field],
     });
     expect(await withdrawalsOf(account)).toBe(1);
-    expect(await balancesOf(pool, account.id)).toMatchObject({ available: 600n, held: 400n });
+    expect(await apiBalances(app, account.typeId)).toMatchObject({ available: 600n, held: 400n });
     const stored = await getJson(
       app,
-      `/withdrawals/${String(first.json.id)}`,
-      '/withdrawals/{withdrawal_id}',
+      `/accounts/${account.typeId}/withdrawals/${String(first.json.id)}`,
+      WITHDRAWAL,
     );
     expect(stored.json).toEqual(first.json);
   });
@@ -212,7 +223,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
     expect(refused.json.type).toBe('urn:ledger-demo:problem:insufficient-funds');
     expect(await withdrawalsOf(account)).toBe(0);
     expect(await heldEventsOf(account.typeId)).toBe(0);
-    expect(await balancesOf(pool, account.id)).toEqual({
+    expect(await apiBalances(app, account.typeId)).toEqual({
       pendingIn: 0n,
       available: 300n,
       held: 0n,
@@ -222,7 +233,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
     await fundTestAccount(pool, account, 200n);
     const retried = await postWithdrawal(app, account.typeId, withdrawalBody(), key);
     expect(retried.statusCode).toBe(201);
-    expect(await balancesOf(pool, account.id)).toMatchObject({ available: 100n, held: 400n });
+    expect(await apiBalances(app, account.typeId)).toMatchObject({ available: 100n, held: 400n });
   });
 
   it('lets exactly one of two concurrent withdrawals that together exceed available through', async () => {
@@ -234,7 +245,7 @@ describe('POST /accounts/:account_id/withdrawals', () => {
 
     expect(responses.map((r) => r.statusCode).sort((a, b) => a - b)).toEqual([201, 422]);
     expect(await withdrawalsOf(account)).toBe(1);
-    expect(await balancesOf(pool, account.id)).toEqual({
+    expect(await apiBalances(app, account.typeId)).toEqual({
       pendingIn: 0n,
       available: 300n,
       held: 700n,
@@ -390,42 +401,310 @@ describe('POST /accounts/:account_id/withdrawals', () => {
   });
 });
 
-describe('GET /withdrawals/:withdrawal_id', () => {
+// A withdrawal of 100 requested through the API on the account, then taken to `status` with the
+// ledger's own functions (what the submitter and the provider's webhook do).
+async function withdrawalIn(
+  account: TestAccount,
+  status: 'held' | 'submitted' | 'executed' | 'failed',
+): Promise<string> {
+  const created = await postWithdrawal(
+    app,
+    account.typeId,
+    withdrawalBody({ amount_minor: '100' }),
+    randomUUID(),
+  );
+  const id = withdrawalIdOf(created);
+  if (status === 'submitted') await withTransaction(pool, (tx) => markSubmitted(tx, id, 'tr_1'));
+  if (status === 'executed') await withTransaction(pool, (tx) => execute(tx, id));
+  if (status === 'failed') {
+    await withTransaction(pool, (tx) => release(tx, id, 'rejected by the beneficiary bank'));
+  }
+  return String(created.json.id);
+}
+
+function listedIds(response: { json: Record<string, unknown> }): unknown[] {
+  return (response.json.data as { id: string }[]).map((w) => w.id);
+}
+
+describe('GET /accounts/:account_id/withdrawals/:withdrawal_id', () => {
   it('returns the withdrawal, and its history with ?include=history', async () => {
     const account = await fundedAccount(1000n);
     const created = await postWithdrawal(app, account.typeId, withdrawalBody(), randomUUID());
-    const url = `/withdrawals/${String(created.json.id)}`;
+    const url = `/accounts/${account.typeId}/withdrawals/${String(created.json.id)}`;
 
-    const plain = await getJson(app, url, '/withdrawals/{withdrawal_id}');
+    const plain = await getJson(app, url, WITHDRAWAL);
     expect(plain.statusCode).toBe(200);
-    expect(plain.json).toEqual(created.json);
+    expect(plain.body).toBe(created.body); // the same representation as the POST's, byte for byte
 
-    const withHistory = await getJson(
-      app,
-      `${url}?include=history`,
-      '/withdrawals/{withdrawal_id}',
-    );
+    const withHistory = await getJson(app, `${url}?include=history`, WITHDRAWAL);
     expect(withHistory.json).toEqual({
       ...created.json,
       history: [{ from_status: null, to_status: 'held', reason: null, at: expect.any(String) }],
     });
   });
 
+  // The provider's reason is meant for the customer (slice 4 decision 76): shown in the body and
+  // on the history's change to failed.
+  it("shows a failed withdrawal's provider reason in its body and its history", async () => {
+    const account = await fundedAccount(1000n);
+    const id = await withdrawalIn(account, 'failed');
+    const response = await getJson(
+      app,
+      `/accounts/${account.typeId}/withdrawals/${id}?include=history`,
+      WITHDRAWAL,
+    );
+    expect(response.json.failure_reason).toBe('rejected by the beneficiary bank');
+    expect(
+      (response.json.history as Record<string, unknown>[]).map((h) => [h.to_status, h.reason]),
+    ).toEqual([
+      ['held', null],
+      ['failed', 'rejected by the beneficiary bank'],
+    ]);
+  });
+
+  // Slice 4 decision 64: the account in the path is a scope, decided by the one query.
+  it("answers 404 withdrawal-not-found for another account's withdrawal", async () => {
+    const owner = await fundedAccount(1000n);
+    const other = await createTestAccount(pool);
+    const id = await withdrawalIn(owner, 'held');
+    const response = await getJson(app, `/accounts/${other.typeId}/withdrawals/${id}`, WITHDRAWAL);
+    expect(response.statusCode).toBe(404);
+    expect(response.json).toEqual(WITHDRAWAL_NOT_FOUND);
+  });
+
+  it('answers 404 withdrawal-not-found for a real withdrawal under an unknown account', async () => {
+    const owner = await fundedAccount(1000n);
+    const id = await withdrawalIn(owner, 'held');
+    const unknown = toTypeId('acct', newUuid('acct'));
+    const response = await getJson(app, `/accounts/${unknown}/withdrawals/${id}`, WITHDRAWAL);
+    expect(response.statusCode).toBe(404);
+    expect(response.json).toEqual(WITHDRAWAL_NOT_FOUND);
+  });
+
   it('answers 404 for an unknown withdrawal and 400 for an invalid ID', async () => {
+    const account = await createTestAccount(pool);
     const missing = await getJson(
       app,
-      `/withdrawals/${toTypeId('wd', newUuid('wd'))}`,
-      '/withdrawals/{withdrawal_id}',
+      `/accounts/${account.typeId}/withdrawals/${toTypeId('wd', newUuid('wd'))}`,
+      WITHDRAWAL,
     );
     expect(missing.statusCode).toBe(404);
-    expect(missing.json.type).toBe('urn:ledger-demo:problem:withdrawal-not-found');
+    expect(missing.json).toEqual(WITHDRAWAL_NOT_FOUND);
 
     const invalid = await getJson(
       app,
-      `/withdrawals/${toTypeId('dep', newUuid('dep'))}`,
-      '/withdrawals/{withdrawal_id}',
+      `/accounts/${account.typeId}/withdrawals/${toTypeId('dep', newUuid('dep'))}`,
+      WITHDRAWAL,
     );
     expect(invalid.statusCode).toBe(400);
+  });
+
+  // The single read has no list: the list's parameters are unknown to it, so ignored.
+  it.each(['limit=0', 'before=nope', 'status=nope'])('ignores %s', async (query) => {
+    const account = await fundedAccount(1000n);
+    const id = await withdrawalIn(account, 'held');
+    const response = await getJson(
+      app,
+      `/accounts/${account.typeId}/withdrawals/${id}?${query}`,
+      WITHDRAWAL,
+    );
+    expect(response.statusCode).toBe(200);
+  });
+
+  // Slice 4 decision 68: both IDs and the query at once, in the contract's order.
+  it('reports both invalid IDs and an invalid include at once', async () => {
+    const response = await getJson(
+      app,
+      `/accounts/nope/withdrawals/${toTypeId('dep', newUuid('dep'))}?include=everything`,
+      WITHDRAWAL,
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json).toEqual({
+      type: 'urn:ledger-demo:problem:invalid-request',
+      title: 'Invalid request',
+      status: 400,
+      errors: [
+        { path: 'account_id', message: 'must be a acct_ ID' },
+        { path: 'withdrawal_id', message: 'must be a wd_ ID' },
+        { path: 'include', message: 'Invalid input: expected "history"' },
+      ],
+    });
+  });
+});
+
+describe('GET /accounts/:account_id/withdrawals', () => {
+  it("lists only this account's withdrawals, newest first, as the single read shows them", async () => {
+    const account = await fundedAccount(1000n);
+    const other = await fundedAccount(1000n);
+    const first = await withdrawalIn(account, 'executed');
+    await withdrawalIn(other, 'held');
+    const second = await withdrawalIn(account, 'held');
+
+    const response = await getJson(app, `/accounts/${account.typeId}/withdrawals`, WITHDRAWALS);
+    expect(response.statusCode).toBe(200);
+    expect(listedIds(response)).toEqual([second, first]);
+    expect(response.json.next_before).toBeNull();
+    const single = await getJson(
+      app,
+      `/accounts/${account.typeId}/withdrawals/${second}`,
+      WITHDRAWAL,
+    );
+    expect((response.json.data as unknown[])[0]).toEqual(single.json);
+    expect((response.json.data as Record<string, unknown>[])[0]).not.toHaveProperty('history');
+  });
+
+  it('returns an empty list for an account without withdrawals, and 404 for an unknown one', async () => {
+    const account = await createTestAccount(pool);
+    const empty = await getJson(app, `/accounts/${account.typeId}/withdrawals`, WITHDRAWALS);
+    expect(empty.json).toEqual({ data: [], next_before: null });
+
+    const unknown = await getJson(
+      app,
+      `/accounts/${toTypeId('acct', newUuid('acct'))}/withdrawals`,
+      WITHDRAWALS,
+    );
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json.type).toBe('urn:ledger-demo:problem:account-not-found');
+  });
+
+  it('pages through the withdrawals with limit and before', async () => {
+    const account = await fundedAccount(1000n);
+    const created: string[] = [];
+    for (let i = 0; i < 5; i++) created.push(await withdrawalIn(account, 'held'));
+    const newestFirst = [...created].reverse();
+
+    const seen: unknown[] = [];
+    const cursors: unknown[] = [];
+    let url = `/accounts/${account.typeId}/withdrawals?limit=2`;
+    for (;;) {
+      const page = await getJson(app, url, WITHDRAWALS);
+      seen.push(...listedIds(page));
+      const next = page.json.next_before;
+      cursors.push(next);
+      if (typeof next !== 'string') break;
+      url = `/accounts/${account.typeId}/withdrawals?limit=2&before=${next}`;
+    }
+    expect(seen).toEqual(newestFirst);
+    expect(cursors).toEqual([newestFirst[1], newestFirst[3], null]);
+  });
+
+  it('includes each withdrawal’s history with include=history', async () => {
+    const account = await fundedAccount(1000n);
+    const failed = await withdrawalIn(account, 'failed');
+    const response = await getJson(
+      app,
+      `/accounts/${account.typeId}/withdrawals?include=history`,
+      WITHDRAWALS,
+    );
+    const [item] = response.json.data as { id: string; history: Record<string, unknown>[] }[];
+    expect(item?.id).toBe(failed);
+    expect(item?.history.map((h) => [h.from_status, h.to_status, h.reason])).toEqual([
+      [null, 'held', null],
+      ['held', 'failed', 'rejected by the beneficiary bank'],
+    ]);
+  });
+
+  it.each(['held', 'submitted', 'executed', 'failed'] as const)(
+    'filters by status=%s',
+    async (status) => {
+      const account = await fundedAccount(1000n);
+      const byStatus: Record<string, string> = {};
+      for (const s of ['held', 'submitted', 'executed', 'failed'] as const) {
+        byStatus[s] = await withdrawalIn(account, s);
+      }
+      const response = await getJson(
+        app,
+        `/accounts/${account.typeId}/withdrawals?status=${status}`,
+        WITHDRAWALS,
+      );
+      expect(listedIds(response)).toEqual([byStatus[status]]);
+    },
+  );
+
+  // limit and before apply within the filtered list; next_before is the last withdrawal of the
+  // filtered page, so following it skips the withdrawals the filter leaves out.
+  it('pages through a filtered list with its own cursors', async () => {
+    const account = await fundedAccount(1000n);
+    const executed: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      executed.push(await withdrawalIn(account, 'executed'));
+      await withdrawalIn(account, 'held'); // between them
+    }
+    const newestFirst = [...executed].reverse();
+
+    const seen: unknown[] = [];
+    const cursors: unknown[] = [];
+    let url = `/accounts/${account.typeId}/withdrawals?status=executed&limit=2`;
+    for (;;) {
+      const page = await getJson(app, url, WITHDRAWALS);
+      seen.push(...listedIds(page));
+      const next = page.json.next_before;
+      cursors.push(next);
+      if (typeof next !== 'string') break;
+      url = `/accounts/${account.typeId}/withdrawals?status=executed&limit=2&before=${next}`;
+    }
+    expect(seen).toEqual(newestFirst);
+    expect(cursors).toEqual([newestFirst[1], newestFirst[3], null]);
+  });
+
+  it.each([
+    ['limit=0', 'limit', 'Too small: expected number to be >=1'],
+    ['limit=201', 'limit', 'Too big: expected number to be <=200'],
+    ['limit=lots', 'limit', 'Invalid input: expected number, received NaN'],
+    [`before=${toTypeId('dep', newUuid('dep'))}`, 'before', 'must be a wd_ ID'],
+    ['before=', 'before', 'must be a wd_ ID'],
+    [
+      `before=${toTypeId('wd', newUuid('wd'))}&before=${toTypeId('wd', newUuid('wd'))}`,
+      'before',
+      'Invalid input: expected string, received array',
+    ],
+    ['include=everything', 'include', 'Invalid input: expected "history"'],
+    ['status=nope', 'status', STATUS_MESSAGE],
+    ['status=', 'status', STATUS_MESSAGE],
+    ['status=HELD', 'status', STATUS_MESSAGE],
+    ['status=held&status=failed', 'status', STATUS_MESSAGE],
+  ])('answers 400 for %s', async (query, path, message) => {
+    const account = await createTestAccount(pool);
+    const response = await getJson(
+      app,
+      `/accounts/${account.typeId}/withdrawals?${query}`,
+      WITHDRAWALS,
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json.errors).toEqual([{ path, message }]);
+  });
+
+  // Slice 4 decision 68: every problem at once, in the contract's parameter order (limit,
+  // before, include, status), whatever order the query sends them in.
+  it("reports every problem at once, in the contract's order", async () => {
+    const response = await getJson(
+      app,
+      '/accounts/nope/withdrawals?status=nope&include=x&before=nope&limit=0',
+      WITHDRAWALS,
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json).toEqual({
+      type: 'urn:ledger-demo:problem:invalid-request',
+      title: 'Invalid request',
+      status: 400,
+      errors: [
+        { path: 'account_id', message: 'must be a acct_ ID' },
+        { path: 'limit', message: 'Too small: expected number to be >=1' },
+        { path: 'before', message: 'must be a wd_ ID' },
+        { path: 'include', message: 'Invalid input: expected "history"' },
+        { path: 'status', message: STATUS_MESSAGE },
+      ],
+    });
+  });
+
+  it('ignores unknown query parameters', async () => {
+    const account = await createTestAccount(pool);
+    const response = await getJson(
+      app,
+      `/accounts/${account.typeId}/withdrawals?sort=asc&network_transaction_id=x`,
+      WITHDRAWALS,
+    );
+    expect(response.statusCode).toBe(200);
   });
 });
 

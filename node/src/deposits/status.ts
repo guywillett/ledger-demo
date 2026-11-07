@@ -25,6 +25,8 @@ export type DepositStatus = (typeof DEPOSIT_STATUSES)[number];
 // The statuses of a deposit matched to an account: everything that books or reviews deposits
 // works with these, and never has to handle suspense.
 export type BookedStatus = Exclude<DepositStatus, 'unmatched'>;
+// The same, as values (e.g. for validating the deposits list's status filter), in lifecycle order.
+export const BOOKED_STATUSES = DEPOSIT_STATUSES.filter((s): s is BookedStatus => s !== 'unmatched');
 
 export function parseStatus(value: string): DepositStatus {
   const status = DEPOSIT_STATUSES.find((s) => s === value);

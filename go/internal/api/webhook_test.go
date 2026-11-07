@@ -22,7 +22,9 @@ import (
 // outbox half of deposit-events.test.ts (the relay half is in relay's tests), and the
 // webhook rows of body-errors.test.ts. Every notification it can parse gets 204 with no body,
 // whatever it did, so each test asserts the recorded effects. Every response is checked against the
-// contract (postNotification), and every outbox payload against its event contract.
+// contract (postNotification), and every outbox payload against its event contract. A matched
+// deposit is read through the client API (the account's deposits, by network ID); what the API
+// doesn't show (suspense, provider_account_id, the outbox, conflict records) from the database.
 //
 // Not ported: Node's "refuses … (the database CHECK)" cases (deposits_unmatched_check: an
 // unmatched deposit has no account, a matched one has one). They test the shared schema, not
@@ -36,19 +38,23 @@ func TestRecordsADepositAsCreatedWithItsEvent(t *testing.T) {
 	if r.status != 204 || r.body != "" {
 		t.Fatalf("got %d %q, want 204 and no body", r.status, r.body)
 	}
-	d := mustDeposit(t, a.pool, body["network_transaction_id"])
-	if *d.AccountID != seedIDs[aliceIBAN] || d.Status != "created" || d.CreditorIBAN != aliceIBAN ||
-		*d.ProviderAccountID != "prov_acc_0001" || d.Amount != 1250 || d.NotificationCount != 1 {
-		t.Errorf("deposit = %+v", d)
+	d := a.apiDeposit(t, aliceIBAN, body["network_transaction_id"], "include=history")
+	if d["account_id"] != seedAccount(t, aliceIBAN).TypeID() || d["status"] != "created" ||
+		d["creditor_iban"] != aliceIBAN || d["amount_minor"] != "1250" || d["notification_count"] != float64(1) {
+		t.Errorf("deposit = %v", d)
 	}
-	if n := historyCount(t, a.pool, d.ID); n != 1 {
+	if n := len(historyOf(d)); n != 1 {
 		t.Errorf("%d history rows, want 1", n)
 	}
-	if n := outboxCount(t, a.pool, d.ID); n != 1 {
+	// provider_account_id isn't in the client API (slice 4 decision 69): stored all the same.
+	if stored := mustDeposit(t, a.pool, body["network_transaction_id"]); *stored.ProviderAccountID != "prov_acc_0001" {
+		t.Errorf("provider_account_id = %v", stored.ProviderAccountID)
+	}
+	if n := outboxCount(t, a.pool, depositUUID(t, d)); n != 1 {
 		t.Errorf("%d outbox rows, want 1", n)
 	}
 	line := a.logLine(t, body["network_transaction_id"], "deposit created")
-	if line["level"] != "info" || !strings.HasPrefix(line["deposit_id"].(string), "dep_") {
+	if line["level"] != "info" || line["deposit_id"] != d["id"] {
 		t.Errorf("log line = %v", line)
 	}
 }
@@ -60,8 +66,8 @@ func TestAcceptsTheContractsRequestExample(t *testing.T) {
 	if r := a.postNotification(t, example, nil); r.status != 204 {
 		t.Fatalf("status = %d %s", r.status, r.body)
 	}
-	if d := mustDeposit(t, a.pool, example["network_transaction_id"]); d.Status != "created" {
-		t.Errorf("status = %s", d.Status)
+	if d := a.apiDeposit(t, aliceIBAN, example["network_transaction_id"], ""); d["status"] != "created" {
+		t.Errorf("status = %v", d["status"])
 	}
 }
 
@@ -69,9 +75,9 @@ func TestNormalisesTheIBANBeforeMatching(t *testing.T) {
 	a := newTestAPI(t)
 	body := notificationBody(map[string]any{"creditor_iban": "fr76 1234 5000 0100 0000 0000 290"})
 	a.postNotification(t, body, nil)
-	d := mustDeposit(t, a.pool, body["network_transaction_id"])
-	if *d.AccountID != seedIDs[bobIBAN] || d.CreditorIBAN != bobIBAN {
-		t.Errorf("deposit = %+v", d)
+	d := a.apiDeposit(t, bobIBAN, body["network_transaction_id"], "")
+	if d["account_id"] != seedAccount(t, bobIBAN).TypeID() || d["creditor_iban"] != bobIBAN {
+		t.Errorf("deposit = %v", d)
 	}
 }
 
@@ -79,9 +85,12 @@ func TestWorksWithoutAProviderAccountID(t *testing.T) {
 	a := newTestAPI(t)
 	body := notificationBody(map[string]any{"creditor_iban": carolIBAN})
 	a.postNotification(t, body, nil)
-	d := mustDeposit(t, a.pool, body["network_transaction_id"])
-	if *d.AccountID != seedIDs[carolIBAN] || d.ProviderAccountID != nil {
-		t.Errorf("deposit = %+v", d)
+	if d := a.apiDeposit(t, carolIBAN, body["network_transaction_id"], ""); d["account_id"] != seedAccount(t, carolIBAN).TypeID() {
+		t.Errorf("deposit = %v", d)
+	}
+	// Not in the client API (decision 69).
+	if d := mustDeposit(t, a.pool, body["network_transaction_id"]); d.ProviderAccountID != nil {
+		t.Errorf("provider_account_id = %v", *d.ProviderAccountID)
 	}
 }
 
@@ -94,8 +103,8 @@ func TestAcceptsTheSEPACreditTransferMaximumExactlyAndRefusesOneMinorUnitMore(t 
 	if r := a.postNotification(t, body, nil); r.status != 204 {
 		t.Fatalf("the maximum: %d %s", r.status, r.body)
 	}
-	if d := mustDeposit(t, a.pool, body["network_transaction_id"]); d.Amount != 99_999_999_999 {
-		t.Errorf("amount = %d", d.Amount)
+	if d := a.apiDeposit(t, aliceIBAN, body["network_transaction_id"], ""); d["amount_minor"] != "99999999999" {
+		t.Errorf("amount = %v", d["amount_minor"])
 	}
 
 	over := notificationBody(map[string]any{"amount_minor": "100000000000"})
@@ -107,8 +116,8 @@ func TestAcceptsTheSEPACreditTransferMaximumExactlyAndRefusesOneMinorUnitMore(t 
 	if r.status != 400 || !reflect.DeepEqual(r.json(t)["errors"], want) {
 		t.Errorf("one more: %d %s", r.status, r.body)
 	}
-	if _, stored := depositByNetworkID(t, a.pool, over["network_transaction_id"]); stored {
-		t.Error("the amount over the maximum was stored")
+	if listed := a.apiDeposits(t, aliceIBAN, over["network_transaction_id"], ""); len(listed) != 0 {
+		t.Errorf("the amount over the maximum was stored: %v", listed)
 	}
 }
 
@@ -131,9 +140,10 @@ func TestRecordsTheSameNotificationOnceCountingRepeats(t *testing.T) {
 			t.Fatalf("status = %d", r.status)
 		}
 	}
-	d := mustDeposit(t, a.pool, body["network_transaction_id"])
-	if d.NotificationCount != 5 || historyCount(t, a.pool, d.ID) != 1 || outboxCount(t, a.pool, d.ID) != 1 {
-		t.Errorf("deposit %+v, history %d, outbox %d", d, historyCount(t, a.pool, d.ID), outboxCount(t, a.pool, d.ID))
+	d := a.apiDeposit(t, aliceIBAN, body["network_transaction_id"], "include=history")
+	if outbox := outboxCount(t, a.pool, depositUUID(t, d)); d["notification_count"] != float64(5) ||
+		len(historyOf(d)) != 1 || outbox != 1 {
+		t.Errorf("deposit %v, outbox %d", d, outbox)
 	}
 	if line := a.logLine(t, body["network_transaction_id"], "duplicate deposit notification"); line["level"] != "info" ||
 		line["duplicate"] != true || line["notification_count"] != float64(5) {
@@ -163,13 +173,10 @@ func TestRecordsConcurrentIdenticalNotificationsOnce(t *testing.T) {
 			break
 		}
 	}
-	ntx := body["network_transaction_id"]
-	if count := countOf(t, a.pool, `SELECT count(*)::int FROM deposits WHERE network_transaction_id = $1`, ntx); count != 1 {
-		t.Errorf("%d deposits, want 1", count)
-	}
-	d := mustDeposit(t, a.pool, ntx)
-	if d.NotificationCount != n || historyCount(t, a.pool, d.ID) != 1 {
-		t.Errorf("notification_count %d, history %d", d.NotificationCount, historyCount(t, a.pool, d.ID))
+	// apiDeposit is fatal unless exactly one is listed.
+	d := a.apiDeposit(t, aliceIBAN, body["network_transaction_id"], "include=history")
+	if d["notification_count"] != float64(n) || len(historyOf(d)) != 1 {
+		t.Errorf("notification_count %v, history %d", d["notification_count"], len(historyOf(d)))
 	}
 }
 
@@ -183,6 +190,7 @@ func TestADuplicateKeepsTheFirstProviderAccountID(t *testing.T) {
 		"network_transaction_id": body["network_transaction_id"], "provider_account_id": "something-else",
 	})
 	a.postNotification(t, other, nil)
+	// provider_account_id isn't in the client API (decision 69): the stored row.
 	d := mustDeposit(t, a.pool, body["network_transaction_id"])
 	if *d.ProviderAccountID != "prov_acc_0001" || d.NotificationCount != 3 {
 		t.Errorf("deposit = %+v", d)
@@ -199,8 +207,8 @@ func TestTreatsFormattingDifferencesAsTheSameDetails(t *testing.T) {
 	if r := a.postNotification(t, reformatted, nil); r.status != 204 {
 		t.Fatalf("status = %d", r.status)
 	}
-	if d := mustDeposit(t, a.pool, body["network_transaction_id"]); d.NotificationCount != 2 {
-		t.Errorf("notification_count = %d", d.NotificationCount)
+	if d := a.apiDeposit(t, aliceIBAN, body["network_transaction_id"], ""); d["notification_count"] != float64(2) {
+		t.Errorf("notification_count = %v", d["notification_count"])
 	}
 }
 
@@ -219,18 +227,18 @@ func TestRecordsAConflictChangingNothing(t *testing.T) {
 			a := newTestAPI(t)
 			body := notificationBody(nil)
 			a.postNotification(t, body, nil)
-			before := mustDeposit(t, a.pool, body["network_transaction_id"])
+			before := a.apiDeposit(t, aliceIBAN, body["network_transaction_id"], "")
 
 			again := notificationBody(tt.overrides)
 			again["network_transaction_id"] = body["network_transaction_id"]
 			if r := a.postNotification(t, again, nil); r.status != 204 {
 				t.Fatalf("status = %d", r.status)
 			}
-			// reflect.DeepEqual follows the pointer fields (== would compare their addresses).
-			if after := mustDeposit(t, a.pool, body["network_transaction_id"]); !reflect.DeepEqual(after, before) {
-				t.Errorf("deposit changed:\n%+v\nwas\n%+v", after, before)
+			// reflect.DeepEqual compares the decoded maps key by key (== isn't defined on maps).
+			if after := a.apiDeposit(t, aliceIBAN, body["network_transaction_id"], ""); !reflect.DeepEqual(after, before) {
+				t.Errorf("deposit changed:\n%v\nwas\n%v", after, before)
 			}
-			conflicts := conflictsOf(t, a.pool, before.ID)
+			conflicts := conflictsOf(t, a.pool, depositUUID(t, before))
 			if len(conflicts) != 1 || !slices.Equal(conflicts[0].DifferingFields, tt.differing) {
 				t.Errorf("conflicts = %+v", conflicts)
 			}
@@ -269,12 +277,13 @@ func TestExactlyOneOfConcurrentConflictingNotificationsCreates(t *testing.T) {
 	if !slices.Equal(statuses, []int{204, 204, 204, 204, 204}) {
 		t.Errorf("statuses = %v", statuses)
 	}
-	d := mustDeposit(t, a.pool, ntx)
-	conflicts := conflictsOf(t, a.pool, d.ID)
+	d := a.apiDeposit(t, aliceIBAN, ntx, "")
+	conflicts := conflictsOf(t, a.pool, depositUUID(t, d))
 	if len(conflicts) != 4 {
 		t.Fatalf("%d conflicts, want 4", len(conflicts))
 	}
-	all := []string{strconv.FormatInt(d.Amount, 10)}
+	amount, _ := d["amount_minor"].(string)
+	all := []string{amount}
 	for _, c := range conflicts {
 		if !slices.Equal(c.DifferingFields, []string{"amount_minor"}) {
 			t.Errorf("conflict differs in %v", c.DifferingFields)
@@ -360,6 +369,7 @@ func TestAnswers400ForAnInvalidNotificationRecordingNothing(t *testing.T) {
 			len(errs) != 1 || errs[0].(map[string]any)["path"] != tt.path {
 			t.Errorf("%s: got %d %s", tt.name, r.status, r.body)
 		}
+		// Stored nowhere, not only in no account's list (an invalid IBAN matches none): the database.
 		if _, ok := depositByNetworkID(t, a.pool, body["network_transaction_id"]); ok {
 			t.Errorf("%s: a deposit was stored", tt.name)
 		}
@@ -680,9 +690,10 @@ func TestStoresDepositCreatedInTheDepositsTransaction(t *testing.T) {
 	a := newTestAPI(t)
 	body := notificationBody(nil)
 	a.postNotification(t, body, nil)
-	d := mustDeposit(t, a.pool, body["network_transaction_id"])
-	depositID := idFromUUID[ids.Deposit](t, d.ID)
-	rows := outboxRowsFor(t, a.pool, d.ID)
+	d := a.apiDeposit(t, aliceIBAN, body["network_transaction_id"], "")
+	uuid := depositUUID(t, d)
+	depositID := idFromUUID[ids.Deposit](t, uuid)
+	rows := outboxRowsFor(t, a.pool, uuid)
 	if len(rows) != 1 {
 		t.Fatalf("%d outbox rows, want 1", len(rows))
 	}
@@ -696,7 +707,7 @@ func TestStoresDepositCreatedInTheDepositsTransaction(t *testing.T) {
 		"event_id": eventID, "event_type": "deposit.created", "schema_version": 1.0,
 		"deposit_id": depositID.TypeID(), "network": "SEPA", "network_transaction_id": body["network_transaction_id"],
 		"account_id": "acct_01m564xr00fx7rjvqryn5dzwxx", "amount_minor": "1250", "currency": "EUR",
-		"occurred_at": d.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"occurred_at": d["created_at"],
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(row.Payload, &payload); err != nil {
@@ -716,7 +727,7 @@ func TestStoresDepositCreatedInTheDepositsTransaction(t *testing.T) {
 	// transaction committed them.
 	same := countOf(t, a.pool, `
 SELECT count(*)::int FROM deposits p JOIN outbox o ON o.entity_id = p.id
-WHERE p.id = $1 AND p.xmin::text = o.xmin::text`, d.ID)
+WHERE p.id = $1 AND p.xmin::text = o.xmin::text`, uuid)
 	if same != 1 {
 		t.Error("the deposit and its event were written by different transactions")
 	}
@@ -726,13 +737,13 @@ func TestStoresNoEventForDuplicatesConflictsUnmatchedOrInvalid(t *testing.T) {
 	a := newTestAPI(t)
 	body := notificationBody(nil)
 	a.postNotification(t, body, nil)
-	d := mustDeposit(t, a.pool, body["network_transaction_id"])
+	d := a.apiDeposit(t, aliceIBAN, body["network_transaction_id"], "")
 
 	a.postNotification(t, body, nil) // duplicate
 	conflicting := notificationBody(map[string]any{"amount_minor": "1"})
 	conflicting["network_transaction_id"] = body["network_transaction_id"]
 	a.postNotification(t, conflicting, nil) // conflict
-	if n := outboxCount(t, a.pool, d.ID); n != 1 {
+	if n := outboxCount(t, a.pool, depositUUID(t, d)); n != 1 {
 		t.Errorf("%d outbox rows for the deposit, want 1", n)
 	}
 	unmatched := notificationBody(map[string]any{"creditor_iban": foreignIBAN})

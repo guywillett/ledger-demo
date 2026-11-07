@@ -4,7 +4,7 @@
 #   docker compose up -d --build && scripts/demo.sh
 #
 # The provider webhook answers 204 for every notification it handles (the webhook contract), so
-# steps 1-4 check the effect through the API's transactions list, not the status code:
+# steps 1-4 check the effect through the account's deposits list, not the status code:
 # 1. the same notification 5 times          -> one deposit, notification_count 5
 # 2. 10 concurrent identical notifications  -> one deposit
 # 3. the same network ID, another amount    -> recorded as a conflict, the deposit unchanged
@@ -28,9 +28,12 @@
 # unfinished earlier (an aborted run, a notification sent while the deposit-worker was down) fails
 # it too, and the reconciliation report lists it. For a clean slate: docker compose down -v.
 #
-# Uses only the HTTP API and docker compose (reconciliation runs in its own compose service,
-# which reads the shared database), so it works against any implementation of the contract.
-# Deposits go to the demo accounts (alice, bob, carol) in the development database.
+# Uses only the HTTP API, provider-sim's test-only endpoint (GET /_test/transfers, slice 4
+# decision 73) and docker compose (reconciliation runs in its own compose service, which reads the
+# shared database; the submitter's log, for what it did on a redelivery), so it works against any
+# implementation of the contract.
+# Deposits go to the demo accounts (alice, bob, carol) in the development database: their IDs are
+# the seed's, their IBANs read from the API.
 #
 # Exit codes, as for reconciliation: 0 all good; 1 an expectation failed or the books disagree;
 # 2 deposits still unfinished after the wait, or carol couldn't be funded; 3 couldn't run (the API
@@ -39,12 +42,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 API=${API:-http://localhost:3000}
+SIM=${SIM:-http://localhost:4000} # provider-sim
 ALICE=acct_01m564xr00fx7rjvqryn5dzwxx
 BOB=acct_01m564xr01ecrvnckn84evqsax
 CAROL=acct_01m564xr02e70a25p2hkva3gbn
-ALICE_IBAN=FR7612345000010000000000193
-BOB_IBAN=FR7612345000010000000000290
-CAROL_IBAN=FR7612345000010000000000387
 FOREIGN_IBAN=DE75512108001245126199 # valid, but not one of ours
 RUN="demo-$(date +%s)"
 failures=0
@@ -62,11 +63,12 @@ post() {
     -H 'content-type: application/json' -d "$(body "$1" "$2" "$3")" || true
 }
 
-# deposit <account> <network_transaction_id>: prints the deposit's JSON from the account's
-# transactions list (the newest 200; a demo deposit is always among them), or nothing. The API's
-# JSON has no spaces and a deposit object no nested braces, so grep finds it (no jq needed).
+# deposit <account> <network_transaction_id>: prints the account's deposits with that network ID
+# (the list's filter: one deposit's JSON, or nothing). The API's JSON has no spaces and a deposit
+# object no nested braces, so grep finds each (no jq needed), and not the list's envelope. The
+# demo's network IDs need no URL encoding.
 deposit() {
-  curl -s "$API/accounts/$1/transactions?limit=200" |
+  curl -s "$API/accounts/$1/deposits?network_transaction_id=$2" |
     grep -o "{[^{}]*\"network_transaction_id\":\"$2\"[^{}]*}" || true
 }
 
@@ -92,25 +94,29 @@ withdraw() {
 }
 
 # wait_final <withdrawal id> [timeout s]: polls the withdrawal until it is executed or failed
-# (30 s by default) and prints its body.
+# (30 s by default) and prints its body. Every withdrawal of the demo's is carol's.
 wait_final() {
   local deadline=$((SECONDS + ${2:-30})) body=''
   while [ "$SECONDS" -lt "$deadline" ]; do
-    body=$(curl -s "$API/withdrawals/$1")
+    body=$(curl -s "$API/accounts/$CAROL/withdrawals/$1")
     case "$(field "$body" status)" in executed | failed) break ;; esac
     sleep 1
   done
   printf '%s' "$body"
 }
 
-# Relies on provider-sim's "transfer created" log line (msg and reference fields, src/provider-sim/app.ts).
-# wait_transfer_created <withdrawal id>: waits (20 s at most) until provider-sim has logged the
-# transfer for this withdrawal (its reference), i.e. the submitter's call has reached it.
+# sim_seen <withdrawal id>: what provider-sim has seen for the withdrawal (its reference), from
+# its test-only endpoint: {"reference", "requests", "transfer": null or {…}, …}, or a 404's body.
+sim_seen() {
+  curl -s "$SIM/_test/transfers?reference=$1" || true
+}
+
+# wait_transfer_created <withdrawal id>: waits (20 s at most) until provider-sim has created the
+# transfer for this withdrawal, i.e. the submitter's call has reached it.
 wait_transfer_created() {
   local deadline=$((SECONDS + 20))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    docker compose logs provider-sim 2>/dev/null | grep "\"reference\":\"$1\"" |
-      grep -q '"msg":"transfer created"' && return 0
+    case "$(sim_seen "$1")" in *'"transfer":{'*) return 0 ;; esac
     sleep 0.5
   done
   return 1
@@ -133,12 +139,23 @@ submitter_found_executed() {
   done
 }
 
-# provider_calls <withdrawal id>: how many transfer requests provider-sim has logged for the
-# withdrawal (its reference): the first ("transfer created") and any repeat ("repeated transfer
-# request"). Its whole history only while it is the same container.
+# provider_calls <withdrawal id>: how many transfer requests provider-sim has handled for the
+# withdrawal (its reference), from its test-only endpoint. Its whole history only while it is the
+# same container: its state is in memory.
 provider_calls() {
-  docker compose logs --no-log-prefix provider-sim 2>/dev/null | grep "\"reference\":\"$1\"" |
-    grep -cE '"msg":"(transfer created|repeated transfer request)"' || true
+  field "$(sim_seen "$1")" requests
+}
+
+# unfinished <account>: prints the first non-final status any of the account's deposits is in
+# (the list's status filter, one status at a time), or nothing.
+unfinished() {
+  local s
+  for s in created received under_review approved rejected; do
+    case "$(curl -s "$API/accounts/$1/deposits?status=$s&limit=1")" in
+      *'"data":[]'*) ;;
+      *) printf '%s' "$s"; return 0 ;;
+    esac
+  done
 }
 
 # fund <account> <iban> <minimum>: posts deposits of 2000 to the account, each waited on until the
@@ -190,8 +207,15 @@ reconcile() {
   docker compose run --rm --no-deps reconcile "$@"
 }
 
-curl -sf -o /dev/null "$API/accounts/acct_01m564xr00fx7rjvqryn5dzwxx/balance" ||
-  { echo "The API isn't answering at $API: run docker compose up -d --build first."; exit 3; }
+curl -sf -o /dev/null "$API/health" ||
+  { echo "The API isn't ready at $API: run docker compose up -d --build first."; exit 3; }
+
+# The seed accounts' IBANs, which the notifications are addressed to, from the API.
+ALICE_IBAN=$(field "$(curl -s "$API/accounts/$ALICE")" iban)
+BOB_IBAN=$(field "$(curl -s "$API/accounts/$BOB")" iban)
+CAROL_IBAN=$(field "$(curl -s "$API/accounts/$CAROL")" iban)
+[ -n "$ALICE_IBAN" ] && [ -n "$BOB_IBAN" ] && [ -n "$CAROL_IBAN" ] ||
+  { echo "Couldn't read the demo accounts' IBANs from $API/accounts/{id}."; exit 3; }
 
 say "1. The same notification 5 times"
 codes=""
@@ -222,7 +246,7 @@ contains "the conflicting notification wasn't counted" '"notification_count":5' 
 say "4. A valid IBAN that isn't one of our accounts"
 expect "recorded, not refused" 204 "$(post "$RUN-unknown" "$FOREIGN_IBAN" 500)"
 for account in "$ALICE" "$BOB" "$CAROL"; do
-  expect "not in $account's transactions" "" "$(deposit "$account" "$RUN-unknown")"
+  expect "not in $account's deposits" "" "$(deposit "$account" "$RUN-unknown")"
 done
 # Recorded in suspense instead: the whole-database reconciliation report lists it.
 contains "listed in the reconciliation report's suspense section" "$RUN-unknown" \
@@ -253,17 +277,20 @@ for i in $(seq 1 20); do post "$RUN-scaled-$i" "$BOB_IBAN" $((10 * i)) > /dev/nu
 echo "   20 deposits posted to two workers"
 
 say "Waiting for every deposit to finish (up to 120 s)"
+# Through the deposits lists' status filter, every demo account (every deposit of a run, earlier
+# runs' included, is one of theirs; suspense deposits are final). The final reconciliation checks
+# the rest (the outbox, the books).
 deadline=$((SECONDS + 120))
-status=2
 while [ "$SECONDS" -lt "$deadline" ]; do
-  # 0: consistent and nothing stuck; 2: consistent but deposits still in progress; 1: books disagree
-  set +e
-  reconcile --stuck-after 0 --fail-on-stuck > /dev/null 2>&1
-  status=$?
-  set -e
-  [ "$status" -ne 2 ] && break
-  sleep 3
+  pending=""
+  for account in "$ALICE" "$BOB" "$CAROL"; do
+    pending=$(unfinished "$account")
+    [ -n "$pending" ] && break
+  done
+  [ -z "$pending" ] && break
+  sleep 1
 done
+[ -z "$pending" ] && echo "   all finished" || echo "   a deposit is still $pending (the final reconciliation reports it)"
 
 say "Funding carol for the withdrawals (deposits of 2000 until available >= 10000)"
 fund "$CAROL" "$CAROL_IBAN" 10000
@@ -276,7 +303,7 @@ expect "created" 201 "${response##*$'\n'}"
 withdrawal=$(field "${response%$'\n'*}" id)
 # Header names are case-insensitive (RFC 9110 5.1): Node sends "location", Go "Location".
 # Lowercased whole (TypeIDs are lowercase already).
-contains "with its Location" "location: /withdrawals/$withdrawal" "$(tr -d '\r' < "$headers" | tr 'A-Z' 'a-z')"
+contains "with its Location" "location: /accounts/$CAROL/withdrawals/$withdrawal" "$(tr -d '\r' < "$headers" | tr 'A-Z' 'a-z')"
 expect "ends executed" executed "$(field "$(wait_final "$withdrawal")" status)"
 expect "available down by the amount" $((before - 700)) "$(balance "$CAROL" available)"
 expect "nothing left held" 0 "$(balance "$CAROL" held)"
@@ -318,14 +345,18 @@ say "13. The submitter killed during a slow provider call (SIM SLOW), then resta
 # and the restarted submitter finds it executed and makes no call. Nothing is lost and nothing is
 # applied twice. Checked: the restarted submitter's first delivery (attempt 2, after the killed
 # attempt 1) finds it executed, so it made no call; and provider-sim, the same container
-# throughout (so its log is its whole history), logged one call for it. The same-key retry of an
-# unknown outcome is proven elsewhere: test/submitter/provider.test.ts ("maps a timeout to
+# throughout (so its state is its whole history), handled one request for it. The same-key retry
+# of an unknown outcome is proven elsewhere: test/submitter/provider.test.ts ("maps a timeout to
 # unknown, and the next call with the same key gets the same, single transfer") and
 # test/e2e/submitter.e2e.ts ("retries a 503 with the same key and executes it (SIM ERROR)").
 #
 # The kill waits for provider-sim to have created the transfer, rather than a fixed delay: on a
 # slow machine the submitter may not have made the call yet, and killing it before the call shows
 # something else (a redelivery after ack_wait). wait_final allows more than ack_wait anyway.
+#
+# provider-sim's request count is in memory (a known gap): a restart would forget the first call
+# and make "one call" pass whatever happened. So the check also requires the same container
+# throughout (its ID before and after).
 before=$(balance "$CAROL" available)
 provider_sim=$(docker compose ps -q provider-sim)
 response=$(withdraw "$CAROL" "$RUN-wd-5" 400 "SIM SLOW")
@@ -345,7 +376,7 @@ expect "ends executed" executed "$(field "$(wait_final "$withdrawal" 60)" status
 expect "applied once" "$((before - 400))/0" "$(balance "$CAROL" available)/$(balance "$CAROL" held)"
 expect "the restarted submitter's first delivery found it executed (attempt)" 2 \
   "$(submitter_found_executed "$withdrawal")"
-expect "provider-sim kept its transfers (the same container)" "$provider_sim" \
+expect "provider-sim kept its state (the same container)" "$provider_sim" \
   "$(docker compose ps -q provider-sim)"
 expect "one call to the provider" 1 "$(provider_calls "$withdrawal")"
 

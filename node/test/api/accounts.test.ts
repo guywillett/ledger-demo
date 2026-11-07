@@ -1,12 +1,11 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { decide, startReview } from '../../src/compliance/transitions.ts';
-import type { Decision } from '../../src/compliance/decision.ts';
-import type { Deposit } from '../../src/deposits/deposits.ts';
 import { book, postDecision } from '../../src/ledger/posting.ts';
 import { buildApp } from '../../src/api/app.ts';
 import { createPool, withTransaction } from '../../src/shared/db.ts';
-import { newUuid, toTypeId } from '../../src/shared/ids.ts';
+import { fromTypeId, newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import {
+  ALICE,
   capturingLogger,
   createTestAccount,
   createTestApp,
@@ -15,39 +14,111 @@ import {
   type TestAccount,
 } from '../helpers.ts';
 
-// GET /accounts/:id/balance and /transactions against the test database. Deposits are put through
+// GET /accounts/:id and /accounts/:id/balance against the test database. Deposits are put through
 // the lifecycle with the ledger and compliance functions directly (no deposit-worker needed). Every
-// response is checked against contracts/openapi.yaml by getJson.
+// response is checked against contracts/openapi.yaml by getJson. The deposits are in
+// deposits.test.ts.
 
 const testApp = await createTestApp();
 const { app, pool } = testApp;
 afterAll(testApp.close);
 
+const ACCOUNT = '/accounts/{account_id}';
 const BALANCE = '/accounts/{account_id}/balance';
-const TRANSACTIONS = '/accounts/{account_id}/transactions';
-
-async function processDeposit(deposit: Deposit, decision: Decision): Promise<void> {
-  await withTransaction(pool, (tx) => book(tx, deposit.id));
-  await withTransaction(pool, (tx) => startReview(tx, deposit.id));
-  await withTransaction(pool, (tx) => decide(tx, deposit.id, decision));
-  await withTransaction(pool, (tx) => postDecision(tx, deposit.id));
-}
 
 function balanceOf(account: TestAccount): Promise<Awaited<ReturnType<typeof getJson>>> {
   return getJson(app, `/accounts/${account.typeId}/balance`, BALANCE);
 }
 
+// The account's created_at as the API writes it, read from the database (set when it was inserted).
+async function createdAt(id: Uuid<'acct'>): Promise<string> {
+  const result = await pool.query<{ created_at: Date }>(
+    'SELECT created_at FROM accounts WHERE id = $1',
+    [id],
+  );
+  const row = result.rows[0];
+  if (row === undefined) throw new Error(`no account ${id}`);
+  return row.created_at.toISOString();
+}
+
+describe('GET /accounts/:id', () => {
+  // Byte for byte, in this order (Go's must match): id, name, iban, created_at.
+  it('returns a seeded account', async () => {
+    const response = await getJson(app, `/accounts/${ALICE.id}`, ACCOUNT);
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe(
+      JSON.stringify({
+        id: ALICE.id,
+        name: 'alice',
+        iban: ALICE.iban,
+        created_at: await createdAt(fromTypeId('acct', ALICE.id)),
+      }),
+    );
+  });
+
+  it('returns a test account', async () => {
+    const account = await createTestAccount(pool);
+    const response = await getJson(app, `/accounts/${account.typeId}`, ACCOUNT);
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe(
+      JSON.stringify({
+        id: account.typeId,
+        name: `test-${account.id}`,
+        iban: account.iban,
+        created_at: await createdAt(account.id),
+      }),
+    );
+  });
+
+  it('answers 404 for an unknown account', async () => {
+    const response = await getJson(app, `/accounts/${toTypeId('acct', newUuid('acct'))}`, ACCOUNT);
+    expect(response.statusCode).toBe(404);
+    expect(response.json).toEqual({
+      type: 'urn:ledger-demo:problem:account-not-found',
+      title: 'Account not found',
+      status: 404,
+    });
+  });
+
+  it.each(['acct_garbage', toTypeId('dep', newUuid('dep')), 'alice'])(
+    'answers 400 for account_id %s',
+    async (id) => {
+      const response = await getJson(app, `/accounts/${id}`, ACCOUNT);
+      expect(response.statusCode).toBe(400);
+      expect(response.json).toEqual({
+        type: 'urn:ledger-demo:problem:invalid-request',
+        title: 'Invalid request',
+        status: 400,
+        errors: [{ path: 'account_id', message: 'must be a acct_ ID' }],
+      });
+    },
+  );
+
+  it('answers HEAD with the headers only', async () => {
+    const get = await app.inject({ method: 'GET', url: `/accounts/${ALICE.id}` });
+    const head = await app.inject({ method: 'HEAD', url: `/accounts/${ALICE.id}` });
+    expect(head.statusCode).toBe(200);
+    expect(head.body).toBe('');
+    expect(head.headers['content-length']).toBe(String(Buffer.byteLength(get.body)));
+    expect(head.headers['content-type']).toBe('application/json; charset=utf-8');
+  });
+});
+
 describe('GET /accounts/:id/balance', () => {
+  // The body byte for byte: account_id first (the contract's order), as Go writes it.
   it('starts at zero', async () => {
     const account = await createTestAccount(pool);
     const response = await balanceOf(account);
     expect(response.statusCode).toBe(200);
-    expect(response.json).toEqual({
-      pending_in: '0',
-      available: '0',
-      held: '0',
-      currency: 'EUR',
-    });
+    expect(response.body).toBe(
+      JSON.stringify({
+        account_id: account.typeId,
+        pending_in: '0',
+        available: '0',
+        held: '0',
+        currency: 'EUR',
+      }),
+    );
   });
 
   it('shows funds in pending_in once booked, then in available once credited', async () => {
@@ -93,122 +164,6 @@ describe('GET /accounts/:id/balance', () => {
       expect(response.body).not.toContain(id);
     },
   );
-});
-
-describe('GET /accounts/:id/transactions', () => {
-  it('lists only this account’s deposits, newest first, with their current status', async () => {
-    const account = await createTestAccount(pool);
-    const other = await createTestAccount(pool);
-    const first = await createTestDeposit(pool, account, 100n);
-    await createTestDeposit(pool, other, 999n);
-    const second = await createTestDeposit(pool, account, 200n);
-    await processDeposit(first, { outcome: 'approved' });
-
-    const response = await getJson(app, `/accounts/${account.typeId}/transactions`, TRANSACTIONS);
-    expect(response.statusCode).toBe(200);
-    const deposits = response.json.deposits as Record<string, unknown>[];
-    expect(deposits.map((p) => [p.id, p.amount_minor, p.status])).toEqual([
-      [toTypeId('dep', second.id), '200', 'created'],
-      [toTypeId('dep', first.id), '100', 'credited'],
-    ]);
-    expect(deposits[0]).not.toHaveProperty('history');
-    expect(response.json.next_before).toBeNull();
-  });
-
-  it('returns an empty page for an account without deposits, and 404 for an unknown one', async () => {
-    const account = await createTestAccount(pool);
-    const empty = await getJson(app, `/accounts/${account.typeId}/transactions`, TRANSACTIONS);
-    expect(empty.json).toEqual({ deposits: [], next_before: null });
-
-    const unknown = await getJson(
-      app,
-      `/accounts/${toTypeId('acct', newUuid('acct'))}/transactions`,
-      TRANSACTIONS,
-    );
-    expect(unknown.statusCode).toBe(404);
-  });
-
-  it('pages through the deposits with limit and before', async () => {
-    const account = await createTestAccount(pool);
-    const created: Deposit[] = [];
-    for (let i = 0; i < 5; i++) created.push(await createTestDeposit(pool, account));
-    const newestFirst = created.map((p) => toTypeId('dep', p.id)).reverse();
-
-    const seen: unknown[] = [];
-    const cursors: unknown[] = [];
-    let url = `/accounts/${account.typeId}/transactions?limit=2`;
-    for (;;) {
-      const page = await getJson(app, url, TRANSACTIONS);
-      seen.push(...(page.json.deposits as { id: string }[]).map((p) => p.id));
-      const next = page.json.next_before;
-      cursors.push(next);
-      if (typeof next !== 'string') break; // null on the last page
-      url = `/accounts/${account.typeId}/transactions?limit=2&before=${next}`;
-    }
-    expect(seen).toEqual(newestFirst);
-    expect(cursors).toEqual([newestFirst[1], newestFirst[3], null]);
-  });
-
-  it('includes the status history with include=history', async () => {
-    const account = await createTestAccount(pool);
-    const approved = await createTestDeposit(pool, account);
-    const rejected = await createTestDeposit(pool, account);
-    await processDeposit(approved, { outcome: 'approved' });
-    await processDeposit(rejected, { outcome: 'rejected', reason: 'sanctions screening hit' });
-
-    const response = await getJson(
-      app,
-      `/accounts/${account.typeId}/transactions?include=history`,
-      TRANSACTIONS,
-    );
-    const byId = new Map(
-      (response.json.deposits as { id: string; history: Record<string, unknown>[] }[]).map((p) => [
-        p.id,
-        p.history,
-      ]),
-    );
-    expect(
-      byId.get(toTypeId('dep', approved.id))?.map((h) => [h.from_status, h.to_status]),
-    ).toEqual([
-      [null, 'created'],
-      ['created', 'received'],
-      ['received', 'under_review'],
-      ['under_review', 'approved'],
-      ['approved', 'credited'],
-    ]);
-    expect(byId.get(toTypeId('dep', rejected.id))?.[3]).toMatchObject({
-      from_status: 'under_review',
-      to_status: 'rejected',
-      reason: 'sanctions screening hit',
-    });
-  });
-
-  it.each([
-    ['limit=0', 'limit'],
-    ['limit=201', 'limit'],
-    ['limit=lots', 'limit'],
-    [`before=${toTypeId('acct', newUuid('acct'))}`, 'before'],
-    ['include=everything', 'include'],
-  ])('answers 400 for %s', async (query, path) => {
-    const account = await createTestAccount(pool);
-    const response = await getJson(
-      app,
-      `/accounts/${account.typeId}/transactions?${query}`,
-      TRANSACTIONS,
-    );
-    expect(response.statusCode).toBe(400);
-    expect(response.json.errors).toEqual([expect.objectContaining({ path })]);
-  });
-
-  it('ignores unknown query parameters', async () => {
-    const account = await createTestAccount(pool);
-    const response = await getJson(
-      app,
-      `/accounts/${account.typeId}/transactions?sort=asc`,
-      TRANSACTIONS,
-    );
-    expect(response.statusCode).toBe(200);
-  });
 });
 
 describe('an unexpected error on a GET', () => {

@@ -19,6 +19,11 @@ import type { Rates } from './config.ts';
 // later, with failures chosen by triggers in remittance_info or by random rates (decision 34).
 //
 // State lives in memory: a restart forgets every transfer (a Known gap).
+//
+// GET /_test/transfers is a test-only read of that state (slice 4 decision 73): for tests and
+// scripts, to see what the provider did with a withdrawal. The system under test must never call
+// it: the submitter learns an outcome from its call's answer and the webhook, as with a real
+// provider.
 
 // What the webhook receives. provider_event_id identifies the update: a duplicate delivery
 // carries the same one.
@@ -96,22 +101,78 @@ type Transfer = {
   readonly duplicate: boolean;
 };
 
+// GET /_test/transfers's query: the reference, by POST /transfers's rule.
+const testTransferQuerySchema = z.object({ reference: transferBodySchema.shape.reference });
+
+// What GET /_test/transfers needs for a reference: how many handled requests have carried it, and
+// the key of the first. Only that key is followed: a transfer created for the reference under a
+// later, second key doesn't show (the submitters send key = reference, so it can't happen here).
+type ReferenceSeen = {
+  count: number;
+  readonly key: string;
+};
+
 export function buildSimApp(deps: SimDeps): SimApp {
   const backoff = deps.webhookRetry ?? { retryBaseDelayMs: 1000, retryMaxDelayMs: 30_000 };
   const transfers = new Map<string, Transfer>();
-  // Keys whose first submission was answered 503 (SIM ERROR): the retry succeeds.
-  const errored = new Set<string>();
+  // Keys whose first submission was answered 503 (SIM ERROR), with that request's reference: the
+  // retry succeeds.
+  const errored = new Map<string, string>();
   // Refused requests by key: a refusal is permanent, so the same request is refused again
   // (without re-rolling SIM_REFUSE_RATE), and another request with the key is a 409.
   const refused = new Map<string, TransferRequest>();
   // Scheduled results and deliveries in progress, so idle() and stop() can reach them.
   const pending = new Set<Promise<void>>();
   const stopping = new AbortController();
+  // By reference: the requests handled (any answer but a 400) for GET /_test/transfers.
+  const requests = new Map<string, ReferenceSeen>();
 
   // No per-request log lines: the sim logs its own one line per transfer and delivery.
   const app: App = Fastify({
     loggerInstance: deps.logger,
     logController: new LogController({ disableRequestLogging: true }),
+  });
+
+  // Test only endpoint (decision 73): only tests and scripts call it. The system under test never
+  // calls this.
+  app.get('/_test/transfers', async (request, reply) => {
+    const query = testTransferQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      const errors = validationErrors(query.error);
+      deps.logger.info({ errors }, 'invalid _test transfer request');
+      return reply.code(400).send({ error: 'invalid _test transfer request', errors });
+    }
+    const reference = query.data.reference;
+    const seen = requests.get(reference);
+    if (seen === undefined) {
+      return reply.code(404).send({ error: 'reference not found' });
+    }
+    const key = seen.key;
+    // The key's transfer, refusal and 503 only if they were this reference's: a 409 can carry a
+    // new reference under another reference's key.
+    const stored = transfers.get(key);
+    const transfer = stored?.request.reference === reference ? stored : undefined;
+    const transferView =
+      transfer === undefined
+        ? null
+        : {
+            transfer_id: transfer.transferId,
+            amount_minor: transfer.request.amount_minor.toString(),
+            currency: transfer.request.currency,
+            creditor_iban: transfer.request.creditor_iban,
+            creditor_name: transfer.request.creditor_name,
+            remittance_info: transfer.request.remittance_info,
+            outcome: transfer.outcome.status,
+            failure_reason: transfer.outcome.status === 'failed' ? transfer.outcome.reason : null,
+            reports_twice: transfer.duplicate,
+          };
+    return reply.code(200).send({
+      reference,
+      requests: seen.count,
+      transfer: transferView,
+      refused: refused.get(key)?.reference === reference,
+      errored: errored.get(key) === reference,
+    });
   });
 
   app.post('/transfers', async (request, reply) => {
@@ -128,6 +189,14 @@ export function buildSimApp(deps: SimDeps): SimApp {
     }
     const key = headers.data['idempotency-key'];
     const req = body.data;
+    // A handled request, counted for its reference: 409s, 422s, 503s, repeats and creations all
+    // count. The key is the first request's.
+    const seen = requests.get(req.reference);
+    if (seen === undefined) {
+      requests.set(req.reference, { count: 1, key });
+    } else {
+      seen.count += 1;
+    }
 
     // The reads and the writes below have no await between them. Node runs one callback at a
     // time on its event loop, so no other request can run in between: two concurrent requests
@@ -161,7 +230,7 @@ export function buildSimApp(deps: SimDeps): SimApp {
       return reply.code(422).send({ reason: REFUSAL_REASON });
     }
     if (behaviour === 'error' && !errored.has(key)) {
-      errored.add(key);
+      errored.set(key, req.reference);
       deps.logger.info({ reference: req.reference }, 'transfer request answered 503 (simulated)');
       return reply.code(503).send({ error: 'temporarily unavailable' });
     }

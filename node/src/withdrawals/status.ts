@@ -172,6 +172,43 @@ WHERE withdrawal_id = $1
 ORDER BY id
 `;
 
+const HISTORIES_SQL = `
+SELECT withdrawal_id, from_status, to_status, reason, at
+FROM withdrawal_status_history
+WHERE withdrawal_id = ANY($1)
+ORDER BY withdrawal_id, id
+`;
+
+// The status history of several withdrawals in one query (not one query per withdrawal), oldest
+// change first, as deposits' statusHistories. Withdrawals without history rows are absent.
+export async function withdrawalStatusHistories(
+  db: Queryable,
+  withdrawalIds: readonly Uuid<'wd'>[],
+): Promise<Map<Uuid<'wd'>, WithdrawalStatusChange[]>> {
+  const histories = new Map<Uuid<'wd'>, WithdrawalStatusChange[]>();
+  if (withdrawalIds.length === 0) return histories;
+  const result = await db.query<{
+    withdrawal_id: string;
+    from_status: string | null;
+    to_status: string;
+    reason: string | null;
+    at: Date;
+  }>(HISTORIES_SQL, [withdrawalIds]);
+  for (const row of result.rows) {
+    const id = row.withdrawal_id as Uuid<'wd'>;
+    const change: WithdrawalStatusChange = {
+      from: row.from_status === null ? null : parseWithdrawalStatus(row.from_status),
+      to: parseWithdrawalStatus(row.to_status),
+      reason: row.reason,
+      at: row.at,
+    };
+    const list = histories.get(id);
+    if (list === undefined) histories.set(id, [change]);
+    else list.push(change);
+  }
+  return histories;
+}
+
 // A withdrawal's status history, oldest change first.
 export async function withdrawalStatusHistory(
   db: Queryable,

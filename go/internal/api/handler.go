@@ -23,16 +23,24 @@ func NewHandler(pool *pgxpool.Pool, logger *slog.Logger) http.Handler {
 // newHandler is NewHandler with the webhook routes given, so a test can replace how they record.
 func newHandler(pool *pgxpool.Pool, logger *slog.Logger, webhooks webhookRoutes) http.Handler {
 	mux := http.NewServeMux()
-	accounts := accountRoutes{db: pool}
+	accountsAPI := accountRoutes{db: pool}
+	depositsAPI := depositRoutes{db: pool}
 	withdrawalsAPI := withdrawalRoutes{pool: pool}
+	transactionsAPI := transactionRoutes{db: pool}
+	health := healthRoutes{db: pool}
 	// "GET" in a pattern matches HEAD too, as Fastify's GET routes do: net/http then sends the
 	// headers (Content-Length included) without the body.
-	mux.Handle("GET /accounts/{account_id}/balance", handle(accounts.balance))
-	mux.Handle("GET /accounts/{account_id}/transactions", handle(accounts.transactions))
+	mux.Handle("GET /accounts/{account_id}", handle(accountsAPI.account))
+	mux.Handle("GET /accounts/{account_id}/balance", handle(accountsAPI.balance))
+	mux.Handle("GET /accounts/{account_id}/deposits", handle(depositsAPI.list))
+	mux.Handle("GET /accounts/{account_id}/deposits/{deposit_id}", handle(depositsAPI.get))
 	mux.Handle("POST /accounts/{account_id}/withdrawals", handle(withdrawalsAPI.create))
-	mux.Handle("GET /withdrawals/{withdrawal_id}", handle(withdrawalsAPI.get))
+	mux.Handle("GET /accounts/{account_id}/withdrawals", handle(withdrawalsAPI.list))
+	mux.Handle("GET /accounts/{account_id}/withdrawals/{withdrawal_id}", handle(withdrawalsAPI.get))
+	mux.Handle("GET /accounts/{account_id}/transactions", handle(transactionsAPI.list))
 	mux.Handle("POST /provider/incoming-payments", handle(webhooks.incomingPayment))
 	mux.Handle("POST /provider/transfer-updates", handle(webhooks.transferUpdate))
+	mux.Handle("GET /health", quietOnSuccess(handle(health.health)))
 	// Every other request, whatever its method or path: the most specific matching pattern wins, so
 	// this matches only what nothing else does. Registering it also keeps ServeMux from answering
 	// 405 for a known path with another method: something always matches.
@@ -54,6 +62,17 @@ func handle(h handlerFunc) http.Handler {
 			writeProblem(w, httpProblem(http.StatusInternalServerError, ""))
 		}
 	})
+}
+
+// listResponse is every list's body, one shape for all (slice 4 decision 66): Data, the page's
+// items ([] when empty: make it non-nil), and NextBefore, the next page's cursor (null on the last
+// page). Each list names its instantiation once as a type alias (depositListResponse =
+// listResponse[depositResponse, ids.DepositID]), so the pairing of item and cursor types is
+// written in one place, and the instantiated type is as specific as a hand-written struct: Data is
+// a []depositResponse, not a []any.
+type listResponse[T any, C any] struct {
+	Data       []T `json:"data"`
+	NextBefore *C  `json:"next_before"`
 }
 
 // writeJSON answers with v as JSON, byte for byte as Node's JSON.stringify writes it: no HTML

@@ -48,7 +48,7 @@ func TestReplacesABadRequestID(t *testing.T) {
 func TestLogsOneAccessLinePerRequest(t *testing.T) {
 	a := newTestAPI(t)
 	account := testdb.NewAccount(t, a.pool)
-	req, r := a.do(t, http.MethodGet, transactionsPath(account.ID, "iban=FR7612345000010000000000193&limit=1"),
+	req, r := a.do(t, http.MethodGet, depositsPath(account.ID, "iban=FR7612345000010000000000193&limit=1"),
 		http.Header{"X-Request-Id": {"req-1"}})
 	contracttest.Check(t, req, &http.Response{
 		StatusCode: r.status, Header: r.header, Body: io.NopCloser(strings.NewReader(r.body)),
@@ -65,7 +65,7 @@ func TestLogsOneAccessLinePerRequest(t *testing.T) {
 		"service":     "api",
 		"request_id":  "req-1",
 		"method":      "GET",
-		"path":        transactionsPath(account.ID, ""), // without the query string
+		"path":        depositsPath(account.ID, ""), // without the query string
 		"status_code": float64(200),
 	}
 	for key, value := range want {
@@ -92,10 +92,10 @@ func TestAnswers404AsNodeDoes(t *testing.T) {
 	balance := balancePath(account.ID)
 	tests := []struct{ method, target string }{
 		{http.MethodGet, "/nope?iban=FR7612345000010000000000193"},
-		{http.MethodGet, "/accounts/" + account.ID.TypeID()},
+		{http.MethodGet, "/accounts/" + account.ID.TypeID() + "/nope"},
 		{http.MethodGet, strings.ToUpper("/accounts") + "/" + account.ID.TypeID() + "/balance"},
 		{http.MethodPost, balance}, // a known path, another method
-		{http.MethodDelete, transactionsPath(account.ID, "")},
+		{http.MethodDelete, depositsPath(account.ID, "")},
 		{http.MethodOptions, balance},
 		{http.MethodGet, "/" + balance},                                        // //accounts/…
 		{http.MethodGet, "/accounts//" + account.ID.TypeID() + "/balance"},     // an empty segment
@@ -104,7 +104,7 @@ func TestAnswers404AsNodeDoes(t *testing.T) {
 		{http.MethodGet, "/accounts/x/../" + account.ID.TypeID() + "/balance"}, // a dot-dot segment
 		// An empty path parameter (slice 3 decision 62): both are unclean paths (a trailing slash,
 		// a //), answered by onlyCleanPaths before routing; Node's onRequest hook matches it.
-		{http.MethodGet, "/withdrawals/"},
+		{http.MethodGet, "/accounts/" + account.ID.TypeID() + "/withdrawals/"},
 		{http.MethodGet, "/accounts//balance"},
 	}
 	for _, tt := range tests {
@@ -179,7 +179,7 @@ func TestHeadAnswersTheHeadersOnly(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
-	want := len(`{"pending_in":"0","available":"0","held":"0","currency":"EUR"}`)
+	want := len(`{"account_id":"` + account.ID.TypeID() + `","pending_in":"0","available":"0","held":"0","currency":"EUR"}`)
 	if resp.StatusCode != 200 || len(body) != 0 || resp.ContentLength != int64(want) ||
 		resp.Header.Get("Content-Type") != "application/json; charset=utf-8" {
 		t.Errorf("HEAD = %d, Content-Length %d, Content-Type %q, body %q; want 200, %d, JSON, none",

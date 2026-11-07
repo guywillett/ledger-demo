@@ -85,3 +85,70 @@ function beginStatement(options: TransactionOptions): string {
   if (options.readOnly === true) parts.push('READ ONLY');
   return parts.join(' ');
 }
+
+// Pools with a ping still unfinished: past its deadline, but its connection attempt or query not
+// yet ended (see ping).
+const unfinishedPings = new WeakSet<pg.Pool>();
+
+// Resolves if the database answers SELECT 1 within timeoutMs on a connection from the pool, else
+// rejects. Through the pool on purpose: waiting for a connection counts, so a pool too busy to
+// lend one in time fails too (slice 4 decision 72). Go's db.Ping, whose context bounds both the
+// wait for a connection and the query.
+//
+// pg can't cancel either wait, so after the deadline each is ended as soon as it can be: a
+// connection that arrives late goes straight back to the pool, unused (the place in the pool's
+// queue can't be given up, but no query runs); a connection whose SELECT 1 is still waiting is
+// released with an error, which makes the pool destroy it, freeing its slot at once rather than
+// when the database answers. A connection attempt that hangs (the database accepts the connection
+// and never answers) can't be ended, and holds its slot until it fails. So while a ping on a pool
+// is unfinished, the next one rejects at once instead of starting another: a database that hangs
+// then holds one of the pool's connections, not one per ping. (Go needs none of this: cancelling
+// the context ends both waits.)
+export function ping(pool: pg.Pool, timeoutMs: number): Promise<void> {
+  if (unfinishedPings.has(pool)) {
+    return Promise.reject(new Error('the previous check has not finished'));
+  }
+  unfinishedPings.add(pool);
+  return new Promise<void>((resolve, reject) => {
+    let late = false;
+    // The connection while its SELECT 1 runs, so the deadline can destroy it.
+    let running: pg.PoolClient | undefined;
+    const timer = setTimeout(() => {
+      late = true;
+      running?.release(new Error(`ping: no answer within ${timeoutMs} ms`));
+      running = undefined;
+      reject(new Error(`the database did not answer within ${timeoutMs} ms`));
+    }, timeoutMs);
+
+    pool.connect().then(
+      async (client) => {
+        if (late) {
+          client.release();
+          unfinishedPings.delete(pool);
+          return;
+        }
+        running = client;
+        let failure: Error | undefined;
+        try {
+          await client.query('SELECT 1');
+          resolve();
+        } catch (err) {
+          failure = err instanceof Error ? err : new Error(String(err));
+          reject(err); // ignored if the deadline has already rejected
+        } finally {
+          clearTimeout(timer);
+          // Unless the deadline has destroyed it already (a client can be released once only).
+          // With the failure, if any: a connection whose query failed is destroyed, not reused.
+          if (running === client) client.release(failure);
+          running = undefined;
+          unfinishedPings.delete(pool);
+        }
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        unfinishedPings.delete(pool);
+        reject(err);
+      },
+    );
+  });
+}

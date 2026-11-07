@@ -25,6 +25,13 @@ type Kind interface {
 	prefix() string
 }
 
+// PrefixOf is K's TypeID prefix: ids.PrefixOf[ids.Deposit]() is "dep". Reading it doesn't let
+// other packages implement Kind, whose method stays unexported.
+func PrefixOf[K Kind]() string {
+	var k K
+	return k.prefix()
+}
+
 // The entity kinds: empty structs that only carry their TypeID prefix.
 type (
 	Account    struct{}

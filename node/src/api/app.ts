@@ -3,7 +3,10 @@ import Fastify, { LogController, type FastifyReply, type FastifyRequest } from '
 import type pg from 'pg';
 import type { Logger } from '../shared/logger.ts';
 import { registerAccountRoutes } from './accounts.ts';
+import { registerDepositRoutes } from './deposits.ts';
+import { registerTransactionRoutes } from './transactions.ts';
 import { problemErrorHandler } from './errors.ts';
+import { registerHealthRoute } from './health.ts';
 import { problems, sendProblem } from './problem.ts';
 import { registerWebhookRoutes } from './webhooks/index.ts';
 import { registerWithdrawalRoutes } from './withdrawals.ts';
@@ -27,6 +30,10 @@ class AccessLog extends LogController {
     request: FastifyRequest,
     reply: FastifyReply,
   ): void {
+    // A route can ask for its successes to go unlogged (GET /health, api/health.ts).
+    if (request.routeOptions.config.accessLog === 'failures' && reply.statusCode < 400 && !error) {
+      return;
+    }
     const fields = {
       method: request.method,
       // The path only: a query string is caller input and could carry anything (an IBAN, a name).
@@ -63,9 +70,10 @@ export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
     return sendProblem(reply, problems.http(404, 'No such route.'));
   });
 
-  // An empty path parameter (GET /withdrawals/, GET /accounts//balance) names no resource: 404,
-  // the not-found handler's answer, as in Go (slice 3 decision 62). Fastify's router matches a
-  // parameter that is empty, so without this the route's validation would answer 400.
+  // An empty path parameter (GET /accounts//balance, GET /accounts/x/deposits/) names no
+  // resource: 404, the not-found handler's answer, as in Go (slice 3 decision 62). Fastify's
+  // router matches a parameter that is empty, so without this the route's validation would
+  // answer 400.
   // onRequest is the first hook: it runs after routing (request.params is set) and before the
   // body is parsed, so the 404 comes first whatever the body, as Go's clean-path check does.
   // reply.callNotFound() hands the request to the not-found handler above; returning the reply
@@ -86,7 +94,10 @@ export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
   // provider webhooks, whose plugin inherits this and answers every client error with 400).
   app.removeContentTypeParser('text/plain');
 
+  registerHealthRoute(app, { pool: deps.pool });
   registerAccountRoutes(app, { db: deps.pool });
+  registerDepositRoutes(app, { db: deps.pool });
+  registerTransactionRoutes(app, { db: deps.pool });
   registerWithdrawalRoutes(app, { pool: deps.pool });
   registerWebhookRoutes(app, { pool: deps.pool });
   return app;

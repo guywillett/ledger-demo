@@ -164,6 +164,40 @@ VALUES ($1, NULL, 'created')`, id)
 	return id
 }
 
+// NewWithdrawal inserts a withdrawal in status held for the account, with its first history row
+// (null -> held), and returns its ID. Plain SQL, without the hold of its funds that
+// ledger.CreateWithdrawal makes with it: for the tests below the ledger that read withdrawals
+// rather than their money (decision 57), as NewDeposit is for deposits. The account's books then
+// don't balance, so no consistency check may cover it.
+func NewWithdrawal(
+	t testing.TB,
+	pool *pgxpool.Pool,
+	account Account,
+	amount money.Amount,
+) ids.WithdrawalID {
+	t.Helper()
+	ctx := context.Background()
+	id := ids.New[ids.Withdrawal]()
+	err := db.InTx(ctx, pool, func(tx db.Tx) error {
+		_, err := tx.Exec(ctx, `
+INSERT INTO withdrawals (id, account_id, idempotency_key, amount_minor, currency, creditor_iban,
+                         creditor_name, status)
+VALUES ($1, $2, $3, $4, 'EUR', 'DE75512108001245126199', 'Jane Doe', 'held')`,
+			id, account.ID, "go-test-"+id.TypeID(), amount)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+INSERT INTO withdrawal_status_history (withdrawal_id, from_status, to_status)
+VALUES ($1, NULL, 'held')`, id)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
 // exclusiveLock is the advisory lock Exclusive holds: any number, the same in every package.
 const exclusiveLock = 0x6c656467 // "ledg"
 

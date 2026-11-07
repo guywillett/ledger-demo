@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +109,56 @@ func (a testAPI) postNotification(t *testing.T, body any, header http.Header) re
 	return r
 }
 
+// seedAccount is the seeded account with this IBAN.
+func seedAccount(t *testing.T, iban string) ids.AccountID {
+	t.Helper()
+	return idFromUUID[ids.Account](t, seedIDs[iban])
+}
+
+// apiDeposits is what the seeded account with this IBAN lists under a network transaction ID,
+// through the client API (the deposits list's filter, slice 4 decision 70), checked against the
+// contract: nothing, or the one deposit recorded. query adds to the filter (e.g. include=history).
+func (a testAPI) apiDeposits(t *testing.T, iban string, ntx any, query string) []map[string]any {
+	t.Helper()
+	q := url.Values{"network_transaction_id": {fmt.Sprint(ntx)}}.Encode()
+	if query != "" {
+		q += "&" + query
+	}
+	r := a.get(t, depositsPath(seedAccount(t, iban), q))
+	if r.status != 200 {
+		t.Fatalf("deposits by network ID: %d %s", r.status, r.body)
+	}
+	return objects(t, r.json(t), "data")
+}
+
+// apiDeposit is the one deposit apiDeposits lists; fatal if there isn't exactly one.
+func (a testAPI) apiDeposit(t *testing.T, iban string, ntx any, query string) map[string]any {
+	t.Helper()
+	listed := a.apiDeposits(t, iban, ntx, query)
+	if len(listed) != 1 {
+		t.Fatalf("%d deposits listed for %v, want 1", len(listed), ntx)
+	}
+	return listed[0]
+}
+
+// depositUUID is a listed deposit's ID as the database's UUID, for what the client API doesn't
+// show (the outbox, conflict records).
+func depositUUID(t *testing.T, deposit map[string]any) string {
+	t.Helper()
+	s, _ := deposit["id"].(string)
+	id, err := ids.FromTypeID[ids.Deposit](s)
+	if err != nil {
+		t.Fatalf("deposit ID %v: %v", deposit["id"], err)
+	}
+	return id.UUID().String()
+}
+
+// historyOf is a listed deposit's history (with include=history); nil if it has none.
+func historyOf(deposit map[string]any) []any {
+	history, _ := deposit["history"].([]any)
+	return history
+}
+
 // storedDeposit is a deposits row as the tests look at it.
 type storedDeposit struct {
 	ID                string
@@ -120,7 +171,9 @@ type storedDeposit struct {
 	CreatedAt         time.Time
 }
 
-// depositByNetworkID reads the deposit stored under a network transaction ID; false if none.
+// depositByNetworkID reads the deposit stored under a network transaction ID; false if none. From
+// the database, for what the client API doesn't show: an unmatched deposit (in no account's
+// list), provider_account_id (slice 4 decision 69), a row stored nowhere at all.
 func depositByNetworkID(t *testing.T, pool *pgxpool.Pool, ntx any) (storedDeposit, bool) {
 	t.Helper()
 	var d storedDeposit
@@ -157,6 +210,7 @@ func countOf(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) int {
 	return n
 }
 
+// historyCount is an unmatched deposit's history rows: suspense is in no account's list.
 func historyCount(t *testing.T, pool *pgxpool.Pool, depositID string) int {
 	return countOf(t, pool, `SELECT count(*)::int FROM deposit_status_history WHERE deposit_id = $1`, depositID)
 }

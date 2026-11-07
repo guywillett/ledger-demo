@@ -8,7 +8,8 @@ import { newUuid, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { getWithdrawal, type Withdrawal } from '../../src/withdrawals/withdrawals.ts';
 import { expectMatchesContract } from '../contract.ts';
 import {
-  balancesOf,
+  apiBalances,
+  apiWithdrawal,
   capturingLogger,
   createTestAccount,
   createTestApp,
@@ -18,7 +19,9 @@ import {
 
 // POST /provider/transfer-updates, against withdrawals set up through the ledger functions.
 // Every answer to a parseable update is 204 with no body, whatever it did, so each test asserts
-// the recorded effects: the transfer_updates row, balances, movements, the log line.
+// the recorded effects: the transfer_updates row, balances, movements, the log line. The
+// withdrawal and the balance are read through the client API; provider_transfer_id, which it
+// doesn't show (slice 4 decision 69), the transfer_updates rows and the movements from the database.
 
 const { logger, lines } = capturingLogger();
 const { app, pool, close } = await createTestApp({ logger });
@@ -79,6 +82,22 @@ async function stepsOf(id: Uuid<'wd'>): Promise<string[]> {
   return result.rows.map((r) => r.reference_step);
 }
 
+// The withdrawal as the client API shows it.
+async function shown(w: Withdrawal): Promise<Record<string, unknown>> {
+  return apiWithdrawal(app, toTypeId('acct', w.accountId), toTypeId('wd', w.id));
+}
+
+async function balances(
+  w: Withdrawal,
+): Promise<{ pendingIn: bigint; available: bigint; held: bigint }> {
+  return apiBalances(app, toTypeId('acct', w.accountId));
+}
+
+// The transfer ID stored on the withdrawal: not in the client API (decision 69).
+async function storedTransferId(w: Withdrawal): Promise<string | null | undefined> {
+  return (await getWithdrawal(pool, w.id))?.providerTransferId;
+}
+
 function logOf(providerEventId: unknown): Record<string, unknown> | undefined {
   return lines().find(
     (l) => l.provider_event_id === providerEventId && l.msg !== 'request completed',
@@ -100,11 +119,9 @@ describe('POST /provider/transfer-updates', () => {
       notification_count: 1,
       withdrawal_id: w.id,
     });
-    expect(await getWithdrawal(pool, w.id)).toMatchObject({
-      status: 'executed',
-      providerTransferId: 'tr_1',
-    });
-    expect(await balancesOf(pool, w.accountId)).toEqual({
+    expect((await shown(w)).status).toBe('executed');
+    expect(await storedTransferId(w)).toBe('tr_1');
+    expect(await balances(w)).toEqual({
       pendingIn: 0n,
       available: 600n,
       held: 0n,
@@ -126,11 +143,11 @@ describe('POST /provider/transfer-updates', () => {
     expect(await postUpdate(u)).toBe(204);
 
     expect((await rowOf(u.provider_event_id))?.outcome).toBe('applied');
-    expect(await getWithdrawal(pool, w.id)).toMatchObject({
+    expect(await shown(w)).toMatchObject({
       status: 'failed',
-      failureReason: 'beneficiary account closed',
+      failure_reason: 'beneficiary account closed',
     });
-    expect(await balancesOf(pool, w.accountId)).toEqual({
+    expect(await balances(w)).toEqual({
       pendingIn: 0n,
       available: 1000n,
       held: 0n,
@@ -145,10 +162,8 @@ describe('POST /provider/transfer-updates', () => {
     expect(await postUpdate(u)).toBe(204);
     expect((await rowOf(u.provider_event_id))?.outcome).toBe('applied');
     expect(await withTransaction(pool, (tx) => markSubmitted(tx, w.id, 'tr_1'))).toBe('skipped');
-    expect(await getWithdrawal(pool, w.id)).toMatchObject({
-      status: 'executed',
-      providerTransferId: 'tr_1',
-    });
+    expect((await shown(w)).status).toBe('executed');
+    expect(await storedTransferId(w)).toBe('tr_1');
   });
 
   it('counts the same event resent, settling nothing twice', async () => {
@@ -211,7 +226,7 @@ describe('POST /provider/transfer-updates', () => {
     expect(await postUpdate(contradiction)).toBe(204);
 
     expect((await rowOf(contradiction.provider_event_id))?.outcome).toBe('conflict');
-    expect((await getWithdrawal(pool, w.id))?.status).toBe('executed');
+    expect((await shown(w)).status).toBe('executed');
     expect(await stepsOf(w.id)).toEqual(['hold', 'execute']);
     expect(logOf(contradiction.provider_event_id)).toMatchObject({
       level: 'error',
@@ -235,10 +250,8 @@ describe('POST /provider/transfer-updates', () => {
     const u = update(w, { transfer_id: 'tr_other' });
     expect(await postUpdate(u)).toBe(204);
     expect((await rowOf(u.provider_event_id))?.outcome).toBe('conflict');
-    expect(await getWithdrawal(pool, w.id)).toMatchObject({
-      status: 'submitted',
-      providerTransferId: 'tr_1',
-    });
+    expect((await shown(w)).status).toBe('submitted');
+    expect(await storedTransferId(w)).toBe('tr_1');
     expect(await stepsOf(w.id)).toEqual(['hold']);
     expect(logOf(u.provider_event_id)).toMatchObject({
       level: 'error',
@@ -283,7 +296,7 @@ describe('POST /provider/transfer-updates', () => {
     const u = update(w, overrides);
     expect(await postUpdate(JSON.parse(JSON.stringify(u)) as Update)).toBe(400);
     expect(await rowOf(u.provider_event_id)).toBeUndefined();
-    expect((await getWithdrawal(pool, w.id))?.status).toBe('submitted');
+    expect((await shown(w)).status).toBe('submitted');
   });
 
   it('answers 400 (not 415) for a non-JSON content type: a webhook has one 4xx', async () => {
@@ -311,13 +324,13 @@ describe('POST /provider/transfer-updates', () => {
         referenceStep: 'execute',
       }),
     );
-    const before = await balancesOf(pool, w.accountId);
+    const before = await balances(w);
     const u = update(w);
     expect(await postUpdate(u)).toBe(500);
 
     expect(await rowOf(u.provider_event_id)).toBeUndefined();
-    expect((await getWithdrawal(pool, w.id))?.status).toBe('submitted');
-    expect(await balancesOf(pool, w.accountId)).toEqual(before);
+    expect((await shown(w)).status).toBe('submitted');
+    expect(await balances(w)).toEqual(before);
     expect(
       lines().find((l) => l.provider_event_id === u.provider_event_id && l.level === 'fatal'),
     ).toMatchObject({ alert: true });

@@ -14,7 +14,7 @@ import { capturingLogger, FOREIGN_IBAN } from '../helpers.ts';
 
 const SLOW_DELAY_MS = 600;
 
-const { logger, lines } = capturingLogger();
+const { logger } = capturingLogger();
 const sim = buildSimApp({
   logger,
   now: () => new Date(),
@@ -63,8 +63,14 @@ function withdrawal(overrides: Partial<Withdrawal> = {}): Withdrawal {
   };
 }
 
-function transfersCreated(reference: string): number {
-  return lines().filter((l) => l.msg === 'transfer created' && l.reference === reference).length;
+// What provider-sim has seen for the reference, from its test-only endpoint (slice 4 decision 73).
+async function simSeen(reference: string): Promise<Record<string, unknown>> {
+  const response = await sim.app.inject({
+    method: 'GET',
+    url: '/_test/transfers',
+    query: { reference },
+  });
+  return JSON.parse(response.body) as Record<string, unknown>;
 }
 
 describe('providerClient.submitTransfer', () => {
@@ -153,12 +159,16 @@ describe('providerClient.submitTransfer', () => {
     const timedOut = await impatient.submitTransfer(w);
     expect(timedOut.kind).toBe('unknown');
     // The provider did create it, though we never heard.
-    expect(transfersCreated(toTypeId('wd', w.id))).toBe(1);
+    const transfer = (await simSeen(toTypeId('wd', w.id))).transfer as { transfer_id: string };
+    expect(transfer.transfer_id).toMatch(/^tr_/);
 
     const retried = await impatient.submitTransfer(w);
-    expect(retried).toEqual({ kind: 'accepted', transferId: expect.stringMatching(/^tr_/) });
-    // Let the slow first answer arrive; still one transfer for this withdrawal.
+    expect(retried).toEqual({ kind: 'accepted', transferId: transfer.transfer_id });
+    // Let the slow first answer arrive; still that one transfer, for two requests.
     await sleep(SLOW_DELAY_MS);
-    expect(transfersCreated(toTypeId('wd', w.id))).toBe(1);
+    expect(await simSeen(toTypeId('wd', w.id))).toMatchObject({
+      requests: 2,
+      transfer: { transfer_id: transfer.transfer_id },
+    });
   });
 });

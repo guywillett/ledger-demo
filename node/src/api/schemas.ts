@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { toTypeId, type TypeIdString } from '../shared/ids.ts';
+import { fromTypeId, toTypeId, type TypeIdString } from '../shared/ids.ts';
+import type { TransactionRef } from '../transactions/transactions.ts';
 import {
   ibanSchema,
   optionalSepaTextSchema,
@@ -7,95 +8,159 @@ import {
   sepaTextSchema,
   typeIdSchema,
 } from '../shared/schemas.ts';
+import type { Account } from '../accounts/accounts.ts';
 import type { Deposit } from '../deposits/deposits.ts';
 import type { Balance } from '../ledger/balances.ts';
-import type { DepositStatus, StatusChange } from '../deposits/status.ts';
-import type { WithdrawalStatus, WithdrawalStatusChange } from '../withdrawals/status.ts';
+import { BOOKED_STATUSES, type DepositStatus, type StatusChange } from '../deposits/status.ts';
+import {
+  WITHDRAWAL_STATUSES,
+  type WithdrawalStatus,
+  type WithdrawalStatusChange,
+} from '../withdrawals/status.ts';
 import type { NewWithdrawal, Withdrawal } from '../withdrawals/withdrawals.ts';
 import type { Uuid } from '../shared/ids.ts';
 
+// A deposit's history row as a client sees it. reason is always null: the only reasons a
+// deposit's history holds are the compliance decision's, which are internal (slice 4 decision
+// 76: telling a customer why a payment was rejected can be tipping off). Hidden here, at the
+// boundary, rather than by transition: a reason added to some other transition later stays
+// hidden until it is deliberately made client-facing.
+export type DepositStatusChangeResponse = {
+  readonly from_status: DepositStatus | null;
+  readonly to_status: DepositStatus;
+  readonly reason: null;
+  readonly at: string;
+};
+
+export function toDepositStatusChangeResponse(change: StatusChange): DepositStatusChangeResponse {
+  return {
+    from_status: change.from,
+    to_status: change.to,
+    reason: null,
+    at: change.at.toISOString(),
+  };
+}
+
+// The one client-facing reason for a deposit that failed (slice 4 decisions 69 and 76): the
+// same fixed, non-disclosing text for rejected and returned, whatever the internal reason. A
+// rejected deposit is returned next (the ledger's return posting), so the text is true of both.
+export const DEPOSIT_FAILURE_REASON = 'returned to the sender';
+
+function depositFailureReason(status: DepositStatus): string | null {
+  return status === 'rejected' || status === 'returned' ? DEPOSIT_FAILURE_REASON : null;
+}
+
+// type first (decision 67), then the deposit's fields; no provider_account_id, a provider
+// identifier (decision 69). history only with include=history.
 export type DepositResponse = {
+  readonly type: 'deposit';
   readonly id: TypeIdString<'dep'>;
   readonly account_id: TypeIdString<'acct'>;
   readonly creditor_iban: string;
-  readonly provider_account_id: string | null;
   readonly amount_minor: string;
   readonly currency: 'EUR';
   readonly network: 'SEPA';
   readonly network_transaction_id: string;
   readonly status: DepositStatus;
+  readonly failure_reason: string | null;
   readonly notification_count: number;
   readonly created_at: string;
   readonly updated_at: string;
+  readonly history?: readonly DepositStatusChangeResponse[];
 };
 
 // Explicit mapping to the wire format: TypeIDs instead of UUIDs, amounts as digit strings
-// (JSON.stringify would throw on a BigInt), ISO 8601 timestamps.
-export function toDepositResponse(deposit: Deposit): DepositResponse {
+// (JSON.stringify would throw on a BigInt), ISO 8601 timestamps. With history when given (an
+// array, empty if the deposit has none).
+export function toDepositResponse(
+  deposit: Deposit,
+  history?: readonly StatusChange[],
+): DepositResponse {
   return {
+    type: 'deposit',
     id: toTypeId('dep', deposit.id),
     account_id: toTypeId('acct', deposit.accountId),
     creditor_iban: deposit.creditorIban,
-    provider_account_id: deposit.providerAccountId,
     amount_minor: deposit.amountMinor.toString(),
     currency: deposit.currency,
     network: deposit.network,
     network_transaction_id: deposit.networkTransactionId,
     status: deposit.status,
+    failure_reason: depositFailureReason(deposit.status),
     notification_count: deposit.notificationCount,
     created_at: deposit.createdAt.toISOString(),
     updated_at: deposit.updatedAt.toISOString(),
+    ...(history === undefined ? {} : { history: history.map(toDepositStatusChangeResponse) }),
   };
 }
 
+export type DepositListResponse = {
+  readonly data: readonly DepositResponse[];
+  readonly next_before: TypeIdString<'dep'> | null;
+};
+
 export const accountParamsSchema = z.object({ account_id: typeIdSchema('acct') });
 
+// Every list's page size (decision 66): 1 to 200, 50 by default.
+const limitSchema = z.coerce.number().int().min(1).max(200).default(50);
+
+// A single read's or a per-resource list's ?include: only history.
+const includeSchema = z.literal('history').optional();
+
 // Unknown query parameters are ignored (z.object strips them), like unknown body fields.
-// z.coerce: query parameters arrive as strings.
-export const transactionsQuerySchema = z.object({
-  include: z.literal('history').optional(),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+// z.coerce: query parameters arrive as strings. The keys are in the contract's parameter order:
+// Zod reports problems in the order of the shape's keys, and the API reports them in the
+// contract's order (slice 4 decision 68).
+export const depositsQuerySchema = z.object({
+  limit: limitSchema,
   before: typeIdSchema('dep').optional(),
+  include: includeSchema,
+  // The filters (slice 4 decision 70). status: one an account's deposit can have (not unmatched).
+  // network_transaction_id: as the incoming-payment webhook accepts it (webhooks/schemas.ts), so
+  // a value no deposit could have is a 400 rather than an empty list.
+  status: z.enum(BOOKED_STATUSES).optional(),
+  network_transaction_id: z.string().min(1).max(255).optional(),
 });
 
+// GET /accounts/:account_id/deposits/:deposit_id: both IDs, in the contract's order.
+export const depositParamsSchema = z.object({
+  account_id: typeIdSchema('acct'),
+  deposit_id: typeIdSchema('dep'),
+});
+
+export const depositQuerySchema = z.object({ include: includeSchema });
+
+export type AccountResponse = {
+  readonly id: TypeIdString<'acct'>;
+  readonly name: string;
+  readonly iban: string;
+  readonly created_at: string;
+};
+
+export function toAccountResponse(account: Account): AccountResponse {
+  return {
+    id: toTypeId('acct', account.id),
+    name: account.name,
+    iban: account.iban,
+    created_at: account.createdAt.toISOString(),
+  };
+}
+
 export type BalanceResponse = {
+  readonly account_id: TypeIdString<'acct'>;
   readonly pending_in: string;
   readonly available: string;
   readonly held: string;
   readonly currency: 'EUR';
 };
 
-export function toBalanceResponse(balance: Balance): BalanceResponse {
+export function toBalanceResponse(balance: Balance, accountId: Uuid<'acct'>): BalanceResponse {
   return {
+    account_id: toTypeId('acct', accountId),
     pending_in: balance.pendingIn.toString(),
     available: balance.available.toString(),
     held: balance.held.toString(),
     currency: balance.currency,
-  };
-}
-
-export type StatusChangeResponse = {
-  readonly from_status: DepositStatus | null;
-  readonly to_status: DepositStatus;
-  readonly reason: string | null;
-  readonly at: string;
-};
-
-export type TransactionResponse = DepositResponse & {
-  readonly history?: readonly StatusChangeResponse[];
-};
-
-export type TransactionListResponse = {
-  readonly deposits: readonly TransactionResponse[];
-  readonly next_before: TypeIdString<'dep'> | null;
-};
-
-export function toStatusChangeResponse(change: StatusChange): StatusChangeResponse {
-  return {
-    from_status: change.from,
-    to_status: change.to,
-    reason: change.reason,
-    at: change.at.toISOString(),
   };
 }
 
@@ -139,10 +204,27 @@ export function toNewWithdrawal(
   };
 }
 
-export const withdrawalParamsSchema = z.object({ withdrawal_id: typeIdSchema('wd') });
+// GET /accounts/:account_id/withdrawals/:withdrawal_id: both IDs, in the contract's order.
+export const withdrawalParamsSchema = z.object({
+  account_id: typeIdSchema('acct'),
+  withdrawal_id: typeIdSchema('wd'),
+});
 
-export const withdrawalQuerySchema = z.object({ include: z.literal('history').optional() });
+export const withdrawalQuerySchema = z.object({ include: includeSchema });
 
+// The withdrawals list's query, in the contract's parameter order (decision 68), as the
+// deposits list's. status: any withdrawal status (every withdrawal has an account).
+export const withdrawalsQuerySchema = z.object({
+  limit: limitSchema,
+  before: typeIdSchema('wd').optional(),
+  include: includeSchema,
+  status: z.enum(WITHDRAWAL_STATUSES).optional(),
+});
+
+// A withdrawal's history row as a client sees it. Unlike a deposit's, its reason is shown: the
+// only one recorded is on the change to failed, and it is the provider's (its transfer update's
+// reason, or its refusal's), or a generic text of ours when it gave none; meant for the customer
+// (slice 4 decision 76).
 export type WithdrawalStatusChangeResponse = {
   readonly from_status: WithdrawalStatus | null;
   readonly to_status: WithdrawalStatus;
@@ -150,8 +232,10 @@ export type WithdrawalStatusChangeResponse = {
   readonly at: string;
 };
 
-// No provider_transfer_id: provider identifiers stay at the edge, as for deposits' events.
+// type first (decision 67). No provider_transfer_id: provider identifiers stay at the edge
+// (decision 69). history only with include=history.
 export type WithdrawalResponse = {
+  readonly type: 'withdrawal';
   readonly id: TypeIdString<'wd'>;
   readonly account_id: TypeIdString<'acct'>;
   readonly idempotency_key: string;
@@ -167,8 +251,13 @@ export type WithdrawalResponse = {
   readonly history?: readonly WithdrawalStatusChangeResponse[];
 };
 
-export function toWithdrawalResponse(withdrawal: Withdrawal): WithdrawalResponse {
+// With history when given (an array, empty if the withdrawal has none).
+export function toWithdrawalResponse(
+  withdrawal: Withdrawal,
+  history?: readonly WithdrawalStatusChange[],
+): WithdrawalResponse {
   return {
+    type: 'withdrawal',
     id: toTypeId('wd', withdrawal.id),
     account_id: toTypeId('acct', withdrawal.accountId),
     idempotency_key: withdrawal.idempotencyKey,
@@ -181,8 +270,50 @@ export function toWithdrawalResponse(withdrawal: Withdrawal): WithdrawalResponse
     failure_reason: withdrawal.failureReason,
     created_at: withdrawal.createdAt.toISOString(),
     updated_at: withdrawal.updatedAt.toISOString(),
+    ...(history === undefined ? {} : { history: history.map(toWithdrawalStatusChangeResponse) }),
   };
 }
+
+// The transactions list's cursor: a deposit's or a withdrawal's TypeID (slice 4 decision 67). A
+// z.union of the two typeIdSchemas would answer Zod's unhelpful "Invalid input" for anything else,
+// so one custom message names both. Built on z.string(), so a repeated parameter (an array) gets
+// Zod's own message, as every other before does.
+const TRANSACTION_CURSOR_MESSAGE = 'must be a dep_ or wd_ ID';
+const transactionCursorSchema = z.string().transform((value, ctx): TransactionRef => {
+  for (const [prefix, type] of [
+    ['dep', 'deposit'],
+    ['wd', 'withdrawal'],
+  ] as const) {
+    if (!value.startsWith(`${prefix}_`)) continue;
+    try {
+      return type === 'deposit'
+        ? { type, id: fromTypeId('dep', value) }
+        : { type, id: fromTypeId('wd', value) };
+    } catch {
+      break; // the right prefix, but not a valid TypeID
+    }
+  }
+  ctx.issues.push({ code: 'custom', message: TRANSACTION_CURSOR_MESSAGE, input: value });
+  return z.NEVER;
+});
+
+// The transactions list's query, in the contract's parameter order (decision 68): limit and
+// before only. include and the filters are the per-resource lists' (decision 67), so here they
+// are unknown parameters, ignored as every operation ignores them (z.object strips them).
+export const transactionsQuerySchema = z.object({
+  limit: limitSchema,
+  before: transactionCursorSchema.optional(),
+});
+
+export type TransactionListResponse = {
+  readonly data: readonly (DepositResponse | WithdrawalResponse)[];
+  readonly next_before: TypeIdString<'dep'> | TypeIdString<'wd'> | null;
+};
+
+export type WithdrawalListResponse = {
+  readonly data: readonly WithdrawalResponse[];
+  readonly next_before: TypeIdString<'wd'> | null;
+};
 
 export function toWithdrawalStatusChangeResponse(
   change: WithdrawalStatusChange,

@@ -69,6 +69,16 @@ func accountNotFound() Problem {
 	}
 }
 
+// depositNotFound: also for another account's deposit (slice 4 decision 64: the account in the
+// path is a scope).
+func depositNotFound() Problem {
+	return Problem{
+		Type:   "urn:ledger-demo:problem:deposit-not-found",
+		Title:  "Deposit not found",
+		Status: http.StatusNotFound,
+	}
+}
+
 func withdrawalNotFound() Problem {
 	return Problem{
 		Type:   "urn:ledger-demo:problem:withdrawal-not-found",
@@ -95,6 +105,17 @@ func idempotencyKeyConflict(differing []requests.ComparedField) Problem {
 		Detail: "This account already has a withdrawal with this Idempotency-Key and different " +
 			"details. Use a new key for a new withdrawal.",
 		DifferingFields: differing,
+	}
+}
+
+// notReady: GET /health when the database doesn't answer (slice 4 decision 72). The detail names
+// the dependency, not the error: the cause is in the log line.
+func notReady() Problem {
+	return Problem{
+		Type:   "urn:ledger-demo:problem:not-ready",
+		Title:  "Not ready",
+		Status: http.StatusServiceUnavailable,
+		Detail: "The database did not answer.",
 	}
 }
 

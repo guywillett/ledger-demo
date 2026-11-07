@@ -32,6 +32,15 @@ var (
 	_ Querier = Tx{}
 )
 
+// Ping reports whether the database answers SELECT 1 on q. On the pool, acquiring a connection is
+// part of it, and ctx's deadline bounds both the wait for a connection and the query: a pool too
+// busy to lend one in time fails too, which is what GET /health relies on (slice 4 decision 72:
+// readiness through the main pool). Node: ping in node/src/shared/db.ts.
+func Ping(ctx context.Context, db Querier) error {
+	var one int
+	return db.QueryRow(ctx, "SELECT 1").Scan(&one)
+}
+
 // Connect returns a connection pool for databaseURL. Like Node's pg.Pool it connects lazily: the
 // first query opens the first connection, so a database that is down shows up there.
 func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {

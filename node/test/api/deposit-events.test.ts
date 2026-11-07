@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { jetstreamManager } from '@nats-io/jetstream';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { relayBatch } from '../../src/relay/relay.ts';
-import { toTypeId } from '../../src/shared/ids.ts';
+import { fromTypeId, toTypeId, type Uuid } from '../../src/shared/ids.ts';
 import { STREAMS } from '../../src/shared/nats.ts';
 import { expectEventMatchesContract } from '../contract.ts';
 import {
@@ -12,10 +12,9 @@ import {
   createTestApp,
   drainOutbox,
   notificationBody,
+  apiDeposits,
   outboxRowsFor,
-  depositByNetworkId,
   postIncomingPayment,
-  type StoredDeposit,
   recordingPublisher,
   testRelayDeps,
   testStreamPublisher,
@@ -38,12 +37,14 @@ afterAll(async () => {
   await testApp.close();
 });
 
-// The deposit a notification created, read from the database (the webhook answers 204 with no
-// body).
-async function storedDeposit(body: { network_transaction_id?: unknown }): Promise<StoredDeposit> {
-  const deposit = await depositByNetworkId(pool, body.network_transaction_id);
-  if (deposit === undefined) throw new Error('no deposit stored');
-  return deposit;
+// The deposit a notification created, through the client API (the webhook answers 204 with no
+// body): its ID as the database's UUID, for the outbox's rows, and its created_at.
+async function storedDeposit(body: {
+  network_transaction_id?: unknown;
+}): Promise<{ id: Uuid<'dep'>; createdAt: string }> {
+  const [deposit] = await apiDeposits(app, ALICE.id, body.network_transaction_id);
+  if (deposit === undefined) throw new Error('no deposit listed');
+  return { id: fromTypeId('dep', String(deposit.id)), createdAt: String(deposit.created_at) };
 }
 
 async function outboxCount(): Promise<number> {
@@ -81,7 +82,7 @@ describe('deposit.created in the outbox', () => {
       account_id: ALICE.id,
       amount_minor: '1250',
       currency: 'EUR',
-      occurred_at: deposit.created_at.toISOString(),
+      occurred_at: deposit.createdAt,
     });
     expectEventMatchesContract(row?.payload);
     // No provider identifiers downstream.
