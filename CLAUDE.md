@@ -4,7 +4,7 @@ Portfolio project: a small payment event-processing system (deposits with a pseu
 
 ## Specs
 
-- Work is done in slices. The current slice spec is the source of truth: `docs/slices/slice-4-api.md`.
+- Work is done in slices. The current slice spec is the source of truth: `docs/slices/slice-5-observability.md`.
 - Design decisions live in the spec's *Decisions* section and in `docs/decisions/`. Don't contradict them silently: if something in a spec looks wrong or unworkable, stop and raise it.
 
 ## How we work
