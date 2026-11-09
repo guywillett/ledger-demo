@@ -222,6 +222,20 @@ Two scripts beside the demo, each against the running stack, with the demo's exi
 - **`scripts/shared-consumer.sh`:** starts `deposit-worker-other` (the opposite of `DEPOSIT_WORKER_IMPL`) on the same durable consumer, posts a burst of 30 deposits, and checks from the two workers' logs that both processed some and none was processed twice; then reconciles. Run it on any stack, after `up -d`; it adds its own deposits.
 - **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: the health check, the accounts, balances, every page of each demo account's deposits (each cursor used on the other implementation too, filtered and not), the query parameters' and filters' edge cases, single deposits (found, another account's, unknown, malformed IDs), each account's withdrawals (the list across implementations, the status filter, single withdrawals in each final status), every page of each account's transactions (deposits and withdrawals together, with cursors of both kinds), unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
 
+## Telemetry
+
+The four application services export traces and metrics over OTLP (OpenTelemetry), by the rules in [`contracts/telemetry.md`](../contracts/telemetry.md). Locally the backend is `grafana/otel-lgtm` (a Collector, Tempo, Prometheus, Loki and Grafana in one container, development only), under its own compose profile:
+
+```sh
+docker compose --profile telemetry up -d --build   # the stack and the backend (about 0.5 GB of memory)
+scripts/demo.sh                                    # something to look at
+open http://localhost:3002                         # Grafana: admin / admin
+```
+
+In Grafana, *Explore* → *Tempo* → *Search*, service name `api`: one trace per request, named after its route (`POST /accounts/{account_id}/withdrawals`), with its database statements as child spans. Or by TraceQL: `{ name = "POST /accounts/{account_id}/withdrawals" }`. A log line written during a request carries its `trace_id`, for going from `docker compose logs api` to the trace. *Explore* → *Prometheus* has `http_server_request_duration_seconds` by route, method and status. The backend keeps nothing across a restart.
+
+Without the profile (plain `docker compose up`) the services still export, to a backend that isn't there: each export fails and is dropped, with at most one `"telemetry export failed"` warning a minute per service, and nothing else changes (slice 5 decision 79; CI's demo runs this way). Telemetry is off altogether when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, as for the tests and for `npm run dev:api` (Node starts it in `bin/`, before the process loads; `src/shared/telemetry.ts`). Settings are OpenTelemetry's standard variables (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_METRIC_EXPORT_INTERVAL`), set in `docker-compose.yml`. Right after the backend starts it is busy for a minute or so, and the first demo run is slower.
+
 ## Node
 
 The Node.js implementation lives in `node/`. The Node version is in `.nvmrc` (major version only); `package.json` `engines` and `engine-strict` in `node/.npmrc` make npm refuse other majors.

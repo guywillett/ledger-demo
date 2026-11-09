@@ -1,3 +1,4 @@
+import { isSpanContextValid, trace } from '@opentelemetry/api';
 import { pino, type Logger } from 'pino';
 import type { LogLevel } from './config.ts';
 
@@ -20,6 +21,10 @@ export function createLogger(
     // implementation's lines say "go", so a mixed stack's logs say who did what.
     base: { service: options.service, implementation: 'node' },
     timestamp: pino.stdTimeFunctions.isoTime,
+    // trace_id and span_id of the span active when the line is logged, so a line leads to its trace
+    // (slice 5 decision 86). Nothing outside a traced context, or with telemetry off (no span is
+    // ever active then).
+    mixin: traceFields,
     // Errors are left alone by the log formatter below (it walks plain objects only), and
     // pino's err serializer runs after it, copying the error's own properties: a BigInt
     // property (e.g. OverdraftError.amountMinor) would then be written as a bare number.
@@ -36,6 +41,12 @@ export function createLogger(
     },
   };
   return destination ? pino(pinoOptions, destination) : pino(pinoOptions);
+}
+
+function traceFields(): Record<string, string> {
+  const spanContext = trace.getActiveSpan()?.spanContext();
+  if (spanContext === undefined || !isSpanContextValid(spanContext)) return {};
+  return { trace_id: spanContext.traceId, span_id: spanContext.spanId };
 }
 
 // pino writes a BigInt as a bare JSON number, which JSON parsers round above 2^53.

@@ -9,6 +9,10 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 export const sharedEnvSchema = z.object({
   DATABASE_URL: z.url(),
   LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
+  // Telemetry's endpoint (slice 5): optional, and unset or empty is telemetry off, as in Go. Read by
+  // startTelemetry, before the process's config; checked here too, so a bad value is a startup
+  // failure like any other configuration problem (telemetry stays off for it meanwhile).
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.union([z.literal(''), z.url()]).optional(),
 });
 
 export type SharedConfig = {

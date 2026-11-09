@@ -1,5 +1,17 @@
 name: ledger-demo
 
+# Telemetry for the four application services (slice 5): OpenTelemetry's standard variables, read by
+# both SDKs. The endpoint is the otel-lgtm service below, which runs only under the "telemetry"
+# profile: without it the exports fail and are dropped (one warning a minute at most), and the work
+# goes on (decision 79), with one exception found: Node resolves the missing otel-lgtm on its thread
+# pool, where failing lookups can hold the threads a database connection needs (the slice 5 spec's
+# Known gaps; the Node image's larger pool, UV_THREADPOOL_SIZE, mitigates it). Unset the endpoint
+# and telemetry is off altogether. Metrics every 10 s (the SDKs' default is 60 s), so a dashboard
+# moves while the demo runs. Merged into each service's environment with <<: (YAML's merge key).
+x-telemetry-env: &telemetry-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-lgtm:4318
+  OTEL_METRIC_EXPORT_INTERVAL: "10000"
+
 services:
   postgres:
     image: postgres:18.6-alpine3.24
@@ -157,11 +169,11 @@ services:
     # Postgres only: the API stores events in the outbox and never talks to NATS (the relay
     # publishes them).
     environment:
+      <<: *telemetry-env
       DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
       PORT: "3000"
       LOG_LEVEL: info
-    # No healthcheck yet (no health endpoint; see Known gaps in the slice spec): nothing waits
-    # on this service.
+    # No healthcheck: nothing waits on this service (GET /health is there for one).
     # Host port 3000: stop this service (docker compose stop api) before running
     # npm run dev:api on the host, which wants the same port.
     ports:
@@ -196,6 +208,7 @@ services:
     # After this, Docker sends SIGKILL (the batch's leases expire and it is published again).
     stop_grace_period: 30s
     environment:
+      <<: *telemetry-env
       DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
       NATS_URL: nats://nats:4222
       LOG_LEVEL: info
@@ -221,6 +234,7 @@ services:
     # redelivered either way).
     stop_grace_period: 15s
     environment:
+      <<: *telemetry-env
       DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
       NATS_URL: nats://nats:4222
       REVIEW_DELAY_MS: "2000"
@@ -246,6 +260,7 @@ services:
     # unfinished submission is redelivered and sent again with the same key.
     stop_grace_period: 15s
     environment:
+      <<: *telemetry-env
       DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
       NATS_URL: nats://nats:4222
       PROVIDER_URL: http://provider-sim:4000
@@ -289,6 +304,18 @@ services:
     # Host port 4000, for curl.
     ports:
       - "4000:4000"
+
+  # The telemetry backend (slice 5 decision 78): grafana/otel-lgtm, an OpenTelemetry Collector with
+  # Tempo (traces), Prometheus (metrics), Loki (logs) and Grafana in one container, for development
+  # only (a Known gap). Under the "telemetry" profile, so docker compose up runs without it, as CI's
+  # demo legs do (decision 79): docker compose --profile telemetry up -d adds it. The services send
+  # OTLP over HTTP to its port 4318 inside the network; Grafana on host port 3002 (the API has 3000,
+  # api-other 3001), sign-in admin / admin. Its data isn't kept: a restart starts empty.
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.37.0
+    profiles: ["telemetry"]
+    ports:
+      - "3002:3000"
 
   # Reconciliation on demand: docker compose run --rm reconcile [options]. It only reads the
   # shared database, so it checks whichever implementation wrote the data; scripts/demo.sh

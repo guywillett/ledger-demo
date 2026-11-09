@@ -2,6 +2,7 @@ import type pg from 'pg';
 import { createPool } from '../shared/db.ts';
 import type { LogLevel } from '../shared/config.ts';
 import { createLogger, type Logger } from '../shared/logger.ts';
+import { shutdownTelemetry } from '../shared/telemetry.ts';
 import {
   assertStreamExists,
   closeNats,
@@ -81,7 +82,12 @@ export async function runConsumerProcess(o: ConsumerProcessOptions): Promise<voi
         const nats = await closeNats(nc, NATS_DRAIN_TIMEOUT_MS);
         if (nats === 'closed') logger.warn('nats connection closed without draining');
       } finally {
-        await pool.end();
+        try {
+          await pool.end();
+        } finally {
+          // Last, once the work has stopped, so its last spans are exported. Never throws.
+          await shutdownTelemetry();
+        }
       }
     };
 

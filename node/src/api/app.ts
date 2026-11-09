@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { context } from '@opentelemetry/api';
+import { RPCType, getRPCMetadata } from '@opentelemetry/core';
 import Fastify, { LogController, type FastifyReply, type FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import type { Logger } from '../shared/logger.ts';
@@ -49,6 +51,11 @@ class AccessLog extends LogController {
   }
 }
 
+// A Fastify route's path in the contract's form: /accounts/:account_id -> /accounts/{account_id}.
+export function routeTemplate(url: string): string {
+  return url.replaceAll(/:([A-Za-z_][A-Za-z0-9_]*)/g, '{$1}');
+}
+
 // Builds the app without listening, so tests can drive it with app.inject().
 export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
   const app = Fastify({
@@ -86,6 +93,20 @@ export function buildApp(deps: { pool: pg.Pool; logger: Logger }): App {
     if (Object.values(params).includes('')) {
       reply.callNotFound();
       return reply;
+    }
+  });
+
+  // The request's server span is named after its route's template, never the raw path (slice 5:
+  // GET /accounts/{account_id}/deposits), and gets it as http.route, on the span and the duration
+  // metric. The HTTP instrumentation reads the route from the request's RPC metadata when the
+  // response ends: what a framework's instrumentation sets, done here in the contract's {param}
+  // form (Fastify's own is :param), so Node's names are Go's (ServeMux patterns). After the hook
+  // above, so an empty path parameter's 404 has no route, as in Go; an unknown route has none
+  // either (its span is named by its method alone). A no-op with telemetry off.
+  app.addHook('onRequest', async (request) => {
+    const rpc = getRPCMetadata(context.active());
+    if (rpc?.type === RPCType.HTTP && !request.is404) {
+      rpc.route = routeTemplate(request.routeOptions.url ?? '');
     }
   });
 

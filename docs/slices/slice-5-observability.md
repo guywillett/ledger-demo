@@ -160,8 +160,9 @@ All earlier gaps apply. In addition:
     telemetry that can't hurt the work) and one pipeline metric, and documents the rest in *Next*
     with its reasoning. A reviewer sees what's done and what would come next.
 78. **OpenTelemetry, OTLP, and one local container.** Both implementations use the OpenTelemetry
-    SDKs (Node: `@opentelemetry/sdk-node` and its HTTP, Fastify and `pg` instrumentations; Go:
-    `go.opentelemetry.io/otel`, `otelhttp`, a pgx tracer), pinned, and export traces, metrics and
+    SDKs (Node: `@opentelemetry/sdk-node` and its HTTP and `pg` instrumentations, the route named by
+    our own Fastify hook, in the contract's `{param}` form, as Go's; Go: `go.opentelemetry.io/otel`,
+    `otelhttp`, a pgx tracer), pinned, and export traces, metrics and
     logs' context over OTLP. Nothing in the code names a backend. Locally that's
     `grafana/otel-lgtm` (a Collector, Tempo, Prometheus, Loki and Grafana in one image, its tag
     pinned): less infrastructure than the application itself, for development only (*Known gaps*).
@@ -236,9 +237,10 @@ All earlier gaps apply. In addition:
 89. **No sampling.** Every trace is kept: in a demo, and in production too until volume or cost makes
     sampling necessary (then parent-based plus tail sampling, *Next*).
 90. **Resource attributes:** `service.name` the process's role, the same in both implementations (a
-    mixed stack shows one service per role); `implementation` (`node` or `go`) as in the logs;
-    `service.version` (proposed: the image's build, if available); the SDK's own attributes
-    (`telemetry.sdk.language` and the like) as they come. To confirm against the code in step 1.
+    mixed stack shows one service per role); `implementation` (`node` or `go`) as in the logs; the
+    SDK's own attributes (`telemetry.sdk.language` and the like) as they come; nothing else (no host
+    or process detectors). No `service.version`: the images carry no build version. Confirmed in step
+    1 (`contracts/telemetry.md`).
 91. **Equivalence for telemetry is the contract and the same tests,** not bytes: both suites assert the
     same span names, kinds, attributes and links with in-memory exporters (Node
     `InMemorySpanExporter`, Go `tracetest.SpanRecorder`), and a mixed stack shows the links cross
