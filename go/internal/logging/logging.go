@@ -32,6 +32,8 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // The levels pino has and slog doesn't. slog's levels are integers 4 apart (debug -4, info 0,
@@ -62,6 +64,19 @@ func New(w io.Writer, service, level string) (*slog.Logger, error) {
 	}
 	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: minimum, ReplaceAttr: pinoShape})
 	return slog.New(renameReserved{handler}).With("service", service, "implementation", "go"), nil
+}
+
+// WithTrace returns logger with the trace_id and span_id of the span in ctx, so every line it
+// writes leads to its trace (slice 5 decision 86); logger itself if ctx has no span (or telemetry is
+// off). slog sees a context only through its ...Context calls, which this code mostly doesn't use,
+// so the IDs are bound where a request's and a delivery's loggers are made instead (the API's
+// withRequestID, consumer's Deliver). Node: the logger's mixin, on every line.
+func WithTrace(ctx context.Context, logger *slog.Logger) *slog.Logger {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return logger
+	}
+	return logger.With("trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
 }
 
 // Fatal logs at the fatal level, which slog has no method for. It doesn't exit: the caller

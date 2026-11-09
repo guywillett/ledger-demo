@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/guywillett/ledger-demo/go/internal/logging"
 )
 
 // Middleware: each is a function from one http.Handler to another, which does its part and calls
@@ -56,7 +58,9 @@ func withRequestID(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := requestIDFrom(r.Header.Values("X-Request-Id"))
 		w.Header().Set("X-Request-Id", id)
-		ctx := context.WithValue(r.Context(), loggerKey{}, logger.With("request_id", id))
+		// With the request's trace_id and span_id too (traced runs first; slice 5 decision 86).
+		requestLogger := logging.WithTrace(r.Context(), logger).With("request_id", id)
+		ctx := context.WithValue(r.Context(), loggerKey{}, requestLogger)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/logging"
 	"github.com/guywillett/ledger-demo/go/internal/relay"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 )
 
 // relayConfig is the relay's environment, with Node's names, defaults and bounds.
@@ -92,6 +93,18 @@ func run() error {
 	// Cancelled by SIGTERM (docker compose stop) or SIGINT (Ctrl-C), as in cmd/api.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	telemetryConfig := telemetry.Config{
+		Endpoint: cfg.TelemetryURL,
+		Service:  "relay",
+		Logger:   logger,
+	}
+	stopTelemetry, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		return fail(err)
+	}
+	// Deferred first, so it runs last: after the work has stopped, so its last spans are in.
+	defer stopTelemetry()
 
 	conn, err := broker.Connect(cfg.NATS.URL, "ledger-demo-relay", logger)
 	if err != nil {

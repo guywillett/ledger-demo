@@ -26,8 +26,9 @@ var LogLevels = []string{"fatal", "error", "warn", "info", "debug", "trace", "si
 // Shared is the configuration of every long-running process that uses the database (the API,
 // the relay, the deposit-worker and the submitter).
 type Shared struct {
-	DatabaseURL string
-	LogLevel    string
+	DatabaseURL  string
+	LogLevel     string
+	TelemetryURL string
 }
 
 // NATS is the configuration of every process that connects to NATS (the relay, the
@@ -36,11 +37,13 @@ type NATS struct {
 	URL string
 }
 
-// ParseShared reads DATABASE_URL (required) and LOG_LEVEL (default info).
+// ParseShared reads DATABASE_URL (required), LOG_LEVEL (default info) and
+// OTEL_EXPORTER_OTLP_ENDPOINT (optional: telemetry is off without it; slice 5).
 func ParseShared(p *Parser) Shared {
 	return Shared{
-		DatabaseURL: p.URL("DATABASE_URL"),
-		LogLevel:    p.OneOf("LOG_LEVEL", "info", LogLevels),
+		DatabaseURL:  p.URL("DATABASE_URL"),
+		LogLevel:     p.OneOf("LOG_LEVEL", "info", LogLevels),
+		TelemetryURL: p.OptionalURL("OTEL_EXPORTER_OTLP_ENDPOINT"),
 	}
 }
 
@@ -64,6 +67,22 @@ type Parser struct {
 // NewParser returns a Parser reading from lookup (usually os.LookupEnv).
 func NewParser(lookup Lookup) *Parser {
 	return &Parser{lookup: lookup}
+}
+
+// OptionalURL reads an optional absolute URL (it must have a scheme): "" if unset or set but
+// empty, so OTEL_EXPORTER_OTLP_ENDPOINT= turns telemetry off, as in Node. (URL, for a required
+// variable, checks an empty value instead.)
+func (p *Parser) OptionalURL(name string) string {
+	value, ok := p.lookup(name)
+	if !ok || value == "" {
+		return ""
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" {
+		p.Fail(name, "must be an absolute URL")
+		return ""
+	}
+	return value
 }
 
 // URL reads a required absolute URL (it must have a scheme, e.g. postgres:// or nats://).

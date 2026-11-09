@@ -84,6 +84,42 @@ func TestRejects(t *testing.T) {
 	}
 }
 
+// OTEL_EXPORTER_OTLP_ENDPOINT is optional: unset or empty is telemetry off (as Node), anything else
+// must be an absolute URL.
+func TestTheTelemetryEndpointIsOptional(t *testing.T) {
+	tests := []struct {
+		name  string
+		value *string
+		want  string
+		fails bool
+	}{
+		{"unset", nil, "", false},
+		{"empty", ptr(""), "", false},
+		{"a URL", ptr("http://otel-lgtm:4318"), "http://otel-lgtm:4318", false},
+		{"an unparseable URL", ptr("http://%zz"), "", true},
+		{"without a scheme", ptr("otel-lgtm"), "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vars := map[string]string{"DATABASE_URL": databaseURL}
+			if tt.value != nil {
+				vars["OTEL_EXPORTER_OTLP_ENDPOINT"] = *tt.value
+			}
+			p := config.NewParser(env(vars))
+			got := config.ParseShared(p).TelemetryURL
+			err := p.Err()
+			if got != tt.want || (err != nil) != tt.fails {
+				t.Errorf("TelemetryURL %q, err %v; want %q, failing %v", got, err, tt.want, tt.fails)
+			}
+			if err != nil && !strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_ENDPOINT must be an absolute URL") {
+				t.Errorf("err %v", err)
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }
+
 // The error names the variable but never repeats its value: a database URL carries a password.
 func TestNeverEchoesTheValue(t *testing.T) {
 	p := config.NewParser(env(map[string]string{"DATABASE_URL": "secret-password"}))

@@ -204,7 +204,10 @@ func (l Lifecycle[E]) Deliver(ctx context.Context, m Message, handle Handler[E])
 	if id := m.NATSMsgID(); id != "" {
 		msgID = id
 	}
-	log := l.Logger.With("nats_msg_id", msgID, "delivery_attempt", m.DeliveryAttempt())
+	// With the trace_id and span_id of the delivery's span, once there is one (slice 5 decision 86;
+	// the processing span comes with propagation, in step 2).
+	log := logging.WithTrace(ctx, l.Logger).
+		With("nats_msg_id", msgID, "delivery_attempt", m.DeliveryAttempt())
 	if peeked != nil {
 		log = log.With("event_id", *peeked)
 	}

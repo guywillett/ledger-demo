@@ -42,9 +42,16 @@ func Ping(ctx context.Context, db Querier) error {
 }
 
 // Connect returns a connection pool for databaseURL. Like Node's pg.Pool it connects lazily: the
-// first query opens the first connection, so a database that is down shows up there.
+// first query opens the first connection, so a database that is down shows up there. Its statements
+// are traced (queryTracer: spans only inside a span, and only with telemetry on).
 func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		// pgx's error doesn't include the URL (and so not its password).
+		return nil, fmt.Errorf("database pool: %w", err)
+	}
+	config.ConnConfig.Tracer = queryTracer{}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		// pgx's error doesn't include the URL (and so not its password).
 		return nil, fmt.Errorf("database pool: %w", err)
