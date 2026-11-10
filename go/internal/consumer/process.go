@@ -101,6 +101,9 @@ func Run[C interface{ Base() BaseConfig }](p Process[C]) error {
 	if err != nil {
 		logger, _ = logging.New(out, p.Service, "info")
 	}
+	// The process's logger is slog's default too, for code with no logger of its own (package db's
+	// after-commit hooks): its lines then come out as the process's JSON, not slog's plain text.
+	slog.SetDefault(logger)
 	// Nothing is running yet that a graceful shutdown would protect: log and return at once, as
 	// Node's "startup failed" exits.
 	fail := func(err error) error {

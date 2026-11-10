@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -186,7 +188,8 @@ func TestTheResourceIsTheRoleTheImplementationAndTheSDKsOwnAttributes(t *testing
 		keys = append(keys, k)
 	}
 	slices.Sort(keys)
-	want := []string{"implementation", "service.name", "telemetry.sdk.language", "telemetry.sdk.name", "telemetry.sdk.version"}
+	want := []string{"host.name", "implementation", "service.instance.id", "service.name",
+		"telemetry.sdk.language", "telemetry.sdk.name", "telemetry.sdk.version"}
 	if !slices.Equal(keys, want) {
 		t.Errorf("resource keys %v\nwant          %v", keys, want)
 	}
@@ -219,6 +222,37 @@ func TestExportedSpansCarryNoClientAddressOrUserAgent(t *testing.T) {
 	}
 	if spans[0].Name() != "a request" {
 		t.Errorf("name %q", spans[0].Name())
+	}
+}
+
+// Decision 90: two instances of one service are told apart (identical metric series otherwise), and
+// a person can find each one's container.
+func TestEachSetupHasItsOwnInstanceIDAndTheHostName(t *testing.T) {
+	resourceOf := func() map[string]string {
+		exporter := &recordingExporter{}
+		stop := setup(t, telemetry.Config{Service: "deposit-worker", SpanExporter: exporter})
+		_, span := otel.Tracer("test").Start(context.Background(), "a span")
+		span.End()
+		stop()
+		spans := exporter.exported()
+		if len(spans) != 1 {
+			t.Fatalf("%d spans", len(spans))
+		}
+		got := map[string]string{}
+		for _, kv := range spans[0].Resource().Attributes() {
+			got[string(kv.Key)] = kv.Value.String()
+		}
+		return got
+	}
+	first, second := resourceOf(), resourceOf()
+	if err := uuid.Validate(first["service.instance.id"]); err != nil {
+		t.Errorf("service.instance.id %q: %v", first["service.instance.id"], err)
+	}
+	if first["service.instance.id"] == second["service.instance.id"] {
+		t.Errorf("both setups have service.instance.id %s", first["service.instance.id"])
+	}
+	if host, _ := os.Hostname(); first["host.name"] != host {
+		t.Errorf("host.name %q, want %q", first["host.name"], host)
 	}
 }
 

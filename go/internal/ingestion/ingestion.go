@@ -26,6 +26,7 @@ import (
 	"github.com/guywillett/ledger-demo/go/internal/money"
 	"github.com/guywillett/ledger-demo/go/internal/outbox"
 	"github.com/guywillett/ledger-demo/go/internal/sepa"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 	"github.com/guywillett/ledger-demo/go/internal/timestamp"
 )
 
@@ -252,6 +253,10 @@ func recorded(ctx context.Context, tx db.Tx, row upsertRow) (Result, error) {
 			NotificationCount: row.NotificationCount,
 		}, nil
 	}
+	// A deposit is created (matched or not): the pipeline's entry, counted from "none".
+	tx.AfterCommit(
+		func() { telemetry.CountTransition("deposit", "none", string(status)) },
+	)
 	if status == deposits.StatusUnmatched {
 		return Result{Kind: Unmatched, Deposit: row.ID}, nil
 	}

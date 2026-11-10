@@ -58,6 +58,9 @@ func run() error {
 	if logErr != nil {
 		logger, _ = logging.New(os.Stdout, "api", "info")
 	}
+	// The process's logger is slog's default too, for code with no logger of its own (package db's
+	// after-commit hooks): its lines then come out as the process's JSON, not slog's plain text.
+	slog.SetDefault(logger)
 	// One structured line instead of a raw error or stack trace, then exit 1 (the container is
 	// restarted), as Node's "startup failed".
 	fail := func(err error) error {

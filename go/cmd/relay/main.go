@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -82,6 +83,9 @@ func run() error {
 	if logErr != nil {
 		logger, _ = logging.New(os.Stdout, "relay", "info")
 	}
+	// The process's logger is slog's default too, for code with no logger of its own (package db's
+	// after-commit hooks): its lines then come out as the process's JSON, not slog's plain text.
+	slog.SetDefault(logger)
 	fail := func(err error) error {
 		logging.Fatal(context.Background(), logger, "startup failed", "err", err)
 		return err

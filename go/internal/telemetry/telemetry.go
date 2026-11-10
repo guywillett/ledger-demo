@@ -13,9 +13,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
@@ -62,17 +64,26 @@ func Setup(ctx context.Context, cfg Config) (stop func(), err error) {
 	if cfg.Endpoint == "" && cfg.SpanExporter == nil && cfg.MetricReader == nil {
 		return func() {}, nil
 	}
-	// Tests should assign both exporters or neither
+	// Both exporters or neither (for tests): with one alone, the other signal would go to OTLP.
 	if (cfg.SpanExporter == nil) != (cfg.MetricReader == nil) {
-		return nil, errors.New("telemetry: assign both or neither exporter")
+		return nil, errors.New("telemetry: both exporters or neither")
 	}
 	// Exactly the contract's resource, plus the SDK's own attributes (telemetry.sdk.*): no host or
-	// process detectors, as Node has none.
+	// process detectors, as Node has none. service.instance.id, a random UUID for this process
+	// start, tells two instances of one service apart (they would otherwise write identical metric
+	// series); host.name lets a person find the instance's container (decision 90).
+	attrs := []attribute.KeyValue{
+		semconv.ServiceName(cfg.Service),
+		attribute.String("implementation", "go"),
+		semconv.ServiceInstanceID(uuid.NewString()),
+	}
+	// Node's os.hostname() can't fail; if Go's does, the attribute is left out rather than failing
+	// the process's startup over it.
+	if host, err := os.Hostname(); err == nil {
+		attrs = append(attrs, semconv.HostName(host))
+	}
 	res, err := resource.New(ctx,
-		resource.WithAttributes(
-			semconv.ServiceName(cfg.Service),
-			attribute.String("implementation", "go"),
-		),
+		resource.WithAttributes(attrs...),
 		resource.WithTelemetrySDK(),
 	)
 	if err != nil {
@@ -108,7 +119,7 @@ func Setup(ctx context.Context, cfg Config) (stop func(), err error) {
 	meters := sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(reader),
-		sdkmetric.WithView(contractMetrics),
+		sdkmetric.WithView(ContractMetrics),
 	)
 	otel.SetTracerProvider(traces)
 	otel.SetMeterProvider(meters)
@@ -144,12 +155,12 @@ func Setup(ctx context.Context, cfg Config) (stop func(), err error) {
 	return stop, nil
 }
 
-// contractMetrics is the metric views: the contract's metrics and only those, as Node's
+// ContractMetrics is the metric views: the contract's metrics and only those, as Node's
 // METRIC_VIEWS. An allow-list, so an instrumentation's other instruments (otelhttp's body sizes)
 // are dropped rather than exported unlisted, and a kept one has only its listed attributes (bounded
-// cardinality: no raw path, no address).
-// A new contract metric must be added here, or it's dropped
-func contractMetrics(i sdkmetric.Instrument) (sdkmetric.Stream, bool) {
+// cardinality: no raw path, no address). A new contract metric must be added here, or it's
+// dropped. Exported for internal/telemetrytest, so the tests see what a process exports.
+func ContractMetrics(i sdkmetric.Instrument) (sdkmetric.Stream, bool) {
 	if i.Name == "http.server.request.duration" {
 		return sdkmetric.Stream{
 			Name:        i.Name,
@@ -157,6 +168,16 @@ func contractMetrics(i sdkmetric.Instrument) (sdkmetric.Stream, bool) {
 			Unit:        i.Unit,
 			AttributeFilter: attribute.NewAllowKeysFilter(
 				"http.request.method", "http.route", "http.response.status_code",
+			),
+		}, true
+	}
+	if i.Name == "ledger_transitions_total" {
+		return sdkmetric.Stream{
+			Name:        i.Name,
+			Description: i.Description,
+			Unit:        i.Unit,
+			AttributeFilter: attribute.NewAllowKeysFilter(
+				"entity", "from", "to", "implementation",
 			),
 		}, true
 	}

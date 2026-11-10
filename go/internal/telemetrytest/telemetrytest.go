@@ -40,7 +40,11 @@ func Record(t testing.TB) *Recorder {
 	spans := tracetest.NewInMemoryExporter()
 	traces := sdktrace.NewTracerProvider(sdktrace.WithSyncer(telemetry.WithoutPersonalData(spans)))
 	reader := sdkmetric.NewManualReader()
-	meters := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	// The contract's views (an allow-list), as Setup's: a metric they drop isn't exported.
+	meters := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithView(telemetry.ContractMetrics),
+	)
 	otel.SetTracerProvider(traces)
 	otel.SetMeterProvider(meters)
 	// The W3C propagators, as Setup registers them: the outbox and the relay write trace context
