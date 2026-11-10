@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel"
-
 	"github.com/guywillett/ledger-demo/go/internal/consumer"
 	"github.com/guywillett/ledger-demo/go/internal/telemetrytest"
 	"github.com/guywillett/ledger-demo/go/internal/testdb"
@@ -33,29 +31,8 @@ func TestAnIdleConsumerMakesNoSpansThroughItsEmptyFetches(t *testing.T) {
 	}
 }
 
-// Decision 86: the delivery's logger carries the trace_id and span_id of the span it runs in (the
-// processing span, from step 2), on its own lines and the handler's.
-func TestADeliveryInASpanLogsItsTraceIDs(t *testing.T) {
-	telemetrytest.Record(t)
-	pool := testdb.Pool(t)
-	body, _ := eventBody(1)
-	logs, logger := newCapture(t)
-	ctx, span := otel.Tracer("test").Start(context.Background(), "a delivery")
-	defer span.End()
-
-	lifecycle(pool, logger).Deliver(ctx, message(body),
-		func(ctx context.Context, _ testEvent, d *dlv) (settled, error) {
-			d.Log().Info("handled")
-			return d.Done(ctx, consumer.Applied)
-		})
-
-	line := logs.one(t, "handled")
-	if line["trace_id"] != span.SpanContext().TraceID().String() ||
-		line["span_id"] != span.SpanContext().SpanID().String() {
-		t.Errorf("line %v, span %v", line, span.SpanContext())
-	}
-}
-
+// With telemetry off (no recording provider), a delivery's lines carry no trace IDs. With it on,
+// they carry the processing span's: TestADeliveryIsARootProcessingSpanLinkedToItsPublish.
 func TestADeliveryOutsideASpanLogsNoTraceIDs(t *testing.T) {
 	pool := testdb.Pool(t)
 	body, _ := eventBody(1)

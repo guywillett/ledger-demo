@@ -55,7 +55,9 @@ type Published struct {
 	Subject string
 	Payload []byte
 	MsgID   string
-	Result  broker.PublishResult
+	// The publish span's context, sent beside Nats-Msg-Id (slice 5 decision 82).
+	TraceHeaders map[string]string
+	Result       broker.PublishResult
 }
 
 // Recording wraps a publisher, checks every event against its contract, and records what was
@@ -79,16 +81,17 @@ func (r *Recording) Publish(
 	subject string,
 	payload []byte,
 	msgID string,
+	traceHeaders map[string]string,
 ) (broker.PublishResult, error) {
 	contracttest.CheckEvent(r.t, payload)
-	result, err := r.next.Publish(ctx, subject, payload, msgID)
+	result, err := r.next.Publish(ctx, subject, payload, msgID, traceHeaders)
 	if err != nil {
 		return result, err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.all = append(r.all,
-		Published{Subject: subject, Payload: payload, MsgID: msgID, Result: result})
+		Published{Subject: subject, Payload: payload, MsgID: msgID, TraceHeaders: traceHeaders, Result: result})
 	return result, nil
 }
 
@@ -120,7 +123,9 @@ func (r *Recording) MsgIDs() []string {
 type Failing struct{}
 
 // Publish fails.
-func (Failing) Publish(context.Context, string, []byte, string) (broker.PublishResult, error) {
+func (Failing) Publish(
+	context.Context, string, []byte, string, map[string]string,
+) (broker.PublishResult, error) {
 	return broker.PublishResult{}, errors.New("simulated publish failure")
 }
 

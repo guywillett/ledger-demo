@@ -305,7 +305,7 @@ func TestPublishesAgainAfterARelayCrashedBetweenPublishingAndMarkingAndTheStream
 		t.Fatal("the deposit's event was not claimed")
 	}
 	event := claimed[i]
-	first, err := e.stream.Publish(ctx, event.Subject, event.Payload, event.MsgID)
+	first, err := e.stream.Publish(ctx, event.Subject, event.Payload, event.MsgID, nil)
 	if err != nil || first.Duplicate {
 		t.Fatalf("first publish: %+v %v", first, err)
 	}
@@ -555,10 +555,11 @@ func (b *blocking) Publish(
 	subject string,
 	payload []byte,
 	msgID string,
+	traceHeaders map[string]string,
 ) (broker.PublishResult, error) {
 	b.startOne.Do(func() { close(b.started) })
 	<-b.release
-	return b.next.Publish(ctx, subject, payload, msgID)
+	return b.next.Publish(ctx, subject, payload, msgID, traceHeaders)
 }
 
 // Go-specific (Node checks this by hand in its shutdown): cancelling Poll's context mid-batch, as a

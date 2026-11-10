@@ -278,3 +278,29 @@ func TestTheRequestDurationCarriesTheRoute(t *testing.T) {
 	}
 	t.Errorf("no request duration with the route in %+v", rec.Metrics(t))
 }
+
+// Decision 81: the event a request enqueues carries the request's context, for the relay's publish
+// span to link to (internal/relay's tests take it from there).
+func TestAnEnqueuedEventStoresTheContextOfTheRequestThatEnqueuedIt(t *testing.T) {
+	rec := telemetrytest.Record(t)
+	a := newTestAPI(t)
+	body := notificationBody(nil)
+	if r := a.postNotification(t, body, nil); r.status != 204 {
+		t.Fatalf("status %d", r.status)
+	}
+	server := serverSpans(rec)
+	if len(server) != 1 {
+		t.Fatalf("%d server spans", len(server))
+	}
+	d := a.apiDeposit(t, aliceIBAN, body["network_transaction_id"], "")
+	var stored map[string]string
+	if err := a.pool.QueryRow(t.Context(),
+		`SELECT trace_context FROM outbox WHERE entity_id = $1`, depositUUID(t, d)).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	want := "00-" + server[0].SpanContext().TraceID().String() + "-" +
+		server[0].SpanContext().SpanID().String() + "-01"
+	if stored["traceparent"] != want {
+		t.Errorf("trace_context %v, want traceparent %s", stored, want)
+	}
+}

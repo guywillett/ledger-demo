@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -25,8 +26,9 @@ type Recorder struct {
 	reader *sdkmetric.ManualReader
 }
 
-// Record sets the global tracer and meter providers to ones recording in memory, as
-// telemetry.Setup sets the real ones in a process, and sets no-op ones back when the test ends.
+// Record sets the global tracer and meter providers to ones recording in memory, and the W3C
+// propagators, as telemetry.Setup sets the real ones in a process, and sets no-op ones back when
+// the test ends.
 // Global, so the code records through the providers it finds at run time (otelhttp, the database
 // tracer); safe because no test in this module calls t.Parallel, so a package's tests run one at a
 // time. Build whatever captures a provider (an otelhttp handler) after calling it.
@@ -41,9 +43,15 @@ func Record(t testing.TB) *Recorder {
 	meters := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	otel.SetTracerProvider(traces)
 	otel.SetMeterProvider(meters)
+	// The W3C propagators, as Setup registers them: the outbox and the relay write trace context
+	// through the global propagator, which is a no-op until one is set.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{}, propagation.Baggage{},
+	))
 	t.Cleanup(func() {
 		otel.SetTracerProvider(tracenoop.NewTracerProvider())
 		otel.SetMeterProvider(metricnoop.NewMeterProvider())
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
 		_ = traces.Shutdown(context.Background())
 		_ = meters.Shutdown(context.Background())
 	})

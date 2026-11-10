@@ -19,10 +19,18 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/guywillett/ledger-demo/go/internal/backoff"
 	"github.com/guywillett/ledger-demo/go/internal/broker"
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/outbox"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 )
 
 // Publisher is how an event gets onto NATS: broker.Publisher in the process, a recording or
@@ -32,11 +40,14 @@ import (
 // interface just by having its methods (implicitly, like a TypeScript structural type), so the
 // consumer states the one method it needs and broker needn't know this interface exists.
 type Publisher interface {
+	// traceHeaders (the publish span's context) go beside Nats-Msg-Id, observation only (slice 5
+	// decision 82): they never change msgID (decision 83).
 	Publish(
 		ctx context.Context,
 		subject string,
 		payload []byte,
 		msgID string,
+		traceHeaders map[string]string,
 	) (broker.PublishResult, error)
 }
 
@@ -64,11 +75,27 @@ type BatchResult struct {
 // batch carries on (there is no order to preserve). A database error (claiming or marking) ends
 // the batch and is returned (with no result: as usual in Go, a result that comes with an error
 // isn't to be read): the events still leased are retried once their lease expires.
+//
+// Traced (slice 5 decision 80): a batch that claimed events is a trace of its own, its root span
+// covering the publishes and the marks (so their database spans are its children); each publish is
+// a span of its own in it, linked to the trace of the request that enqueued the event, its context
+// sent to the consumers as the message's headers (decision 82). A claim that finds nothing is no
+// trace (decision 85): it runs outside any span, so its statement gets none either. As Node's.
 func PublishBatch(ctx context.Context, d Deps) (BatchResult, error) {
 	events, err := outbox.Claim(ctx, d.Pool, d.BatchSize, d.Lease)
 	if err != nil {
 		return BatchResult{}, err
 	}
+	if len(events) == 0 {
+		return BatchResult{}, nil
+	}
+	ctx, span := tracer().Start(ctx, "relay batch",
+		trace.WithNewRoot(),
+		trace.WithAttributes(
+			semconv.MessagingSystemKey.String("nats"),
+			semconv.MessagingBatchMessageCount(len(events)),
+		))
+	defer span.End()
 	result := BatchResult{Claimed: len(events)}
 	for _, event := range events {
 		published, err := publishEvent(ctx, d, event)
@@ -87,7 +114,7 @@ func PublishBatch(ctx context.Context, d Deps) (BatchResult, error) {
 func publishEvent(ctx context.Context, d Deps, event outbox.Event) (published bool, err error) {
 	log := d.Logger.With("event_id", event.ID, event.Entity.LogAttr())
 
-	result, err := d.Publisher.Publish(ctx, event.Subject, event.Payload, event.MsgID)
+	result, err := publish(ctx, d, event)
 	if err != nil {
 		retryIn := d.RetryDelay(event.Attempts)
 		// Logged before marking: if marking fails too (the database is down), the publish error
@@ -114,6 +141,43 @@ func publishEvent(ctx context.Context, d Deps, event outbox.Event) (published bo
 	}
 	log.Info("event published", fields...)
 	return true, nil
+}
+
+// tracer is the relay's instrumentation scope, from the global provider (a no-op until
+// telemetry.Setup registers one), looked up when used.
+func tracer() trace.Tracer {
+	return otel.Tracer("github.com/guywillett/ledger-demo/go/internal/relay")
+}
+
+// publish publishes the event in a span of its own (kind PRODUCER, by the messaging conventions),
+// linked to the trace it was enqueued in, its context sent as the message's trace headers, so the
+// consumer's span links to this one (decision 82). The marks come after it, in the batch's span.
+func publish(ctx context.Context, d Deps, event outbox.Event) (broker.PublishResult, error) {
+	attrs := []attribute.KeyValue{
+		semconv.MessagingSystemKey.String("nats"),
+		semconv.MessagingOperationName("publish"),
+		semconv.MessagingOperationTypeSend,
+		semconv.MessagingDestinationName(event.Subject),
+		semconv.MessagingMessageID(event.MsgID),
+		attribute.String("event_id", event.ID.TypeID()),
+	}
+	if id, ok := event.Entity.DepositID(); ok {
+		attrs = append(attrs, attribute.String("deposit_id", id.TypeID()))
+	}
+	if id, ok := event.Entity.WithdrawalID(); ok {
+		attrs = append(attrs, attribute.String("withdrawal_id", id.TypeID()))
+	}
+	ctx, span := tracer().Start(ctx, "publish "+event.Subject,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithLinks(telemetry.LinksTo(propagation.MapCarrier(event.TraceContext))...),
+		trace.WithAttributes(attrs...))
+	defer span.End()
+	result, err := d.Publisher.Publish(ctx, event.Subject, event.Payload, event.MsgID,
+		telemetry.Carrier(ctx))
+	if err != nil {
+		span.SetStatus(codes.Error, "publish failed")
+	}
+	return result, err
 }
 
 // The poll loop's timing, as Node's main.ts.

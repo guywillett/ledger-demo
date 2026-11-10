@@ -209,11 +209,16 @@ func NewPublisher(c *Conn, timeout time.Duration) (*Publisher, error) {
 // outage the stream may already hold an event the relay recorded as failed, and the relay's retry
 // is then acknowledged as a duplicate (stream_duplicate: true, measured), where Node's is a first
 // publish. The msg_id makes the two equivalent: the stream stores the event once either way.
+//
+// traceHeaders (the publish span's context: traceparent, …) go beside Nats-Msg-Id, observation only
+// (slice 5 decision 82): they never change it (decision 83), so a republished event is dropped by
+// the stream however its trace headers differ.
 func (p *Publisher) Publish(
 	ctx context.Context,
 	subject string,
 	payload []byte,
 	msgID string,
+	traceHeaders map[string]string,
 ) (PublishResult, error) {
 	stream, err := StreamForSubject(subject)
 	if err != nil {
@@ -221,7 +226,12 @@ func (p *Publisher) Publish(
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	ack, err := p.js.PublishMsg(ctx, &nats.Msg{Subject: subject, Data: payload},
+	header := nats.Header{}
+	for name, value := range traceHeaders {
+		header.Set(name, value)
+	}
+	// WithMsgID adds Nats-Msg-Id to the message's header.
+	ack, err := p.js.PublishMsg(ctx, &nats.Msg{Subject: subject, Data: payload, Header: header},
 		jetstream.WithMsgID(msgID),
 		// The server rejects the message unless it lands in this stream, so a subject that lands
 		// in another stream, or in none, fails loudly instead of being stored elsewhere.
