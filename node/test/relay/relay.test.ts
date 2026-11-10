@@ -142,7 +142,7 @@ describe('relayBatch', () => {
     const claimed = await claim(pool, { limit: 100, leaseMs: 300 });
     const event = claimed.find((e) => e.msgId === msgIdOf(deposit));
     if (event === undefined) throw new Error('the deposit’s event was not claimed');
-    const first = await streamPublisher.publish(event.subject, event.payload, event.msgId);
+    const first = await streamPublisher.publish(event.subject, event.payload, event.msgId, {});
     expect(first.duplicate).toBe(false);
 
     // Before the lease expires, another relay leaves it alone.

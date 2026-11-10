@@ -6,8 +6,9 @@ units in Node and Go, asserted by the same tests in both suites with in-memory e
 `test/telemetry/`, Go `internal/*/telemetry_test.go`). Bytes don't apply: IDs and timings differ by
 nature.
 
-Version 1 (slice 5, step 1): the resource, propagation at the edges, HTTP server and database spans,
-one metric, the log fields. Step 2 adds the messaging spans and links; step 3 the transition counter.
+Version 2 (slice 5, step 2): the resource, propagation at the edges and through the outbox and
+NATS, HTTP server, database and messaging spans, one metric, the log fields. Step 3 adds the
+transition counter.
 
 ## The rules
 
@@ -59,7 +60,21 @@ defaults (decision 80).
   propagator injects but never extracts; Go: otelhttp with no propagators.
 - **The submitter's calls to the provider** carry no trace headers (decision 84): neither
   implementation instruments outgoing HTTP.
-- Inside the system, through the outbox and the stream: step 2.
+- **Inside the system, through the outbox and the stream** (decisions 81 and 82): when the API
+  enqueues an event, the current context (the request's span) is injected into a string map and
+  stored in the outbox row's `trace_context` (`jsonb`; null outside a traced context, and for rows
+  from before slice 5). The relay restores it for its publish span's link, and sends the publish
+  span's own context as the message's headers, beside `Nats-Msg-Id`; JetStream stores headers with
+  the message, so every redelivery carries the same context. The consumer extracts it for its
+  processing span's link. Never in the payload: payloads stay byte-identical across
+  implementations.
+- **The chain:** each step starts a trace of its own and links to the one that caused it (the
+  messaging conventions), so a request's trace ends with the request: process -> publish ->
+  request. Grafana follows the links both ways.
+- **A missing or malformed carrier changes nothing but the trace:** no link, no error, and the
+  event is published and processed as ever. Trace context never touches idempotency (decision 83):
+  `Nats-Msg-Id` is the outbox's `msg_id` whatever the headers, so a republished event is dropped
+  by the stream however its trace headers differ.
 
 ## Spans
 
@@ -92,8 +107,9 @@ The routes: `GET /health`, `GET /accounts/{account_id}`, `GET /accounts/{account
 ### Database
 
 One per statement run inside a span, its child; none for a statement outside any span (the relay's
-and the consumers' polling: decision 85). Kind `CLIENT`. In step 1 that means the API's statements
-only; the workers' come with their processing spans (step 2).
+and the consumers' polling: decision 85). Kind `CLIENT`. So: the API's statements in their
+request's span, the relay's marks in its batch's span, and each delivery's statements in its
+processing span; a claim's and a fetch's never.
 
 - **Name:** the statement's operation, its first keyword upper-cased (`SELECT`, `INSERT`, `UPDATE`,
   `WITH`, `BEGIN`, `COMMIT`, …; `QUERY` if it starts with anything else): bounded, as every
@@ -108,6 +124,41 @@ only; the workers' come with their processing spans (step 2).
   records the message, so Node replaces it as the span ends (and takes the SQLSTATE from the
   instrumentation's own sanitised exception event); Go's tracer records only the code.
 - **Not:** parameters, connection or pool spans.
+
+### Messaging
+
+By OpenTelemetry's messaging conventions, NATS JetStream as `messaging.system`. Each event span
+also has our own `event_id`, and `deposit_id` or `withdrawal_id` (TypeIDs, as in the logs).
+
+**The relay's batch:** `relay batch`, kind `INTERNAL`, the root of a trace of its own, one per claim
+that returns events (none for a claim that finds nothing: decision 85). Attributes:
+`messaging.system` (`nats`), `messaging.batch.message_count` (how many it claimed). Its children:
+each event's publish span, and the marks' database spans.
+
+**Publish:** `publish {subject}` (e.g. `publish deposit.created`), kind `PRODUCER`, a child of the
+batch, one per event. Linked to the context stored with the event (the request that enqueued it);
+no link when there is none or it is malformed. Attributes: `messaging.system` (`nats`),
+`messaging.operation.name` (`publish`), `messaging.operation.type` (`send`),
+`messaging.destination.name` (the subject), `messaging.message.id` (the `Nats-Msg-Id`),
+`event_id`, `deposit_id` or `withdrawal_id`. A failed publish: status error, `publish failed`. Its
+context is the message's trace headers.
+
+**Process:** `process {subject}` (e.g. `process deposit.created`), kind `CONSUMER`, the root of a
+trace of its own, one per delivery: a redelivery is another, linked to the same publish, with its
+own `delivery_attempt` (decision 82). Linked to the context in the message's headers; no link
+when there is none or it is malformed. It starts before anything the delivery does and ends once
+the message is settled and its outcome recorded, so the delivery's database spans are its
+children and its log lines carry its IDs. Attributes: `messaging.system` (`nats`),
+`messaging.operation.name` (`process`), `messaging.operation.type` (`process`),
+`messaging.destination.name` (the subject), `messaging.consumer.group.name` (the durable consumer:
+`deposit-worker` or `submitter`), `messaging.message.id` (the `Nats-Msg-Id`, when there is one),
+our own `delivery_attempt` (1, 2, …), `event_id`, `deposit_id` or `withdrawal_id` (when the body
+has them: read before validation, as the delivery log reads `event_id`), and
+`delivery_outcome` (`applied`, `duplicate`, `invalid` or `failed`, the delivery log's outcome). An
+`invalid` or `failed` delivery: status error, `delivery invalid` or `delivery failed`.
+
+Not traced: a fetch (messages are processed one by one, and an empty fetch is emptiness), the NATS
+client's own work.
 
 ## Metrics
 

@@ -1,5 +1,6 @@
 import type { Queryable, Tx } from '../shared/db.ts';
 import type { Uuid } from '../shared/ids.ts';
+import { currentTraceCarrier, type TraceCarrier } from '../shared/trace-context.ts';
 
 // The transactional outbox (slice 2, Part A): every module that emits events writes them here,
 // in the same transaction as the state change they announce, and the relay (src/relay/)
@@ -31,19 +32,27 @@ export type OutboxEvent = {
   readonly payload: object;
   // Including this claim: 1 on the first attempt.
   readonly attempts: number;
+  // The trace context it was enqueued in, for the relay's publish span to link to; null if none
+  // (slice 5 decision 81).
+  readonly traceContext: TraceCarrier | null;
 } & OutboxEntity;
 
 // The payload goes in as JSON text cast to jsonb, explicitly. pg would serialise a plain object
 // to JSON itself, but an array would become a Postgres array literal; JSON.stringify is
 // unambiguous whatever the payload.
 const ENQUEUE_SQL = `
-INSERT INTO outbox (id, entity_type, entity_id, subject, msg_id, payload)
-VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+INSERT INTO outbox (id, entity_type, entity_id, subject, msg_id, payload, trace_context)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
 ON CONFLICT (msg_id) DO NOTHING
 `;
 
 // Stores an event in the caller's transaction: it commits or rolls back with the state change.
 // Takes a Tx because that shared transaction is the whole point.
+//
+// With the trace context it is enqueued in (the request's span, in the API), so the relay's
+// publish span can link to it (slice 5 decision 81): null outside a traced context. Read from the
+// current context, as the logger's trace fields are, so every event gets it. Never in the payload:
+// payloads stay byte-identical across implementations.
 //
 // A msg_id already stored means a second event for the same entity and status, which the
 // conditional transitions should make impossible: a bug, not a retry, so it throws (and the
@@ -56,6 +65,7 @@ export async function enqueue(tx: Tx, e: NewOutboxEvent): Promise<void> {
     e.subject,
     e.msgId,
     JSON.stringify(e.payload),
+    jsonOrNull(currentTraceCarrier()),
   ]);
   if (result.rowCount !== 1) {
     throw new Error(`outbox already holds an event with msg_id ${e.msgId}`);
@@ -88,7 +98,7 @@ WITH claimed AS (
     LIMIT $1
     FOR UPDATE SKIP LOCKED
   )
-  RETURNING id, entity_type, entity_id, subject, msg_id, payload, attempts
+  RETURNING id, entity_type, entity_id, subject, msg_id, payload, attempts, trace_context
 )
 SELECT * FROM claimed ORDER BY id
 `;
@@ -106,6 +116,7 @@ export async function claim(
     // pg parses jsonb into a JavaScript value.
     payload: object;
     attempts: number;
+    trace_context: unknown;
   }>(CLAIM_SQL, [opts.limit, opts.leaseMs]);
   return result.rows.map((row) => ({
     id: row.id as Uuid<'evt'>,
@@ -114,7 +125,22 @@ export async function claim(
     msgId: row.msg_id,
     payload: row.payload,
     attempts: row.attempts,
+    traceContext: traceCarrierFromRow(row.trace_context),
   }));
+}
+
+function jsonOrNull(value: object | null): string | null {
+  return value === null ? null : JSON.stringify(value);
+}
+
+// The stored carrier: a JSON object of strings, as written; anything else (null, rows from before
+// slice 5) is none. A malformed one is only a lost link (decision 83), never an error.
+function traceCarrierFromRow(value: unknown): TraceCarrier | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] => typeof entry[1] === 'string',
+  );
+  return entries.length === 0 ? null : Object.fromEntries(entries);
 }
 
 // The column's CHECK allows only these.

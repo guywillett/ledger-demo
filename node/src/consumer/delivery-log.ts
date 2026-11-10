@@ -1,8 +1,10 @@
+import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import type pg from 'pg';
 import type { z } from 'zod';
 import { retryDelay, type Backoff } from '../shared/backoff.ts';
-import { toTypeId } from '../shared/ids.ts';
+import { toTypeId, type Uuid } from '../shared/ids.ts';
 import type { Logger } from '../shared/logger.ts';
+import { linksTo } from '../shared/trace-context.ts';
 import {
   finishDelivery,
   startDelivery,
@@ -10,7 +12,7 @@ import {
   type DeliveryId,
   type DeliveryOutcome,
 } from './deliveries.ts';
-import { parseEvent, peekEventId, type DeliveredMessage } from './messages.ts';
+import { parseEvent, peekEntityIds, peekEventId, type DeliveredMessage } from './messages.ts';
 
 // The delivery lifecycle every consumer's handler shares, so each handler holds only its domain
 // steps: record the delivery, parse the event, run the handler, then settle the message (ack,
@@ -22,6 +24,9 @@ import { parseEvent, peekEventId, type DeliveredMessage } from './messages.ts';
 // after 1 s, doubling per attempt, at most 60 s. Set on each nak rather than as a consumer
 // backoff, because a consumer backoff also replaces ack_wait for messages still being processed.
 // Handlers take the values as dependencies, so tests inject their own.
+// The instrumentation scope of the consumers' processing spans.
+const tracer = trace.getTracer('ledger-demo/consumer');
+
 export const DELIVERY_RETRY: Backoff = { retryBaseDelayMs: 1000, retryMaxDelayMs: 60_000 };
 
 // What a handler must return: proof that it settled the message. Only the context's done(),
@@ -62,13 +67,58 @@ export type DeliveryLogOptions<S extends z.ZodType> = {
   readonly transientFailureMessage?: string;
 };
 
+// Runs one delivery in a processing span of its own (slice 5 decision 80): a root span per message,
+// kind CONSUMER, linked to the publish that sent it (the context in its headers; no link if there
+// is none, or it is malformed). Started before anything the delivery does, so every database
+// statement of the delivery (the delivery log's included) and every log line is in it; ended once
+// the message is settled and its outcome recorded. A redelivery is a span of its own, linked to the
+// same publish, with its own delivery_attempt. Go: Lifecycle.Deliver.
 export async function withDeliveryLog<S extends z.ZodType>(
   options: DeliveryLogOptions<S>,
   msg: DeliveredMessage,
   handle: (event: z.output<S>, ctx: DeliveryContext) => Promise<Settled>,
 ): Promise<DeliveryOutcome> {
-  // Log the delivery before anything else, with the event_id if it can be read at all.
   const peekedEventId = peekEventId(msg.body);
+  return tracer.startActiveSpan(
+    `process ${msg.subject}`,
+    {
+      root: true,
+      kind: SpanKind.CONSUMER,
+      links: linksTo(msg.headers),
+      attributes: {
+        'messaging.system': 'nats',
+        'messaging.operation.name': 'process',
+        'messaging.operation.type': 'process',
+        'messaging.destination.name': msg.subject,
+        'messaging.consumer.group.name': options.consumer,
+        ...(msg.natsMsgId === null ? {} : { 'messaging.message.id': msg.natsMsgId }),
+        delivery_attempt: msg.deliveryAttempt,
+        ...(peekedEventId === null ? {} : { event_id: toTypeId('evt', peekedEventId) }),
+        ...peekEntityIds(msg.body),
+      },
+    },
+    async (span) => {
+      try {
+        const outcome = await deliver(options, msg, handle, peekedEventId);
+        span.setAttribute('delivery_outcome', outcome);
+        if (outcome === 'failed' || outcome === 'invalid') {
+          span.setStatus({ code: SpanStatusCode.ERROR, message: `delivery ${outcome}` });
+        }
+        return outcome;
+      } finally {
+        span.end();
+      }
+    },
+  );
+}
+
+async function deliver<S extends z.ZodType>(
+  options: DeliveryLogOptions<S>,
+  msg: DeliveredMessage,
+  handle: (event: z.output<S>, ctx: DeliveryContext) => Promise<Settled>,
+  peekedEventId: Uuid<'evt'> | null,
+): Promise<DeliveryOutcome> {
+  // Log the delivery before anything else, with the event_id if it can be read at all.
   let log = options.logger.child({
     nats_msg_id: msg.natsMsgId,
     delivery_attempt: msg.deliveryAttempt,

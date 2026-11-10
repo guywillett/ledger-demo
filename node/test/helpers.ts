@@ -100,6 +100,8 @@ export type RecordedEvent = {
   readonly subject: string;
   readonly event: Record<string, unknown>;
   readonly msgId: string;
+  // The publish span's context, sent beside Nats-Msg-Id (slice 5 decision 82).
+  readonly traceHeaders: Readonly<Record<string, string>>;
   readonly result: PublishResult;
 };
 
@@ -113,10 +115,16 @@ export function recordingPublisher(publisher: EventPublisher): {
   return {
     published,
     publisher: {
-      async publish(subject, event, msgId) {
+      async publish(subject, event, msgId, traceHeaders) {
         expectEventMatchesContract(event);
-        const result = await publisher.publish(subject, event, msgId);
-        published.push({ subject, event: event as Record<string, unknown>, msgId, result });
+        const result = await publisher.publish(subject, event, msgId, traceHeaders);
+        published.push({
+          subject,
+          event: event as Record<string, unknown>,
+          msgId,
+          traceHeaders,
+          result,
+        });
         return result;
       },
     },

@@ -1,8 +1,10 @@
+import { SpanKind, SpanStatusCode, context, propagation, trace } from '@opentelemetry/api';
 import { claim, markFailed, markPublished, type OutboxEvent } from '../outbox/outbox.ts';
 import type { Queryable } from '../shared/db.ts';
 import { toTypeId } from '../shared/ids.ts';
 import type { Logger } from '../shared/logger.ts';
 import type { EventPublisher, PublishResult } from '../shared/nats.ts';
+import { linksTo } from '../shared/trace-context.ts';
 
 // The relay: publishes the outbox to JetStream. Each batch is
 //   1. claimed (one statement: leased to this relay, attempts counted; see outbox.claim),
@@ -14,6 +16,15 @@ import type { EventPublisher, PublishResult } from '../shared/nats.ts';
 // is published again; within the stream's duplicate window the msg_id makes the stream drop the
 // repeat, and beyond it consumers are idempotent on state. No ordering guarantee: retries and
 // other relay instances publish out of order, and consumers don't depend on order.
+//
+// Traced (slice 5 decision 80): a batch that claimed events is a trace of its own, its root span
+// covering the publishes and the marks (so their database spans are its children); each publish is
+// a span of its own in it, linked to the trace of the request that enqueued the event, and its
+// context goes to the consumers as the message's headers (decision 82). A claim that finds nothing
+// is no trace (decision 85): it runs outside any span, so its query gets none either.
+
+// The instrumentation scope of the relay's spans.
+const tracer = trace.getTracer('ledger-demo/relay');
 
 export type RelayDeps = {
   readonly pool: Queryable;
@@ -35,11 +46,25 @@ export type BatchResult = { readonly claimed: number; readonly published: number
 // is thrown: the events still leased are retried once their lease expires.
 export async function relayBatch(deps: RelayDeps): Promise<BatchResult> {
   const events = await claim(deps.pool, { limit: deps.batchSize, leaseMs: deps.leaseMs });
-  let published = 0;
-  for (const event of events) {
-    if (await relayEvent(deps, event)) published += 1;
-  }
-  return { claimed: events.length, published };
+  if (events.length === 0) return { claimed: 0, published: 0 };
+  return tracer.startActiveSpan(
+    'relay batch',
+    {
+      root: true,
+      attributes: { 'messaging.system': 'nats', 'messaging.batch.message_count': events.length },
+    },
+    async (span) => {
+      try {
+        let published = 0;
+        for (const event of events) {
+          if (await relayEvent(deps, event)) published += 1;
+        }
+        return { claimed: events.length, published };
+      } finally {
+        span.end();
+      }
+    },
+  );
 }
 
 // true if the stream acknowledged the event.
@@ -51,7 +76,7 @@ async function relayEvent(deps: RelayDeps, event: OutboxEvent): Promise<boolean>
 
   let result: PublishResult;
   try {
-    result = await deps.publisher.publish(event.subject, event.payload, event.msgId);
+    result = await publish(deps, event);
   } catch (err) {
     const retryInMs = deps.retryDelay(event.attempts);
     // Logged before marking: if marking fails too (the database is down), the publish error
@@ -78,6 +103,45 @@ async function relayEvent(deps: RelayDeps, event: OutboxEvent): Promise<boolean>
     'event published',
   );
   return true;
+}
+
+// Publishes the event in a span of its own (kind PRODUCER, by the messaging conventions), linked to
+// the trace it was enqueued in, its context sent as the message's trace headers, so the consumer's
+// span links to this one (decision 82). The marks come after it, in the batch's span.
+async function publish(deps: RelayDeps, event: OutboxEvent): Promise<PublishResult> {
+  return tracer.startActiveSpan(
+    `publish ${event.subject}`,
+    {
+      kind: SpanKind.PRODUCER,
+      links: linksTo(event.traceContext),
+      attributes: {
+        'messaging.system': 'nats',
+        'messaging.operation.name': 'publish',
+        'messaging.operation.type': 'send',
+        'messaging.destination.name': event.subject,
+        'messaging.message.id': event.msgId,
+        event_id: toTypeId('evt', event.id),
+        ...entityLogFields(event),
+      },
+    },
+    async (span) => {
+      const traceHeaders: Record<string, string> = {};
+      propagation.inject(context.active(), traceHeaders);
+      try {
+        return await deps.publisher.publish(
+          event.subject,
+          event.payload,
+          event.msgId,
+          traceHeaders,
+        );
+      } catch (err) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: 'publish failed' });
+        throw err;
+      } finally {
+        span.end();
+      }
+    },
+  );
 }
 
 // The ID of what the event is about, as its TypeID, so a relay line can be found from the
