@@ -33,6 +33,7 @@ Today the system's only window is its structured logs. After this slice:
 - `trace_id` and `span_id` on every log line (decision 86)
 - `contracts/telemetry.md` (decision 87)
 - One pipeline metric built: the transition counter (decision 88); one provisioned dashboard
+- Logs also exported over OTLP, beside stdout, so Grafana shows a trace's log lines (decision 93)
 - Tests of propagation, of idle silence and of privacy, in both suites; the demo with telemetry
   stopped
 
@@ -93,7 +94,15 @@ Each step: the contract and the Node implementation in one commit, then Go in a 
 3. **The transition counter and a dashboard:** `ledger_transitions_total`, recorded for applied
    transitions after the commit; one provisioned Grafana dashboard (request rates and errors by
    route, the transition counter by step, links to traces and logs).
-4. **Docs and close:** README (a short section: how to see a payment's trace), `docs/development.md`,
+4. **Logs to the backend too:** each process writes every log line to stdout as now and also
+   exports it over OTLP (decision 93): Go through an `slog` handler that fans each record out to the
+   existing JSON handler and OpenTelemetry's `otelslog` bridge; Node through pino's OpenTelemetry
+   support. `OTEL_LOGS_EXPORTER` switches the copy per environment (`otlp`, or `none` for stdout
+   only: decision 93). The contract's *Logs* section gains the OTLP record's mapping (severity, body,
+   attributes) and the privacy rule for it. Tests: a log line in a traced context reaches an
+   in-memory log exporter with its trace and span IDs; stdout's lines are unchanged; with the backend
+   absent, stdout still has every line; with `OTEL_LOGS_EXPORTER=none`, nothing is exported.
+5. **Docs and close:** README (a short section: how to see a payment's trace), `docs/development.md`,
    *Next* complete, *Done when*, the tag.
 
 ## Done when
@@ -106,6 +115,8 @@ Each step: the contract and the Node implementation in one commit, then Go in a 
   polling queries
 - [ ] No personal data in any span, metric or attribute (tested), and route templates in span names
 - [ ] Every log line in a traced context carries `trace_id` and `span_id`
+- [ ] Every log line also reaches the backend over OTLP, a request's lines shown with its trace in
+  Grafana; stdout unchanged and complete with the backend down
 - [ ] `contracts/telemetry.md` lists every span, attribute and metric both implementations emit,
   with the three rules
 - [ ] With the telemetry service stopped, the demo passes on every stack (CI runs it so)
@@ -247,3 +258,18 @@ All earlier gaps apply. In addition:
     implementations. Optional, if cheap: a script that queries the local Tempo after the demo and
     checks that each processing span has a link to an existing request trace.
 92. **Tag `v0.5-observability`** on the merge commit.
+93. **Logs go to stdout and, as a copy, to the telemetry backend.** Stdout's JSON lines stay the
+    source of truth: what `docker compose logs`, the scripts and the e2e tests read, and what a
+    platform ships wherever it ships logs (CloudWatch, Datadog, …), complete with the backend down.
+    Each line is also exported over OTLP, so Grafana shows a request's log lines with its trace
+    (Loki beside Tempo); that copy is telemetry like the rest, batched and droppable (decision 79).
+    From the processes rather than by shipping the containers' output: otel-lgtm doesn't read
+    Docker's logs, so that would mean another collector container, more infrastructure than the
+    copy is worth here. The privacy rule applies to both outputs alike (log lines carry IDs, never
+    personal data). Per environment: the copy is switched by OpenTelemetry's standard
+    `OTEL_LOGS_EXPORTER`: `otlp` (the specification's default, and compose's) for stdout and the
+    copy; `none` for stdout only, where an agent ships stdout (a Datadog agent, a Collector reading
+    the containers' output). Nothing is lost by `none`: every line carries its `trace_id` and
+    `span_id` (decision 86), so the agent's backend links logs and traces the same way. Considered: OTLP only (loses the logs whenever the backend does); shipping
+    stdout with Grafana Alloy or a Collector's file receiver (no code change, but another
+    container).
