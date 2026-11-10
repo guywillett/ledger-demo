@@ -1,5 +1,6 @@
 import type { Queryable, Tx } from '../shared/db.ts';
 import type { Uuid } from '../shared/ids.ts';
+import { countTransition } from '../shared/metrics.ts';
 
 // The withdrawal lifecycle, shared by the modules that own its transitions:
 //   held -> submitted -> executed
@@ -140,6 +141,7 @@ export async function transitionWithdrawalStatus(
   }
   const from = parseWithdrawalStatus(row.from_status);
   await tx.query(HISTORY_SQL, [t.withdrawalId, from, t.to, reason]);
+  countTransition(tx, { entity: 'withdrawal', from, to: t.to });
   return { accountId: row.account_id as Uuid<'acct'>, amountMinor: row.amount_minor, from };
 }
 

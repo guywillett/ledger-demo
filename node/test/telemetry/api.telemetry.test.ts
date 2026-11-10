@@ -247,6 +247,16 @@ describe('log lines', () => {
 });
 
 describe('metrics', () => {
+  // The contract's metrics and the attributes each may carry (the views' allow-list).
+  const CONTRACT: Record<string, readonly string[]> = {
+    'http.server.request.duration': [
+      'http.request.method',
+      'http.route',
+      'http.response.status_code',
+    ],
+    ledger_transitions_total: ['entity', 'from', 'to', 'implementation'],
+  };
+
   // One request, one measurement: a doubled count is what an instrument matching two views gives
   // (see METRIC_VIEWS in src/shared/telemetry.ts).
   it('measure each request once', async () => {
@@ -272,15 +282,24 @@ describe('metrics', () => {
     expect((await countFor()) - before).toBe(1);
   });
 
-  it("are the contract's only: the request duration, by method, route and status", async () => {
+  it("are the contract's only, each with only its listed attributes", async () => {
     await fetch(`${base}/accounts/${ALICE.id}/balance`);
     await settled(1);
     await metricReader.forceFlush();
-    const exported = metrics.getMetrics().flatMap((rm) => rm.scopeMetrics);
-    const names = exported.flatMap((sm) => sm.metrics.map((m) => m.descriptor.name));
-    expect([...new Set(names)]).toEqual(['http.server.request.duration']);
+    const exported = metrics
+      .getMetrics()
+      .flatMap((rm) => rm.scopeMetrics.flatMap((sm) => sm.metrics));
+    for (const metric of exported) {
+      const allowed = CONTRACT[metric.descriptor.name];
+      expect(allowed, metric.descriptor.name).toBeDefined();
+      for (const point of metric.dataPoints) {
+        // A request with no route has no http.route: a subset of the listed ones.
+        expect(Object.keys(point.attributes).filter((key) => !allowed?.includes(key))).toEqual([]);
+      }
+    }
+    const durations = exported.filter((m) => m.descriptor.name === 'http.server.request.duration');
     const points: Attributes[] = [];
-    for (const metric of exported.flatMap((sm) => sm.metrics)) {
+    for (const metric of durations) {
       for (const point of metric.dataPoints) points.push(point.attributes);
     }
     expect(points).toContainEqual({
@@ -288,13 +307,6 @@ describe('metrics', () => {
       'http.route': '/accounts/{account_id}/balance',
       'http.response.status_code': 200,
     });
-    // Only the listed attributes, on every point (a request with no route has no http.route).
-    for (const attributes of points) {
-      const extra = Object.keys(attributes).filter(
-        (key) => !['http.request.method', 'http.route', 'http.response.status_code'].includes(key),
-      );
-      expect(extra).toEqual([]);
-    }
   });
 });
 
@@ -307,9 +319,11 @@ describe('the resource', () => {
       implementation: 'node',
       'telemetry.sdk.language': 'nodejs',
     });
-    // Nothing about the host or the process (no detectors).
+    // Nothing else about the host or the process (no detectors).
     expect(Object.keys(span?.resource.attributes ?? {}).sort()).toEqual([
+      'host.name',
       'implementation',
+      'service.instance.id',
       'service.name',
       'telemetry.sdk.language',
       'telemetry.sdk.name',

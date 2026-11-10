@@ -316,6 +316,11 @@ services:
     profiles: ["telemetry"]
     ports:
       - "3002:3000"
+    # Our dashboard (grafana/), provisioned beside the image's own: the provider file into its
+    # provisioning directory, the dashboards where that file points. Read-only: edit them here.
+    volumes:
+      - ./grafana/provisioning.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/ledger-demo.yaml:ro
+      - ./grafana/dashboards:/otel-lgtm/ledger-demo-dashboards:ro
 
   # Reconciliation on demand: docker compose run --rm reconcile [options]. It only reads the
   # shared database, so it checks whichever implementation wrote the data; scripts/demo.sh

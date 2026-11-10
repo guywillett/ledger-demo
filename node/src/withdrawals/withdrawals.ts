@@ -3,6 +3,7 @@ import type { Iban } from '../shared/iban.ts';
 import { newUuid, type Uuid } from '../shared/ids.ts';
 import { parseWithdrawalStatus, type WithdrawalStatus } from './status.ts';
 import { accountExists } from '../accounts/accounts.ts';
+import { countTransition } from '../shared/metrics.ts';
 
 // The withdrawal entity and how it is stored and read. Its lifecycle and transitions are in
 // status.ts; holding the funds, executing and releasing them are ledger postings
@@ -139,7 +140,9 @@ export async function insertWithdrawal(tx: Tx, w: NewWithdrawal): Promise<Withdr
       throw asAccountNotFound(err, w.accountId);
     });
   const row = result.rows[0];
-  return row === undefined ? undefined : withdrawalFromRow(row);
+  if (row === undefined) return undefined;
+  countTransition(tx, { entity: 'withdrawal', from: null, to: 'held' });
+  return withdrawalFromRow(row);
 }
 
 const GET_SQL = 'SELECT * FROM withdrawals WHERE id = $1';

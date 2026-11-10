@@ -1,0 +1,405 @@
+{
+  "uid": "ledger-demo",
+  "title": "ledger-demo",
+  "description": "The API's requests by route and the payment pipeline's transitions (slice 5, contracts/telemetry.md). Each series links to its traces in Tempo; each trace to the next (process -> publish -> request). Rates miss what a process counts before its first export (each start is a new series), so they dip a little across restarts: for trends; exact counts come from the database (the slice 5 spec, Known gaps).",
+  "tags": [
+    "ledger-demo"
+  ],
+  "timezone": "browser",
+  "editable": false,
+  "schemaVersion": 39,
+  "version": 3,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "API requests (http.server.request.duration)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Request rate by route",
+      "description": "Requests per second, by route template (both implementations).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count{http_route!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{http_route}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "links": [
+            {
+              "title": "Traces for ${__field.labels.http_route}",
+              "url": "/explore?schemaVersion=1&orgId=1&panes={%22a%22%3A{%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22datasource%22%3A{%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22}%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22{%20span.http.route%20%3D%20%5C%22${__field.labels.http_route}%5C%22%20}%22%2C%22limit%22%3A20}%5D%2C%22range%22%3A{%22from%22%3A%22${__from}%22%2C%22to%22%3A%22${__to}%22}}}"
+            }
+          ],
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Errors by route",
+      "description": "Responses with a 4xx or 5xx status, per second, by route and status.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (http_route, http_response_status_code) (rate(http_server_request_duration_seconds_count{http_response_status_code=~\"[45]..\"}[$__rate_interval]))",
+          "legendFormat": "{{http_route}} {{http_response_status_code}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "links": [
+            {
+              "title": "Failed requests' traces for ${__field.labels.http_route}",
+              "url": "/explore?schemaVersion=1&orgId=1&panes={%22a%22%3A{%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22datasource%22%3A{%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22}%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22{%20span.http.route%20%3D%20%5C%22${__field.labels.http_route}%5C%22%20%26%26%20span.http.response.status_code%20%3E%3D%20400%20}%22%2C%22limit%22%3A20}%5D%2C%22range%22%3A{%22from%22%3A%22${__from}%22%2C%22to%22%3A%22${__to}%22}}}"
+            }
+          ],
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "p95 duration by route",
+      "description": "The 95th percentile of request duration, by route template.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{http_route!=\"\"}[$__rate_interval])))",
+          "legendFormat": "{{http_route}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "links": [
+            {
+              "title": "Traces for ${__field.labels.http_route}",
+              "url": "/explore?schemaVersion=1&orgId=1&panes={%22a%22%3A{%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22datasource%22%3A{%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22}%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22{%20span.http.route%20%3D%20%5C%22${__field.labels.http_route}%5C%22%20}%22%2C%22limit%22%3A20}%5D%2C%22range%22%3A{%22from%22%3A%22${__from}%22%2C%22to%22%3A%22${__to}%22}}}"
+            }
+          ],
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "The pipeline (ledger_transitions_total)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "panels": []
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Transitions by step",
+      "description": "Applied, committed status transitions per second, by entity and step (from none: a creation), and implementation.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 16,
+        "x": 0,
+        "y": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (entity, from, to, implementation) (rate(ledger_transitions_total[$__rate_interval]))",
+          "legendFormat": "{{entity}} {{from}} → {{to}} ({{implementation}})",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "links": [
+            {
+              "title": "Processing traces (${__field.labels.implementation})",
+              "url": "/explore?schemaVersion=1&orgId=1&panes={%22a%22%3A{%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22datasource%22%3A{%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22}%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22{%20span.messaging.operation.name%20%3D%20%5C%22process%5C%22%20%26%26%20resource.implementation%20%3D%20%5C%22${__field.labels.implementation}%5C%22%20}%22%2C%22limit%22%3A20}%5D%2C%22range%22%3A{%22from%22%3A%22${__from}%22%2C%22to%22%3A%22${__to}%22}}}"
+            }
+          ],
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Transitions by implementation",
+      "description": "Applied transitions per second, by the implementation that applied them (a mixed stack shows both).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (implementation) (rate(ledger_transitions_total[$__rate_interval]))",
+          "legendFormat": "{{implementation}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "links": [
+            {
+              "title": "Processing traces (${__field.labels.implementation})",
+              "url": "/explore?schemaVersion=1&orgId=1&panes={%22a%22%3A{%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22datasource%22%3A{%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22}%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22{%20span.messaging.operation.name%20%3D%20%5C%22process%5C%22%20%26%26%20resource.implementation%20%3D%20%5C%22${__field.labels.implementation}%5C%22%20}%22%2C%22limit%22%3A20}%5D%2C%22range%22%3A{%22from%22%3A%22${__from}%22%2C%22to%22%3A%22${__to}%22}}}"
+            }
+          ],
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Transitions by instance",
+      "description": "The same rate split by process instance (service.instance.id, Prometheus's instance label) and implementation, to show how workers share the work: e.g. two deposit-workers on one consumer. The legend's host is the container ID (host.name, joined from target_info). The panels above aggregate across instances on purpose.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum by (job, instance, implementation, host_name) (rate(ledger_transitions_total[$__rate_interval]) * on (job, instance) group_left (host_name) target_info)",
+          "legendFormat": "{{job}} {{implementation}} {{host_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "links": [
+            {
+              "title": "Processing traces (${__field.labels.implementation})",
+              "url": "/explore?schemaVersion=1&orgId=1&panes={%22a%22%3A{%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B{%22refId%22%3A%22A%22%2C%22datasource%22%3A{%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22}%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22{%20span.messaging.operation.name%20%3D%20%5C%22process%5C%22%20%26%26%20resource.implementation%20%3D%20%5C%22${__field.labels.implementation}%5C%22%20}%22%2C%22limit%22%3A20}%5D%2C%22range%22%3A{%22from%22%3A%22${__from}%22%2C%22to%22%3A%22${__to}%22}}}"
+            }
+          ],
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

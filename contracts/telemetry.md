@@ -6,9 +6,9 @@ units in Node and Go, asserted by the same tests in both suites with in-memory e
 `test/telemetry/`, Go `internal/*/telemetry_test.go`). Bytes don't apply: IDs and timings differ by
 nature.
 
-Version 2 (slice 5, step 2): the resource, propagation at the edges and through the outbox and
-NATS, HTTP server, database and messaging spans, one metric, the log fields. Step 3 adds the
-transition counter.
+Version 3 (slice 5, step 3): the resource, propagation at the edges and through the outbox and
+NATS, HTTP server, database and messaging spans, the request duration and the transition counter,
+the log fields.
 
 ## The rules
 
@@ -17,7 +17,9 @@ transition counter.
   Anything of our own is listed here, with its reason.
 - **Bounded cardinality:** no unbounded value (an account, deposit, withdrawal or event ID; an
   amount; a raw path) in a span name or a metric attribute. Span names are route templates and
-  statement operations; IDs go in span attributes and log lines.
+  statement operations; IDs go in span attributes and log lines. The rule is about values that grow
+  within a process, not instance identity: a new `service.instance.id` per restart is a new set of
+  series per process lifetime, which is bounded and expected (Prometheus ages stale series out).
 - **No personal data:** no IBANs, names or remittance text anywhere, as sent or normalised; IDs
   only. Database spans carry the statement's text, never its parameters, and a failure's code,
   never its message. No request or response bodies, no headers beyond the conventions' safe ones,
@@ -42,9 +44,11 @@ transition counter.
 |---|---|
 | `service.name` | the process's role: `api`, `relay`, `deposit-worker` or `submitter`, the same in both implementations (decision 90), so a mixed stack shows one service per role |
 | `implementation` | `node` or `go`, as in the logs (our own attribute: the logs' field) |
+| `service.instance.id` | a random UUID, generated once per process start: tells two instances of one service apart (two deposit-workers of one implementation), which would otherwise write identical metric series, each pushing its own cumulative values, so a series flips between them and `rate()` reads each drop as a reset. Random, as the conventions recommend: always unique, the same in both implementations, whatever the platform |
+| `host.name` | the process's hostname, so a person can map an instance to its container (in compose the container ID, in Kubernetes the pod name). The one host attribute admitted on purpose: a container ID, not personal data |
 | `telemetry.sdk.language`, `telemetry.sdk.name`, `telemetry.sdk.version` | the SDK's own, as they come (`nodejs` or `go`) |
 
-Nothing else: no host or process detectors. `service.version` isn't set: the images carry no build
+Nothing else: no host or process detectors (`host.name` is set by our code, not detected). `service.version` isn't set: the images carry no build
 version yet. Go's SDK also merges `OTEL_RESOURCE_ATTRIBUTES` (its `WithResource` always adds the
 environment's), Node's doesn't read it; compose sets none.
 
@@ -165,7 +169,19 @@ client's own work.
 | Name | Type | Unit | Attributes | Recorded |
 |---|---|---|---|---|
 | `http.server.request.duration` | histogram | `s` | `http.request.method`, `http.route` (matched routes), `http.response.status_code` | for every API request, by the HTTP instrumentation |
+| `ledger_transitions_total` | counter | `{transition}` | `entity` (`deposit`, `withdrawal`), `from`, `to` (the statuses; `from` is `none` for a creation), `implementation` (`node`, `go`) | once per applied status transition, and per creation, after its transaction commits |
 
+**`ledger_transitions_total`** (decision 88): the pipeline's flow, one count per step an entity
+takes, by the step. A creation is a step from `none` to the entity's first status (`created` or
+`unmatched` for a deposit, `held` for a withdrawal), so the pipeline's entry is counted too.
+Counted only once its transaction has committed (an after-commit hook), so a rolled-back
+transaction counts nothing, and never for a transition that didn't apply (already done: a
+duplicate delivery) or a notification that created nothing (a duplicate, a conflict). Bounded:
+its attribute values are the legal transitions and the two implementations. A metric for rates;
+alerts on stuck items come from the database (decision 88). `implementation` is an attribute of
+its own, besides the resource's: Prometheus (otel-lgtm's) puts resource attributes on
+`target_info` only, not on each series, so it saves every query by implementation a join on
+`target_info` (by `job` and `instance`, the latter from `service.instance.id`).
 Nothing else is exported: each implementation keeps an allow-list (metric views), so an
 instrumentation's other instruments (pg's connection and operation metrics, otelhttp's body sizes)
 are dropped, and a listed metric keeps only its listed attributes. Exported every

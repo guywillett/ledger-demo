@@ -2,9 +2,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, describe, expect, it } from 'vitest';
 import { loadSharedConfig } from '../../src/shared/config.ts';
 import type pg from 'pg';
-import { createPool, ping, withTransaction, type Tx } from '../../src/shared/db.ts';
+import { afterCommit, createPool, ping, withTransaction, type Tx } from '../../src/shared/db.ts';
 import { createLogger } from '../../src/shared/logger.ts';
-import { balancesOf, createTestAccount } from '../helpers.ts';
+import { balancesOf, capturingLogger, createTestAccount } from '../helpers.ts';
 
 // Runs against the compose Postgres (docker compose up -d).
 const config = loadSharedConfig();
@@ -113,6 +113,73 @@ describe('database', () => {
 // ping (slice 4 decision 72): through the pool, and after its deadline it ends what pg lets it end.
 // The timing cases use a stub pool: a connection handed over late, or a query that never answers,
 // are hard to arrange on a real database.
+// The after-commit hooks (slice 5): what runs only once a transaction has committed.
+describe('afterCommit', () => {
+  it('runs the hooks after COMMIT, in the order queued', async () => {
+    const ran: string[] = [];
+    const result = await withTransaction(pool, async (tx) => {
+      afterCommit(tx, () => ran.push('first'));
+      afterCommit(tx, () => ran.push('second'));
+      await tx.query('SELECT 1');
+      expect(ran).toEqual([]); // not before the commit
+      return 'done';
+    });
+    expect(result).toBe('done');
+    expect(ran).toEqual(['first', 'second']);
+  });
+
+  it('never runs them after a rollback', async () => {
+    const ran: string[] = [];
+    await expect(
+      withTransaction(pool, async (tx) => {
+        afterCommit(tx, () => ran.push('hook'));
+        throw new Error('rolled back');
+      }),
+    ).rejects.toThrow('rolled back');
+    expect(ran).toEqual([]);
+  });
+
+  it('never runs them when COMMIT itself fails', async () => {
+    const ran: string[] = [];
+    await expect(
+      withTransaction(pool, async (tx) => {
+        afterCommit(tx, () => ran.push('hook'));
+        // A deferred constraint violation surfaces at COMMIT, failing it.
+        await tx.query(
+          'CREATE TEMP TABLE t (id int PRIMARY KEY DEFERRABLE INITIALLY DEFERRED) ON COMMIT DROP',
+        );
+        await tx.query('INSERT INTO t VALUES (1), (1)');
+      }),
+    ).rejects.toMatchObject({ code: '23505' });
+    expect(ran).toEqual([]);
+  });
+
+  it('logs a hook that throws, and the transaction and the later hooks stand', async () => {
+    const { logger, lines } = capturingLogger();
+    const own = createPool({ databaseUrl: config.databaseUrl, logger });
+    try {
+      const ran: string[] = [];
+      const result = await withTransaction(own, async (tx) => {
+        afterCommit(tx, () => {
+          throw new Error('a broken hook');
+        });
+        afterCommit(tx, () => ran.push('after'));
+        return 'committed';
+      });
+      expect(result).toBe('committed');
+      expect(ran).toEqual(['after']);
+      expect(lines()).toContainEqual(
+        expect.objectContaining({
+          level: 'error',
+          msg: 'after-commit hook failed; the transaction stands',
+        }),
+      );
+    } finally {
+      await own.end();
+    }
+  });
+});
+
 describe('ping', () => {
   // A stub pool whose connect resolves after connectMs with a client whose query never answers
   // (queryHangs) or answers at once; it records what was done with the client.

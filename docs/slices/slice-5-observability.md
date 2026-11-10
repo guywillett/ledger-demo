@@ -137,6 +137,17 @@ All earlier gaps apply. In addition:
   or dropped independently, so a link can point at nothing.
 - **Telemetry can be lost under overload** (the SDKs drop rather than block) and on a crash
   (unexported data). Hence decision 88: alerting on stuck items comes from the database.
+- **A rate misses what a process counts before its first export.** Each process start is a new
+  series (its own `service.instance.id`), and its first sample, one export interval (10 s) after it
+  starts counting, already holds everything counted so far. `rate()` and `increase()` count only
+  growth between samples, and a new series has no earlier one, so those first counts are never
+  seen as growth. Across a restart the total rate dips for about one rate window (the old series
+  fading out, the new one ramping in) and its increase is short by the new process's first sample;
+  it never drops to zero or overshoots. Negligible in steady operation; marked in the demo, whose
+  restarted workers do most of their work in their first seconds. The series' totals are right;
+  rates are for trends, and exact counts come from the database (decision 88). Prometheus can
+  insert a zero at each series' start time (its `created-timestamp-zero-ingestion` feature, from
+  OTLP's start timestamp): not enabled, as it means overriding otel-lgtm's start-up script.
 - **Events enqueued before this slice have no trace context** (the column is null for them).
 
 ## Next (documented, not built)
@@ -248,10 +259,22 @@ All earlier gaps apply. In addition:
 89. **No sampling.** Every trace is kept: in a demo, and in production too until volume or cost makes
     sampling necessary (then parent-based plus tail sampling, *Next*).
 90. **Resource attributes:** `service.name` the process's role, the same in both implementations (a
-    mixed stack shows one service per role); `implementation` (`node` or `go`) as in the logs; the
-    SDK's own attributes (`telemetry.sdk.language` and the like) as they come; nothing else (no host
-    or process detectors). No `service.version`: the images carry no build version. Confirmed in step
-    1 (`contracts/telemetry.md`).
+    mixed stack shows one service per role); `implementation` (`node` or `go`) as in the logs;
+    `service.instance.id`, a random UUID generated once per process start; `host.name`; the SDK's
+    own attributes (`telemetry.sdk.language` and the like) as they come; nothing else (no host or
+    process detectors). No `service.version`: the images carry no build version.
+    - `service.instance.id` tells two instances of one service apart (two deposit-workers of one
+      implementation): without it they write identical metric series, each pushing its own
+      cumulative counter, so the series flips between their values and `rate()` reads each drop as
+      a reset. A random UUID, the semantic conventions' recommendation: always unique, the same logic
+      in both implementations, independent of the platform. Considered: the hostname as the instance
+      ID (more readable, but unique only if the platform makes it so).
+    - `host.name` maps an instance to its container, for a person: in compose the container ID, in
+      Kubernetes the pod name. The one host attribute admitted on purpose (a container ID is not
+      personal data); still no host or process detectors otherwise.
+
+    Confirmed in step 1 (`contracts/telemetry.md`); the two instance attributes added in step 3, which
+    the transition counter and its dashboard depend on.
 91. **Equivalence for telemetry is the contract and the same tests,** not bytes: both suites assert the
     same span names, kinds, attributes and links with in-memory exporters (Node
     `InMemorySpanExporter`, Go `tracetest.SpanRecorder`), and a mixed stack shows the links cross

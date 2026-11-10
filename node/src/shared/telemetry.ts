@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import {
   ROOT_CONTEXT,
   SpanStatusCode,
@@ -17,7 +19,7 @@ import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-proto';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { PgInstrumentation } from '@opentelemetry/instrumentation-pg';
-import { defaultResource, resourceFromAttributes } from '@opentelemetry/resources';
+import { defaultResource, resourceFromAttributes, type Resource } from '@opentelemetry/resources';
 import {
   AggregationType,
   PeriodicExportingMetricReader,
@@ -91,11 +93,9 @@ export function startTelemetry(options: TelemetryOptions): boolean {
   setGlobalErrorHandler(rateLimitedErrorHandler(logger));
 
   const sdk = new NodeSDK({
-    // Exactly the contract's resource attributes, plus the SDK's own (telemetry.sdk.*): no
-    // detectors, so nothing about the host or the process's arguments is attached.
-    resource: defaultResource().merge(
-      resourceFromAttributes({ 'service.name': options.service, implementation: 'node' }),
-    ),
+    // Exactly the contract's resource attributes (telemetryResource), and no detectors: nothing
+    // about the host but its name, nothing about the process's arguments.
+    resource: telemetryResource(options.service),
     resourceDetectors: [],
     // W3C Trace Context and Baggage (decision 80). The API's callers are outside the system: it
     // never takes their context (decision 84).
@@ -157,6 +157,21 @@ export function startTelemetry(options: TelemetryOptions): boolean {
   sdk.start();
   running = { sdk, logger };
   return true;
+}
+
+// The process's resource (contracts/telemetry.md, Resource; decision 90): its role and
+// implementation, its instance (a random UUID for this process start: two instances of one service
+// would otherwise write identical metric series) and its host (the container's ID in compose, so a
+// person can find the instance), and the SDK's own attributes (telemetry.sdk.*). Nothing detected.
+export function telemetryResource(service: TelemetryService): Resource {
+  return defaultResource().merge(
+    resourceFromAttributes({
+      'service.name': service,
+      implementation: 'node',
+      'service.instance.id': randomUUID(),
+      'host.name': hostname(),
+    }),
+  );
 }
 
 // How long shutdown may take to export what's left. Within every process's grace period: the API
@@ -265,6 +280,12 @@ const METRIC_VIEWS: ViewOptions[] = [
         'http.route',
         'http.response.status_code',
       ]),
+    ],
+  },
+  {
+    instrumentName: 'ledger_transitions_total',
+    attributesProcessors: [
+      createAllowListAttributesProcessor(['entity', 'from', 'to', 'implementation']),
     ],
   },
   { meterName: '@opentelemetry/instrumentation-pg', aggregation: { type: AggregationType.DROP } },

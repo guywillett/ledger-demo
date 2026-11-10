@@ -30,6 +30,7 @@ types.setTypeParser(pg.types.builtins.INT8, parseInt8);
 
 export function createPool(options: { databaseUrl: string; logger: Logger }): pg.Pool {
   const pool = new pg.Pool({ connectionString: options.databaseUrl, types });
+  poolLoggers.set(pool, options.logger);
   // An idle connection can fail (e.g. Postgres restarts). The pool emits 'error', and an
   // 'error' event with no listener crashes the process, so log it; the pool replaces the
   // connection.
@@ -48,21 +49,42 @@ export type TransactionOptions = {
   readonly readOnly?: boolean;
 };
 
+// Each pool's logger (createPool's), for a failing after-commit hook: withTransaction has none.
+const poolLoggers = new WeakMap<pg.Pool, Logger>();
+
+// The hooks queued on each open transaction (afterCommit), by its connection. A WeakMap, so a
+// connection carries nothing once it is released; withTransaction deletes its entry anyway.
+const afterCommitHooks = new WeakMap<pg.PoolClient, (() => void)[]>();
+
+// Queues `hook` to run once tx has committed: after a successful COMMIT, in the order queued,
+// never after a rollback (nor a failed COMMIT). For what must follow only a committed change
+// and can't be part of it: counting an applied transition (slice 5 decision 88), so a rolled-back
+// transaction counts nothing. A hook runs after the transaction, outside it: no statements in it
+// (tx is released by then). One that throws is logged and the others still run: the transaction
+// has committed, so nothing can undo it. Go: Tx.AfterCommit.
+export function afterCommit(tx: Tx, hook: () => void): void {
+  const hooks = afterCommitHooks.get(tx);
+  if (hooks === undefined) throw new Error('afterCommit outside withTransaction');
+  hooks.push(hook);
+}
+
 // Runs `fn` in a transaction on a single connection: COMMIT if it resolves,
-// ROLLBACK (and rethrow) if it throws.
+// ROLLBACK (and rethrow) if it throws. Then, if it committed, the hooks fn queued (afterCommit).
 export async function withTransaction<T>(
   pool: pg.Pool,
   fn: (tx: Tx) => Promise<T>,
   options: TransactionOptions = {},
 ): Promise<T> {
   const client = await pool.connect();
+  const hooks: (() => void)[] = [];
+  afterCommitHooks.set(client, hooks);
   let broken: Error | undefined;
+  let result: T;
   try {
     await client.query(beginStatement(options));
     // The one place a Tx is made: BEGIN has just been sent on this connection.
-    const result = await fn(client as Tx);
+    result = await fn(client as Tx);
     await client.query('COMMIT');
-    return result;
   } catch (err) {
     try {
       await client.query('ROLLBACK');
@@ -73,8 +95,18 @@ export async function withTransaction<T>(
     }
     throw err;
   } finally {
+    afterCommitHooks.delete(client);
     client.release(broken);
   }
+  // Committed (a rollback rethrew above): the hooks, in order, each on its own.
+  for (const hook of hooks) {
+    try {
+      hook();
+    } catch (err) {
+      poolLoggers.get(pool)?.error({ err }, 'after-commit hook failed; the transaction stands');
+    }
+  }
+  return result;
 }
 
 // Built only from the fixed option values above, never from input.

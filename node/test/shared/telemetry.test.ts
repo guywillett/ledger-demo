@@ -4,6 +4,7 @@ import {
   defaultTextMapSetter,
   trace,
 } from '@opentelemetry/api';
+import { hostname } from 'node:os';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import { describe, expect, it } from 'vitest';
 import { routeTemplate } from '../../src/api/app.ts';
@@ -14,6 +15,7 @@ import {
   shutdownTelemetry,
   startTelemetry,
   statementOperation,
+  telemetryResource,
 } from '../../src/shared/telemetry.ts';
 import { capturingLogger } from '../helpers.ts';
 
@@ -54,6 +56,21 @@ describe('OTEL_EXPORTER_OTLP_ENDPOINT in the shared configuration', () => {
     expect(() => loadSharedConfig({ ...base, OTEL_EXPORTER_OTLP_ENDPOINT: value })).toThrow(
       /OTEL_EXPORTER_OTLP_ENDPOINT/,
     );
+  });
+});
+
+// Decision 90: two instances of one service are told apart (identical metric series otherwise), and
+// a person can find each one's container.
+describe('telemetryResource', () => {
+  it('gives each process start its own service.instance.id, a UUID, and the host name', () => {
+    const first = telemetryResource('deposit-worker').attributes;
+    const second = telemetryResource('deposit-worker').attributes;
+    expect(first['service.instance.id']).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    expect(second['service.instance.id']).not.toBe(first['service.instance.id']);
+    expect(first['host.name']).toBe(hostname());
+    expect(first).toMatchObject({ 'service.name': 'deposit-worker', implementation: 'node' });
   });
 });
 
