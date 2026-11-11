@@ -6,9 +6,11 @@ units in Node and Go, asserted by the same tests in both suites with in-memory e
 `test/telemetry/`, Go `internal/*/telemetry_test.go`). Bytes don't apply: IDs and timings differ by
 nature.
 
-Version 4 (slice 5, step 4): the resource, propagation at the edges and through the outbox and
-NATS, HTTP server, database and messaging spans, the request duration and the transition counter,
-the log fields and the log lines' copy as OTLP log records.
+Version 5 (slice 5's final state, released with it as `v0.5-observability`): the resource,
+propagation at the edges and through the outbox and NATS, HTTP server, database and messaging
+spans, the request duration and the transition counter, the log fields and the log lines' copy as
+OTLP log records. Checked against what both implementations export, on both mixed stacks, at the
+slice's close.
 
 ## The rules
 
@@ -48,9 +50,10 @@ the log fields and the log lines' copy as OTLP log records.
 | `host.name` | the process's hostname, so a person can map an instance to its container (in compose the container ID, in Kubernetes the pod name). The one host attribute admitted on purpose: a container ID, not personal data |
 | `telemetry.sdk.language`, `telemetry.sdk.name`, `telemetry.sdk.version` | the SDK's own, as they come (`nodejs` or `go`) |
 
-Nothing else: no host or process detectors (`host.name` is set by our code, not detected). `service.version` isn't set: the images carry no build
-version yet. Go's SDK also merges `OTEL_RESOURCE_ATTRIBUTES` (its `WithResource` always adds the
-environment's), Node's doesn't read it; compose sets none.
+Nothing else: no host or process detectors (`host.name` is set by our code, not detected).
+`service.version` isn't set: the images carry no build version yet. Go's SDK also merges
+`OTEL_RESOURCE_ATTRIBUTES` (its `WithResource` always adds the environment's), Node's doesn't read
+it; compose sets none.
 
 Provider-sim and reconciliation have no telemetry (test infrastructure and an auditor).
 
@@ -92,8 +95,9 @@ One per request, the root of its own trace. Kind `SERVER`.
   (`/accounts//balance`). `HEAD` on a GET route is `HEAD /…`.
 - **Attributes** (both implementations, by the HTTP conventions): `http.request.method`,
   `http.route` (matched routes only), `http.response.status_code`, `url.path`, `url.scheme`,
-  `server.address`, `network.peer.port`, `network.protocol.version`. Each SDK adds one more by the
-  same conventions: Node `server.port`, Go `http.response.body.size`.
+  `server.address`, `server.port`, `network.peer.port`, `network.protocol.version`. Go's otelhttp
+  adds two more by the same conventions: `http.request.body.size` (a request with a body) and
+  `http.response.body.size` (a response with one).
 - **Not**, though the conventions record them (the privacy rule): `client.address` and
   `network.peer.address`, IP addresses, personal data under the GDPR; `user_agent.original`, nearly
   so; `url.query`, caller input that could carry anything. Nor headers or bodies. Node's HTTP
@@ -185,7 +189,10 @@ its own, besides the resource's: Prometheus (otel-lgtm's) puts resource attribut
 Nothing else is exported: each implementation keeps an allow-list (metric views), so an
 instrumentation's other instruments (pg's connection and operation metrics, otelhttp's body sizes)
 are dropped, and a listed metric keeps only its listed attributes. Exported every
-`OTEL_METRIC_EXPORT_INTERVAL` ms (compose: 10 s; the SDKs' default 60 s).
+`OTEL_METRIC_EXPORT_INTERVAL` ms (compose: 10 s; the SDKs' default 60 s). In Prometheus they are
+`http_server_request_duration_seconds` and `ledger_transitions_total`, with `target_info` for the
+resource; whatever else otel-lgtm's Prometheus holds is its own (the Collector's `otelcol_*`,
+Tempo's span-derived `traces_spanmetrics_*` and `traces_service_graph_*`).
 
 ## Logs
 

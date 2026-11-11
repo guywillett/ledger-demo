@@ -1,6 +1,6 @@
 # Slice 5 — Observability
 
-Status: in progress
+Status: done; every item under *Done when* is met, tagged `v0.5-observability` on the merge commit.
 Implementation: Node and Go together, step by step, from `v0.4-api`
 Builds on: slices 1–4. Their decisions hold unless this spec says otherwise.
 
@@ -25,7 +25,7 @@ Today the system's only window is its structured logs. After this slice:
 
 ## In scope
 
-- OpenTelemetry SDKs in both implementations (traces, metrics, logs' correlation), exporting OTLP
+- OpenTelemetry SDKs in both implementations (traces, metrics, logs), exporting OTLP
 - A local backend, `grafana/otel-lgtm`, as one compose service (development only: decision 78)
 - HTTP and database instrumentation, with the polling queries suppressed (decision 85)
 - Trace context through the outbox and NATS: a carrier column, headers, span links (decisions
@@ -48,7 +48,7 @@ Today the system's only window is its structured logs. After this slice:
 
 ## The telemetry contract (`contracts/telemetry.md`)
 
-Written in step 1, extended in steps 2 and 3. It lists:
+Written in step 1, extended in steps 2, 3 and 4. It lists:
 
 - **Resource attributes:** `service.name` is the process's role (`api`, `relay`,
   `deposit-worker`, `submitter`), the same in both implementations, so a mixed stack shows one
@@ -110,23 +110,61 @@ Each step: the contract and the Node implementation in one commit, then Go in a 
 
 ## Done when
 
-- [ ] Every process in both implementations exports traces and metrics over OTLP, with the
-  contract's resource attributes
-- [ ] A deposit's and a withdrawal's request, the relay's publish and each consumer's processing
-  are linked traces, in both implementations and on a mixed stack in both directions
-- [ ] No span for an idle relay's claim or a consumer's empty fetch, and no database span for the
-  polling queries
-- [ ] No personal data in any span, metric or attribute (tested), and route templates in span names
-- [ ] Every log line in a traced context carries `trace_id` and `span_id`
-- [ ] Every log line also reaches the backend over OTLP, a request's lines shown with its trace in
-  Grafana; stdout unchanged and complete with the backend down
-- [ ] `contracts/telemetry.md` lists every span, attribute and metric both implementations emit,
-  with the three rules
-- [ ] With the telemetry service stopped, the demo passes on every stack (CI runs it so)
-- [ ] `ledger_transitions_total` counts applied, committed transitions only (a duplicate delivery
-  and a rolled-back transaction count nothing: tested)
-- [ ] One provisioned dashboard; README and `docs/development.md` say how to use it
-- [ ] Tag `v0.5-observability` on the merge commit
+Evidence: tests as Node · Go (names abbreviated where long); "the close" is the check at step 5, on
+both mixed stacks (Go API and deposit-worker with Node relay and submitter, and the reverse), of
+what Tempo, Prometheus and Loki hold against the contract.
+
+- [x] Every process in both implementations exports traces and metrics over OTLP, with the
+  contract's resource attributes: the close (every role in both implementations in Tempo, its
+  metrics in Prometheus); `api.telemetry.test.ts` (*the resource*), `telemetry.test.ts`
+  (`telemetryResource`) · `TestTheResourceIsTheRoleTheImplementationAndTheSDKsOwnAttributes`,
+  `TestEachSetupHasItsOwnInstanceIDAndTheHostName`
+- [x] A deposit's and a withdrawal's request, the relay's publish and each consumer's processing
+  are linked traces, in both implementations and on a mixed stack in both directions:
+  `propagation.telemetry.test.ts` (*link: publish -> request, process -> publish*, *a redelivery*) ·
+  `TestAPublishIsInTheBatchsTraceLinkedToTheRequest…`, `TestADeliveryIsARootProcessingSpanLinkedToItsPublish`,
+  `TestARedeliveryIsAProcessingSpanOfItsOwnLinkedToTheSamePublish`; step 2's walk of the links on
+  both mixed stacks, and the close (every publish and process span linked, on both)
+- [x] No span for an idle relay's claim or a consumer's empty fetch, and no database span for the
+  polling queries: `workers.telemetry.test.ts` (*an idle relay*, *an idle consumer*) ·
+  `TestAnIdleRelayMakesNoSpans`, `TestAnIdleConsumerMakesNoSpansThroughItsEmptyFetches`,
+  `TestAStatementOutsideAnySpanGetsNoSpan`
+- [x] No personal data in any span, metric or attribute (tested), and route templates in span names:
+  `api.telemetry.test.ts` (*no personal data in any span*, *carry no client address and no user
+  agent*, *carry no query string*, *a failed statement*, *are named by the route template*, the
+  metrics' allow-list) · `TestNoSpanCarriesAnIBANANameOrRemittanceText`,
+  `TestServerSpansCarryNoClientAddressAndNoUserAgent`, `TestExportedSpansCarryNoClientAddressOrUserAgent`,
+  `TestServerSpansCarryNoQueryString`, `TestAFailedStatementKeepsItsSQLSTATE…`,
+  `TestServerSpansAreNamedByTheRouteTemplateNeverTheRawPath`,
+  `TestOnlyTheContractsMetricsAreExportedWithTheirListedAttributes`
+- [x] Every log line in a traced context carries `trace_id` and `span_id`: `api.telemetry.test.ts`
+  (*log lines*) · `TestLogLinesCarryTheTraceIDAndSpanIDOfTheirRequest`,
+  `TestADeliveryIsARootProcessingSpanLinkedToItsPublish` (a delivery's lines). Node's delivery
+  lines by a run only (the close: Node deposit-worker and relay lines carry the IDs in Loki and on
+  stdout), not a test of their own
+- [x] Every log line also reaches the backend over OTLP, a request's lines shown with its trace in
+  Grafana; stdout unchanged and complete with the backend down: `logs.telemetry.test.ts`,
+  `logs-off.telemetry.test.ts`, `logs-absent.telemetry.test.ts` · `internal/logging/otel_test.go`
+  (`TestStdoutsLinesAreUnchangedByTheCopy` and the mapping), `internal/telemetry/logs_test.go`; step
+  4's run and the close (Loki has every service's lines in both implementations, a deposit's lines
+  followed by its ID, each with its trace)
+- [x] `contracts/telemetry.md` lists every span, attribute and metric both implementations emit,
+  with the three rules: the close (no span, attribute or metric in Tempo or Prometheus that the
+  contract doesn't list; one omission found and fixed, Go's `server.port` and request body size);
+  the metrics' allow-list tests above
+- [x] With the telemetry service stopped, the demo passes on every stack (CI runs it so): CI's four
+  `demo` jobs run without the profile, the endpoint set (so exporting to a name that doesn't
+  resolve). They passed on `f6afc34`, where the `differential` job (the same stack, no profile)
+  failed one `/health` check: the thread-pool gap (*Known gaps*). With the larger pool, every job
+  passed on `daf1cda` (CI run 43038054196)
+- [x] `ledger_transitions_total` counts applied, committed transitions only (a duplicate delivery
+  and a rolled-back transaction count nothing: tested): `transitions.telemetry.test.ts`,
+  `db.test.ts` (*afterCommit*) · `internal/ledger/transitions_metric_test.go`,
+  `internal/db/aftercommit_test.go`
+- [x] One provisioned dashboard; README and `docs/development.md` say how to use it:
+  `grafana/dashboards/ledger-demo.json`, provisioned by compose; README *Observability*,
+  `docs/development.md` *Telemetry*
+- [x] Tag `v0.5-observability` on the merge commit (after the review and merge)
 
 ## Known gaps (deliberate)
 
@@ -139,7 +177,8 @@ All earlier gaps apply. In addition:
 - **Linked traces can be sampled apart.** No sampling here; with sampling, each linked trace is kept
   or dropped independently, so a link can point at nothing.
 - **Telemetry can be lost under overload** (the SDKs drop rather than block) and on a crash
-  (unexported data). Hence decision 88: alerting on stuck items comes from the database.
+  (unexported data), the log lines' copy included: stdout has every line. Hence decision 88:
+  alerting on stuck items comes from the database.
 - **A rate misses what a process counts before its first export.** Each process start is a new
   series (its own `service.instance.id`), and its first sample, one export interval (10 s) after it
   starts counting, already holds everything counted so far. `rate()` and `increase()` count only
@@ -200,6 +239,20 @@ All earlier gaps apply. In addition:
   delivered (from JetStream's stored-message timestamp, clamped at zero for clock skew); processing.
 - **Sampling, when needed:** parent-based plus tail sampling in a real Collector, keeping every trace
   with an error, a slow one, or one touching suspense or an invariant violation.
+- **Exemplars:** the transition counter recorded with the committing transaction's context, so a
+  metric point links to a sample trace (Grafana shows exemplars on a graph and opens their trace).
+  Go's SDK takes exemplars from the context a measurement is made with, and the after-commit hook
+  adds with `context.Background()`: the hook would capture the transaction's context when it is
+  queued. Node's metrics SDK has no exemplars yet, so Go only until it does.
+- **The database's own view:** `pg_stat_statements` through `postgres_exporter` (the open-source
+  counterpart of RDS Performance Insights or CloudWatch Database Insights): the top statements by
+  total time, calls and rows, joined to our database spans by the statement text: ours are already
+  parameterised (`$1`, …), so `db.query.text` is the text `pg_stat_statements` records, which
+  replaces only constants.
+- **In production, an agent:** a sidecar or per-node Collector that receives OTLP from the processes
+  (buffering, retrying, sampling and routing to the backends, so a process exports to localhost)
+  and also collects the containers' stdout, the logs' source of truth, so the log copy can be
+  switched off (`OTEL_LOGS_EXPORTER=none`, decision 93).
 
 ## Decisions
 

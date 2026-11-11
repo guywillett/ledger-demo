@@ -224,7 +224,7 @@ Two scripts beside the demo, each against the running stack, with the demo's exi
 
 ## Telemetry
 
-The four application services export traces, metrics and a copy of their log lines over OTLP (OpenTelemetry), by the rules in [`contracts/telemetry.md`](../contracts/telemetry.md). Locally the backend is `grafana/otel-lgtm` (a Collector, Tempo, Prometheus, Loki and Grafana in one container, development only), under its own compose profile:
+The four application services export traces, metrics and a copy of their log lines over OTLP (OpenTelemetry), by the rules in [`contracts/telemetry.md`](../contracts/telemetry.md), which lists every span, attribute, metric and log field. The design and its decisions: the [slice 5 spec](slices/slice-5-observability.md). Locally the backend is `grafana/otel-lgtm` (a Collector, Tempo, Prometheus, Loki and Grafana in one container, development only), under its own compose profile:
 
 ```sh
 docker compose --profile telemetry up -d --build   # the stack and the backend (about 0.5 GB of memory)
@@ -232,13 +232,47 @@ scripts/demo.sh                                    # something to look at
 open http://localhost:3002                         # Grafana: admin / admin
 ```
 
-In Grafana, *Explore* → *Tempo* → *Search*, service name `api`: one trace per request, named after its route (`POST /accounts/{account_id}/withdrawals`), with its database statements as child spans. Or by TraceQL: `{ name = "POST /accounts/{account_id}/withdrawals" }`. A log line written during a request carries its `trace_id`, for going from `docker compose logs api` to the trace. *Explore* → *Prometheus* has `http_server_request_duration_seconds` by route, method and status. The backend keeps nothing across a restart.
+The backend keeps nothing across a restart. Right after it starts it is busy for a minute or so, and the first demo run is slower.
 
-The **ledger-demo dashboard** (*Dashboards* → *ledger-demo*, or http://localhost:3002/d/ledger-demo) shows the API's request rate, errors and p95 duration by route, and the pipeline: `ledger_transitions_total`'s rate by step (`deposit created → received`, …; `none →` is a creation) and by implementation, so a mixed stack shows both. Each series links to its traces in Tempo (click a line, then the link), and each trace to the next one along (a processing span links to its publish, the publish to its request). It is provisioned from `grafana/dashboards/ledger-demo.json` (loaded through `grafana/provisioning.yaml`): edit the file, not the dashboard in Grafana, which is read-only and reloaded from it.
+### Settings
 
-**Logs** go to stdout as JSON, as always (what `docker compose logs` and the scripts read), and each line also to Loki, so Grafana shows a trace's log lines (slice 5 decision 93). From a trace: *Explore* → *Tempo*, open a trace, open a span, *Logs for this span*: the lines of that span's service in that trace (`{service_name="api"} | trace_id = "…"`). From a line: *Explore* → *Loki*, e.g. `{service_name="deposit-worker"} | deposit_id = "dep_…"`, open the line, then its *Trace* link (`trace_id`). Every field of a line is there to filter on, by its stdout name (`deposit_id`, `request_id`), and `implementation` says who wrote it. A payment crosses processes through span links, not one trace (decision 80), so its lines are in several traces: the request's (the API), the relay's publish, the deposit-worker's processing; following `deposit_id` (or `withdrawal_id`) in Loki finds them all, each with its own trace link. The copy is switched per environment by `OTEL_LOGS_EXPORTER`: `otlp` (compose's, and the default) or `none`, for stdout only, where an agent ships stdout (Datadog, a Collector reading the containers' output); with `none`, every line still carries its `trace_id` and `span_id`, for that backend to link. The copy is telemetry like the rest: batched, and dropped when the backend is down, which stdout never is.
+OpenTelemetry's standard variables, set for the four services in `docker-compose.yml` (`x-telemetry-env`), and read by both SDKs (in Node by `src/shared/telemetry.ts`, before the process loads; in Go by `internal/config` and the exporters):
 
-Without the profile (plain `docker compose up`) the services still export, to a backend that isn't there: each export fails and is dropped, with at most one `"telemetry export failed"` warning a minute per service, and the work goes on (slice 5 decision 79; CI's demo runs this way). One exception was found: the name `otel-lgtm` doesn't resolve then, and Node's lookups of it run on its thread pool, where failing ones can hold the threads a new database connection needs; the Node image's larger pool (`UV_THREADPOOL_SIZE`) mitigates it, and a broken backend whose name does resolve never touches the pool (the slice 5 spec's *Known gaps*, "Telemetry's DNS can starve Node's thread pool"). Telemetry is off altogether when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, as for the tests and for `npm run dev:api` (Node starts it in `bin/`, before the process loads; `src/shared/telemetry.ts`). Settings are OpenTelemetry's standard variables (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_LOGS_EXPORTER`), set in `docker-compose.yml`. Right after the backend starts it is busy for a minute or so, and the first demo run is slower.
+| Variable | Compose | What it does |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-lgtm:4318` | where to export; unset or empty, telemetry is off altogether (no SDK, nothing exported), as for the tests and for `npm run dev:api` |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `10000` | milliseconds between metric exports (the SDKs' default is 60 s), so the dashboard moves while the demo runs |
+| `OTEL_LOGS_EXPORTER` | `otlp` | the log lines' copy: `otlp` (the default) or `none` (stdout only, for an environment whose agent ships stdout); nothing else is accepted |
+| `UV_THREADPOOL_SIZE` | (the Node image: `16`) | libuv's thread pool, which runs Node's DNS lookups: the default 4 can be filled by failing lookups of an endpoint whose name doesn't resolve, and pg's lookups of the database then wait behind them (the spec's *Known gaps*, "Telemetry's DNS can starve Node's thread pool"). Set in `node/Dockerfile`; not a telemetry variable, and Go has no such pool |
+
+### Grafana and the dashboard
+
+http://localhost:3002, signed in as admin / admin. The **ledger-demo dashboard** (*Dashboards* → *ledger-demo*, or http://localhost:3002/d/ledger-demo):
+
+- **API requests** (`http.server.request.duration`): request rate, errors and p95 duration, by route.
+- **The pipeline** (`ledger_transitions_total`): transitions by step (`deposit created → received`, …; `none →` is a creation), by implementation, and by instance (each process, with its container's host name).
+
+Each series links to its traces in Tempo (click a line, then the link). Rates miss what a process counts before its first export, so they dip a little across a restart (the spec's *Known gaps*): they are for trends, and exact counts come from the database. The dashboard is provisioned from `grafana/dashboards/ledger-demo.json` (loaded through `grafana/provisioning.yaml`): edit the file, not the dashboard in Grafana, which is read-only and reloaded from it. *Explore* → *Prometheus* has the metrics themselves (`http_server_request_duration_seconds`, `ledger_transitions_total`); the `otelcol_*`, `traces_spanmetrics_*` and `traces_service_graph_*` series beside them are otel-lgtm's own, not ours.
+
+### Finding a trace
+
+A payment crosses processes through span links, not one trace (decision 80): the request's trace (the API), the relay's (its batch, with a publish span per event, linked to the request), and each consumer's processing (linked to the publish). In *Explore* → *Tempo*, a span's links open the trace before it.
+
+- **From a deposit or withdrawal ID:** TraceQL `{ span.deposit_id = "dep_…" }` (or `span.withdrawal_id`) finds the publish and the processing; the request is the publish span's link. The API's request spans carry no entity IDs (the IDs are in its log lines, below).
+- **From a log line:** in *Explore* → *Loki*, open the line, then its *Trace* link. From `docker compose logs`, the line's `trace_id` is a trace ID to open in Tempo.
+- **From a route:** TraceQL `{ name = "POST /accounts/{account_id}/withdrawals" }`: one trace per request, named after its route, with its database statements as child spans.
+
+### Logs
+
+Logs go to stdout as JSON, as always (what `docker compose logs` and the scripts read), and each line also to Loki, so Grafana shows a trace's log lines (decision 93). From a trace: open a span, *Logs for this span*: the lines of that span's service in that trace (`{service_name="api"} | trace_id = "…"`). By an ID: `{service_name=~".+"} | deposit_id = "dep_…"` (or `withdrawal_id`) lists a payment's lines from every service, each with its own trace link. Every field of a line is there to filter on, by its stdout name (`deposit_id`, `request_id`). The copy is telemetry like the rest: batched, and dropped when the backend is down, which stdout never is. With `OTEL_LOGS_EXPORTER=none` every line still carries its `trace_id` and `span_id`, for the backend an agent ships it to to link.
+
+### A mixed stack
+
+Each role is one service whatever runs it (`service.name` is `api`, `relay`, `deposit-worker` or `submitter`), and the `implementation` resource attribute (and log field) says which: the links cross implementations, so a Node API's request leads to a Go relay's publish and a Node worker's processing. In Tempo, `{ resource.implementation = "go" }`; in Loki, the `implementation` label; on the dashboard, *Transitions by implementation*.
+
+### Without the backend
+
+Without the profile (plain `docker compose up`) the services still export, to a backend that isn't there: each export fails and is dropped, with at most one `"telemetry export failed"` warning a minute per service, and the work goes on (decision 79; CI's demo runs this way). One exception was found: the name `otel-lgtm` doesn't resolve then, and Node's lookups of it run on its thread pool, where failing ones can hold the threads a new database connection needs; the Node image's larger pool (`UV_THREADPOOL_SIZE`, above) mitigates it, and a broken backend whose name does resolve never touches the pool (the spec's *Known gaps*, "Telemetry's DNS can starve Node's thread pool").
 
 ## Node
 
