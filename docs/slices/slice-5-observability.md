@@ -96,10 +96,13 @@ Each step: the contract and the Node implementation in one commit, then Go in a 
    route, the transition counter by step, links to traces and logs).
 4. **Logs to the backend too:** each process writes every log line to stdout as now and also
    exports it over OTLP (decision 93): Go through an `slog` handler that fans each record out to the
-   existing JSON handler and OpenTelemetry's `otelslog` bridge; Node through pino's OpenTelemetry
-   support. `OTEL_LOGS_EXPORTER` switches the copy per environment (`otlp`, or `none` for stdout
-   only: decision 93). The contract's *Logs* section gains the OTLP record's mapping (severity, body,
-   attributes) and the privacy rule for it. Tests: a log line in a traced context reaches an
+   existing JSON handler and OpenTelemetry's `otelslog` bridge (slog's own multi-handler, since Go
+   1.26); Node through a pino multistream of stdout and a copy that emits each line as a record (not
+   the pino instrumentation: it patches pino when pino loads, which in our processes is before the SDK
+   starts, since `telemetry.ts` imports the logger; nor a pino transport, which exports from a worker
+   thread with an SDK and resource of its own). `OTEL_LOGS_EXPORTER` switches the copy per
+   environment (`otlp`, or `none` for stdout only: decision 93). The contract's *Logs* section gains
+   the OTLP record's mapping (severity, body, attributes) and the privacy rule for it. Tests: a log line in a traced context reaches an
    in-memory log exporter with its trace and span IDs; stdout's lines are unchanged; with the backend
    absent, stdout still has every line; with `OTEL_LOGS_EXPORTER=none`, nothing is exported.
 5. **Docs and close:** README (a short section: how to see a payment's trace), `docs/development.md`,
@@ -148,6 +151,29 @@ All earlier gaps apply. In addition:
   rates are for trends, and exact counts come from the database (decision 88). Prometheus can
   insert a zero at each series' start time (its `created-timestamp-zero-ingestion` feature, from
   OTLP's start timestamp): not enabled, as it means overriding otel-lgtm's start-up script.
+- **Telemetry's DNS can starve Node's thread pool.** Node resolves hostnames with `dns.lookup()`,
+  the OS's `getaddrinfo` on libuv's thread pool (4 threads by default); connecting, sending,
+  waiting and timing out are asynchronous and never use the pool, and lookups aren't cached, so
+  each export attempt resolves the endpoint again. The risk is an endpoint whose name doesn't
+  resolve, not a broken backend. Unresolvable (compose without the telemetry profile: Docker's DNS
+  knows only running containers and forwards `otel-lgtm` upstream, where a failing lookup can take
+  seconds), each attempt holds a thread; retrying exporters can hold all four, pg's lookup of the
+  database queues behind them, and `/health` fails although Postgres is fine (CI, with
+  `getaddrinfo EAI_AGAIN`; reproduced with a DNS server that never answers: 7 of 21 health checks
+  failed). Resolvable but refusing, an export fails fast; resolvable but hanging, it waits until
+  the exporter's timeout and the queue drops data (slow telemetry, which decision 79 accepts);
+  neither touches the pool. In production the name nearly always resolves even when the backend is
+  broken (a Kubernetes Service, a managed endpoint, a sidecar's localhost), so the realistic cases
+  are the harmless two. Mitigation: `UV_THREADPOOL_SIZE=16` in the Node image's environment
+  (`node/Dockerfile`), so it holds before the pool is first created (none of 22 failed). More
+  margin, not a cure: enough slow lookups could fill a larger pool too; the pool is shared with fs,
+  some crypto and zlib, harmless at this size. Considered: the exporters resolving with
+  `dns.resolve4` (c-ares, off the pool), through a lookup function in their HTTP agent options (not
+  tried); not setting the endpoint where no backend is deployed, which would make CI's legs without
+  the profile test telemetry off rather than telemetry failing, weakening decision 79's test, so the
+  larger pool was preferred. That test is also the regression test: CI's legs without the profile
+  keep the endpoint set, so they exercise the unresolvable case on every push. Go is unaffected: its
+  resolver runs on goroutines, with no fixed pool.
 - **Events enqueued before this slice have no trace context** (the column is null for them).
 
 ## Next (documented, not built)
@@ -195,6 +221,10 @@ All earlier gaps apply. In addition:
     slow or absent backend costs telemetry, never a request or a delivery; an exporter's failure is
     logged, not raised. Shown, not assumed: CI runs the demo with the telemetry service stopped.
     Production might add a local Collector's buffering, or scraping, to decouple further.
+    One way it can cost the work was found that way: in Node, an endpoint whose name doesn't
+    resolve holds threads of the pool its DNS lookups share with pg's (*Known gaps*, "Telemetry's
+    DNS can starve Node's thread pool"). The Node image runs a larger pool: more margin, not a
+    cure.
 80. **W3C Trace Context, and span links for asynchronous work.** The propagators are W3C Trace
     Context (`traceparent`, `tracestate`) and W3C Baggage, OpenTelemetry's defaults, so a Node
     producer and a Go consumer understand each other. The relay's work and each consumer's

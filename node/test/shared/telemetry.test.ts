@@ -8,7 +8,7 @@ import { hostname } from 'node:os';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import { describe, expect, it } from 'vitest';
 import { routeTemplate } from '../../src/api/app.ts';
-import { loadSharedConfig } from '../../src/shared/config.ts';
+import { loadSharedConfig, sharedEnvSchema } from '../../src/shared/config.ts';
 import {
   InjectOnlyPropagator,
   rateLimitedErrorHandler,
@@ -55,6 +55,30 @@ describe('OTEL_EXPORTER_OTLP_ENDPOINT in the shared configuration', () => {
   ])('refuses %s, naming the variable', (_case, value) => {
     expect(() => loadSharedConfig({ ...base, OTEL_EXPORTER_OTLP_ENDPOINT: value })).toThrow(
       /OTEL_EXPORTER_OTLP_ENDPOINT/,
+    );
+  });
+});
+
+describe('OTEL_LOGS_EXPORTER in the shared configuration', () => {
+  const base = { DATABASE_URL: 'postgres://ledger:ledger@localhost:5432/ledger_test' };
+
+  it.each([
+    ['otlp', 'otlp'],
+    ['none', 'none'],
+  ])('accepts %s', (_case, value) => {
+    expect(() => loadSharedConfig({ ...base, OTEL_LOGS_EXPORTER: value })).not.toThrow();
+  });
+
+  it("defaults to otlp, the specification's default", () => {
+    expect(sharedEnvSchema.parse(base).OTEL_LOGS_EXPORTER).toBe('otlp');
+  });
+
+  it.each([
+    ['console (the specification has it; we have no use for it)', 'console'],
+    ['empty', ''],
+  ])('refuses %s, naming the variable', (_case, value) => {
+    expect(() => loadSharedConfig({ ...base, OTEL_LOGS_EXPORTER: value })).toThrow(
+      /OTEL_LOGS_EXPORTER/,
     );
   });
 });

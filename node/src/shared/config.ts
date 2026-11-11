@@ -13,6 +13,10 @@ export const sharedEnvSchema = z.object({
   // startTelemetry, before the process's config; checked here too, so a bad value is a startup
   // failure like any other configuration problem (telemetry stays off for it meanwhile).
   OTEL_EXPORTER_OTLP_ENDPOINT: z.union([z.literal(''), z.url()]).optional(),
+  // The log lines' copy to the telemetry backend (slice 5 decision 93): otlp (the specification's
+  // default) or none (stdout only, where an agent ships stdout). Read by startTelemetry, as the
+  // endpoint is. Only these two: the specification's others (console) have no use here.
+  OTEL_LOGS_EXPORTER: z.enum(['otlp', 'none']).default('otlp'),
 });
 
 export type SharedConfig = {

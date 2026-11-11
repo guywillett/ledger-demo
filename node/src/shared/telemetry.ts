@@ -15,11 +15,17 @@ import {
   W3CTraceContextPropagator,
   setGlobalErrorHandler,
 } from '@opentelemetry/core';
+import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-proto';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { PgInstrumentation } from '@opentelemetry/instrumentation-pg';
 import { defaultResource, resourceFromAttributes, type Resource } from '@opentelemetry/resources';
+import {
+  BatchLogRecordProcessor,
+  SimpleLogRecordProcessor,
+  type LogRecordExporter,
+} from '@opentelemetry/sdk-logs';
 import {
   AggregationType,
   PeriodicExportingMetricReader,
@@ -36,10 +42,10 @@ import {
   type SpanProcessor,
 } from '@opentelemetry/sdk-trace';
 import { sharedEnvSchema } from './config.ts';
-import { createLogger, type Logger } from './logger.ts';
+import { copyLogLines, createLogger, type Logger } from './logger.ts';
 
-// OpenTelemetry for the four application processes (slice 5): traces and metrics over OTLP, by the
-// rules of contracts/telemetry.md. Go: internal/telemetry.
+// OpenTelemetry for the four application processes (slice 5): traces, metrics and a copy of the log
+// lines over OTLP, by the rules of contracts/telemetry.md. Go: internal/telemetry.
 //
 // Started by each process's bin/ file before anything else is imported (startTelemetry, then a
 // dynamic import of the process's main.ts): the instrumentations patch pg and node:http when they
@@ -60,10 +66,12 @@ export type TelemetryOptions = {
   // The resource's service.name: the process's role, the same in both implementations (decision 90).
   readonly service: TelemetryService;
   readonly env?: NodeJS.ProcessEnv;
-  // For tests: exporters in place of OTLP, used whatever the environment says. Spans are then
-  // exported one at a time as they end (SimpleSpanProcessor), so a test sees them at once.
+  // For tests: exporters in place of OTLP, used whatever the environment says. Spans and log
+  // records are then exported one at a time as they end or are emitted (the simple processors), so
+  // a test sees them at once. A test that passes exporters but no logExporter exports no logs.
   readonly spanExporter?: SpanExporter;
   readonly metricReader?: IMetricReader;
+  readonly logExporter?: LogRecordExporter;
 };
 
 // The one SDK of the process, for shutdownTelemetry; undefined while telemetry is off.
@@ -73,7 +81,10 @@ let running: { readonly sdk: NodeSDK; readonly logger: Logger } | undefined;
 // whether it did. Call it once, before the process's other modules load.
 export function startTelemetry(options: TelemetryOptions): boolean {
   const env = options.env ?? process.env;
-  const testing = options.spanExporter !== undefined || options.metricReader !== undefined;
+  const testing =
+    options.spanExporter !== undefined ||
+    options.metricReader !== undefined ||
+    options.logExporter !== undefined;
   // By the process's own rule (an absolute URL, or unset or empty for off). An invalid one leaves
   // telemetry off, and the process's configuration check then fails its startup.
   const endpoint = sharedEnvSchema.shape.OTEL_EXPORTER_OTLP_ENDPOINT.safeParse(
@@ -91,6 +102,14 @@ export function startTelemetry(options: TelemetryOptions): boolean {
     level: level.success ? level.data : 'info',
   });
   setGlobalErrorHandler(rateLimitedErrorHandler(logger));
+
+  // The log lines' copy (decision 93), unless OTEL_LOGS_EXPORTER is none; an invalid value is the
+  // process's startup failure to report, as for LOG_LEVEL, with no copy meanwhile.
+  const logsExporter = sharedEnvSchema.shape.OTEL_LOGS_EXPORTER.safeParse(env.OTEL_LOGS_EXPORTER);
+  const copyLogs =
+    logsExporter.success &&
+    logsExporter.data === 'otlp' &&
+    (!testing || options.logExporter !== undefined);
 
   const sdk = new NodeSDK({
     // Exactly the contract's resource attributes (telemetryResource), and no detectors: nothing
@@ -116,8 +135,15 @@ export function startTelemetry(options: TelemetryOptions): boolean {
         }),
     ],
     views: METRIC_VIEWS,
-    // Logs go to stdout as JSON (with trace_id and span_id: logger.ts), not over OTLP.
-    logRecordProcessors: [],
+    // Logs go to stdout as JSON (logger.ts), and a copy of each line here. Always a list, even
+    // empty: left out, the SDK would read OTEL_LOGS_EXPORTER itself, from process.env.
+    logRecordProcessors: !copyLogs
+      ? []
+      : [
+          options.logExporter === undefined
+            ? new BatchLogRecordProcessor({ exporter: new OTLPLogExporter() })
+            : new SimpleLogRecordProcessor({ exporter: options.logExporter }),
+        ],
     instrumentations: [
       new HttpInstrumentation({
         // Incoming requests only. The one outgoing call is the submitter's to the provider, with
@@ -155,6 +181,9 @@ export function startTelemetry(options: TelemetryOptions): boolean {
     ],
   });
   sdk.start();
+  // The loggers the process makes from now on copy their lines; this module's own (made above)
+  // doesn't: its lines are the SDK's errors, mostly failed exports, not sent through what failed.
+  copyLogLines(copyLogs);
   running = { sdk, logger };
   return true;
 }

@@ -6,9 +6,9 @@ units in Node and Go, asserted by the same tests in both suites with in-memory e
 `test/telemetry/`, Go `internal/*/telemetry_test.go`). Bytes don't apply: IDs and timings differ by
 nature.
 
-Version 3 (slice 5, step 3): the resource, propagation at the edges and through the outbox and
+Version 4 (slice 5, step 4): the resource, propagation at the edges and through the outbox and
 NATS, HTTP server, database and messaging spans, the request duration and the transition counter,
-the log fields.
+the log fields and the log lines' copy as OTLP log records.
 
 ## The rules
 
@@ -192,4 +192,38 @@ are dropped, and a listed metric keeps only its listed attributes. Exported ever
 Every log line written in a traced context carries `trace_id` (32 hex digits) and `span_id` (16),
 so a line leads to its trace (decision 86): Node through the logger's mixin (the active span), Go
 where a request's and a delivery's loggers are made. None outside a traced context, or with
-telemetry off. Logs still go to stdout as JSON, not over OTLP.
+telemetry off.
+
+Stdout's JSON lines are the source of truth (decision 93): what `docker compose logs`, the scripts
+and the e2e tests read, and what a platform's agent ships; unchanged, byte for byte, by what
+follows. Each line is also exported, as a copy, as an OTLP log record: telemetry like the rest,
+batched and dropped rather than blocking (the rules above), so the backend may miss lines that
+stdout has. `OTEL_LOGS_EXPORTER` switches the copy per environment: `otlp` (the specification's
+default, and compose's) or `none` (stdout only, where an agent ships stdout: nothing is lost, as
+every line carries its `trace_id` and `span_id`). No other value is accepted; and no copy while
+telemetry is off. The SDK's own error lines ("telemetry export failed") aren't copied in Node,
+whose SDK has a logger of its own (they are mostly the exports failing); Go's are, its SDK logging
+through the process's logger. Harmless either way: at most one a minute.
+
+The record, from the line:
+
+| Record field | From the line |
+|---|---|
+| timestamp | `time` |
+| severity number | `level`: `trace` 1 (TRACE), `debug` 5 (DEBUG), `info` 9 (INFO), `warn` 13 (WARN), `error` 17 (ERROR), `fatal` 21 (FATAL) |
+| severity text | `level`, as on stdout (`info`) |
+| body | `msg`, a string |
+| trace ID, span ID | `trace_id` and `span_id`, the record's own fields; not repeated as attributes. Trace flags: Node's from the span; none on Go's when the IDs come from the logger's bound fields (they carry no flags) |
+| attributes | every other field, by the name it has on stdout (`deposit_id`, `request_id`, `attr.level` …), its value as written (an amount a digit string); except `service` and `implementation`, which are the resource's, and `err` |
+| `exception.type`, `exception.message` | `err`: its type (each language's own: Node the class name, `OverdraftError`; Go the package path and type name) and message. Node adds `exception.stacktrace` (Go errors carry no stack) |
+
+The scope is each implementation's logger (`ledger-demo/logger`; Go's
+`github.com/guywillett/ledger-demo/go/internal/logging`). The privacy rule applies to the copy as
+to stdout: log lines carry IDs, never personal data.
+
+How each gets there: Node writes every line to a pino multistream, stdout and a copy that turns the
+line into the record (`src/shared/logger.ts`). Go's handler is slog's multi-handler of the JSON
+handler and OpenTelemetry's `otelslog` bridge (`internal/logging`); a log processor
+(`internal/telemetry`) then puts the bound `trace_id` and `span_id` into the record's own fields
+(most Go code logs without a context, which is where `otelslog` looks) and the level's name into the
+severity text (`otelslog` writes slog's, `INFO`, and `DEBUG-4` for trace).

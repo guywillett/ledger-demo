@@ -7,10 +7,14 @@ name: ledger-demo
 # pool, where failing lookups can hold the threads a database connection needs (the slice 5 spec's
 # Known gaps; the Node image's larger pool, UV_THREADPOOL_SIZE, mitigates it). Unset the endpoint
 # and telemetry is off altogether. Metrics every 10 s (the SDKs' default is 60 s), so a dashboard
-# moves while the demo runs. Merged into each service's environment with <<: (YAML's merge key).
+# moves while the demo runs. Each log line goes to stdout and, as a copy, to the backend (Loki):
+# OTEL_LOGS_EXPORTER=otlp, the default, said here because it's the per-environment switch (none:
+# stdout only, where an agent ships stdout; decision 93). Merged into each service's environment
+# with <<: (YAML's merge key).
 x-telemetry-env: &telemetry-env
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-lgtm:4318
   OTEL_METRIC_EXPORT_INTERVAL: "10000"
+  OTEL_LOGS_EXPORTER: otlp
 
 services:
   postgres:
