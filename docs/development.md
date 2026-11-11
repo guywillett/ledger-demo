@@ -352,7 +352,7 @@ npm run lint                    # oxlint, including type-aware rules
 
 ## Go
 
-The Go implementation lives in `go/` (slice 3; the conventions are in `CLAUDE.md`). Install any Go 1.21 or later: `go.mod` pins the toolchain (`toolchain go1.27.3`), and with `GOTOOLCHAIN=auto`, the default, `go` downloads and uses that version by itself. Check with `go env GOTOOLCHAIN` (it should print `auto`) and, in `go/`, `go version` (it should print go1.27.3).
+The Go implementation lives in `go/` (slice 3; the conventions are in `CLAUDE.md`). Install any Go 1.21 or later: `go.mod` pins the toolchain (`toolchain go1.27.4`), and with `GOTOOLCHAIN=auto`, the default, `go` downloads and uses that version by itself. Check with `go env GOTOOLCHAIN` (it should print `auto`) and, in `go/`, `go version` (it should print go1.27.4).
 
 golangci-lint is installed as a release binary, at the version pinned in `go/.golangci-lint-version` (the same file CI reads); golangci-lint's docs advise against `go install` and the `tool` directive (see `go/.golangci.yml`):
 
