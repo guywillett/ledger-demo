@@ -1,8 +1,12 @@
-// Package telemetry sets up OpenTelemetry for a process (slice 5): the tracer and meter providers,
-// exporting over OTLP, the W3C propagators and the SDK's error handler, registered globally, so the
-// instrumentation elsewhere (otelhttp in package api, the database tracer in package db) records
-// through them, by the rules of contracts/telemetry.md. A foundation, beside logging (decision 57).
-// Node: node/src/shared/telemetry.ts.
+// Package telemetry sets up OpenTelemetry for a process (slice 5): the tracer, meter and logger
+// providers, exporting over OTLP, the W3C propagators and the SDK's error handler, registered
+// globally, so the instrumentation elsewhere (otelhttp in package api, the database tracer in package
+// db, package logging's copy of each log line) records through them, by the rules of
+// contracts/telemetry.md. A foundation, beside logging (decision 57). Node:
+// node/src/shared/telemetry.ts.
+//
+// The logger provider is the log lines' copy to the backend (decision 93), there unless
+// OTEL_LOGS_EXPORTER is none: stdout has every line either way.
 //
 // Off unless the endpoint is set: nothing registered, so the global providers stay no-ops and
 // nothing is exported or logged. Set, it exports in the background in batches (decision 79): an
@@ -12,6 +16,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -20,9 +25,11 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -45,11 +52,15 @@ type Config struct {
 	Logger *slog.Logger
 	// How long stop may take; DefaultShutdownGrace if zero.
 	ShutdownGrace time.Duration
+	// OTEL_LOGS_EXPORTER, as config parses it: "otlp" (stdout and a copy to the backend)
+	// or "none" (stdout only). Setup refuses anything else.
+	Logs string
 
-	// For tests, both or neither: used in place of OTLP whatever Endpoint says (as Node's
+	// For tests, all three or none: used in place of OTLP whatever Endpoint says (as Node's
 	// startTelemetry options).
 	SpanExporter sdktrace.SpanExporter
 	MetricReader sdkmetric.Reader
+	LogExporter  sdklog.Exporter
 }
 
 // Setup registers the providers, propagators and error handler as cfg says, and returns stop, which
@@ -61,12 +72,18 @@ type Config struct {
 // ctx bounds Setup itself (a SIGTERM during startup ends it, as it does db.Connect); nothing keeps
 // it afterwards: the batch processor and the metric reader export on contexts of their own.
 func Setup(ctx context.Context, cfg Config) (stop func(), err error) {
-	if cfg.Endpoint == "" && cfg.SpanExporter == nil && cfg.MetricReader == nil {
+	// Telemetry off: nothing registered, and no other check applies (a Logs of "" included).
+	if cfg.Endpoint == "" && cfg.SpanExporter == nil && cfg.MetricReader == nil && cfg.LogExporter == nil {
 		return func() {}, nil
 	}
-	// Both exporters or neither (for tests): with one alone, the other signal would go to OTLP.
-	if (cfg.SpanExporter == nil) != (cfg.MetricReader == nil) {
-		return nil, errors.New("telemetry: both exporters or neither")
+	// All exporters or none (for tests): with only some, the others would be real OTLP exporters.
+	if (cfg.SpanExporter == nil) != (cfg.MetricReader == nil) ||
+		(cfg.MetricReader == nil) != (cfg.LogExporter == nil) {
+		return nil, errors.New("telemetry: all exporters or none")
+	}
+	// config gives only "otlp" or "none": anything else is a main that doesn't pass it.
+	if cfg.Logs != "otlp" && cfg.Logs != "none" {
+		return nil, fmt.Errorf("telemetry: Logs %q, want otlp or none", cfg.Logs)
 	}
 	// Exactly the contract's resource, plus the SDK's own attributes (telemetry.sdk.*): no host or
 	// process detectors, as Node has none. service.instance.id, a random UUID for this process
@@ -103,6 +120,21 @@ func Setup(ctx context.Context, cfg Config) (stop func(), err error) {
 		}
 	}()
 
+	// Made even when Logs is "none" (then unused: an HTTP client, no goroutines), so the release
+	// below never meets a nil exporter: calling a method on a nil interface panics.
+	logExporter := cfg.LogExporter
+	if logExporter == nil {
+		if logExporter, err = otlploghttp.New(ctx); err != nil {
+			return nil, err
+		}
+	}
+	// Released on a later failure, as the span exporter is.
+	defer func() {
+		if err != nil {
+			_ = logExporter.Shutdown(context.Background())
+		}
+	}()
+
 	reader := cfg.MetricReader
 	if reader == nil {
 		metricExporter, err := otlpmetrichttp.New(ctx)
@@ -121,6 +153,18 @@ func Setup(ctx context.Context, cfg Config) (stop func(), err error) {
 		sdkmetric.WithReader(reader),
 		sdkmetric.WithView(ContractMetrics),
 	)
+	// The log lines' copy: ContractLogs first, reshaping each record for the batch processor after
+	// it (the SDK runs processors in the order they're registered). Registered with the others, once
+	// nothing can fail.
+	var logs *sdklog.LoggerProvider
+	if cfg.Logs == "otlp" {
+		logs = sdklog.NewLoggerProvider(
+			sdklog.WithResource(res),
+			sdklog.WithProcessor(ContractLogs{}),
+			sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
+		)
+		otel.SetLoggerProvider(logs)
+	}
 	otel.SetTracerProvider(traces)
 	otel.SetMeterProvider(meters)
 	// W3C Trace Context and Baggage (decision 80), so a Node producer and a Go consumer understand
@@ -139,7 +183,7 @@ func Setup(ctx context.Context, cfg Config) (stop func(), err error) {
 		// long before.
 		ctx, cancel := context.WithTimeout(context.Background(), grace)
 		defer cancel()
-		results := make([]error, 2)
+		results := make([]error, 3)
 		var wg sync.WaitGroup
 		wg.Go(func() {
 			results[0] = traces.Shutdown(ctx)
@@ -147,6 +191,11 @@ func Setup(ctx context.Context, cfg Config) (stop func(), err error) {
 		wg.Go(func() {
 			results[1] = meters.Shutdown(ctx)
 		})
+		if logs != nil {
+			wg.Go(func() {
+				results[2] = logs.Shutdown(ctx)
+			})
+		}
 		wg.Wait()
 		if err := errors.Join(results...); err != nil {
 			cfg.Logger.Warn("telemetry not flushed; dropped", "err", err)

@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	lognoop "go.opentelemetry.io/otel/log/noop"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/guywillett/ledger-demo/go/internal/logging"
 	"github.com/guywillett/ledger-demo/go/internal/telemetry"
+	"github.com/guywillett/ledger-demo/go/internal/telemetrytest"
 )
 
 // Setup and its shutdown, with in-memory exporters: the cases of Node's startTelemetry tests
@@ -110,12 +112,14 @@ func restoreGlobals(t *testing.T) {
 	t.Cleanup(func() {
 		otel.SetTracerProvider(tracenoop.NewTracerProvider())
 		otel.SetMeterProvider(metricnoop.NewMeterProvider())
+		otel.SetLoggerProvider(lognoop.NewLoggerProvider())
 		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
 		otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) {}))
 	})
 }
 
-// setup runs Setup with cfg (Service and Logger filled in if unset) and fails the test on an error.
+// setup runs Setup with cfg (Service, Logs and Logger filled in if unset, and the rest of the
+// exporter set if a test gives some) and fails the test on an error.
 func setup(t *testing.T, cfg telemetry.Config) (stop func()) {
 	t.Helper()
 	restoreGlobals(t)
@@ -125,10 +129,19 @@ func setup(t *testing.T, cfg telemetry.Config) (stop func()) {
 	if cfg.Logger == nil {
 		_, cfg.Logger = newLogger(t)
 	}
-	// A test's exporters come in pairs: with only a span exporter, Setup would make a real OTLP
-	// metric exporter, failing at shutdown with nothing to send to.
-	if cfg.SpanExporter != nil && cfg.MetricReader == nil {
-		cfg.MetricReader = sdkmetric.NewManualReader()
+	// OTEL_LOGS_EXPORTER's default, as config gives it a process: Setup takes "otlp" or "none".
+	if cfg.Logs == "" {
+		cfg.Logs = "otlp"
+	}
+	// A test's exporters come as a set, all three or none (Setup refuses anything else: a missing
+	// one would be a real OTLP exporter). Most tests are about one signal: the others are filled in.
+	if cfg.SpanExporter != nil {
+		if cfg.MetricReader == nil {
+			cfg.MetricReader = sdkmetric.NewManualReader()
+		}
+		if cfg.LogExporter == nil {
+			cfg.LogExporter = &telemetrytest.LogExporter{}
+		}
 	}
 	stop, err := telemetry.Setup(context.Background(), cfg)
 	if err != nil {

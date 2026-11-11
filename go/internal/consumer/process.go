@@ -122,6 +122,7 @@ func Run[C interface{ Base() BaseConfig }](p Process[C]) error {
 		Endpoint: base.TelemetryURL,
 		Service:  p.Service,
 		Logger:   logger,
+		Logs:     base.LogsExporter,
 	}
 	stopTelemetry, err := telemetry.Setup(ctx, telemetryConfig)
 	if err != nil {

@@ -102,6 +102,7 @@ func run() error {
 		Endpoint: cfg.TelemetryURL,
 		Service:  "relay",
 		Logger:   logger,
+		Logs:     cfg.LogsExporter,
 	}
 	stopTelemetry, err := telemetry.Setup(ctx, telemetryConfig)
 	if err != nil {

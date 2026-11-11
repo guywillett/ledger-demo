@@ -17,6 +17,7 @@ import (
 	"github.com/guywillett/ledger-demo/go/internal/ledger"
 	"github.com/guywillett/ledger-demo/go/internal/sepa"
 	"github.com/guywillett/ledger-demo/go/internal/telemetry"
+	"github.com/guywillett/ledger-demo/go/internal/telemetrytest"
 	"github.com/guywillett/ledger-demo/go/internal/testdb"
 )
 
@@ -30,15 +31,17 @@ var (
 
 // meterReader sets telemetry up once for the package, with an in-memory metric reader, and returns
 // it: once, because the global meter provider delegates an instrument made before it to the first
-// provider registered only (see the note).
+// provider registered only.
 func meterReader(t *testing.T) *sdkmetric.ManualReader {
 	t.Helper()
 	readerOnce.Do(func() {
 		reader = sdkmetric.NewManualReader()
 		if _, err := telemetry.Setup(context.Background(), telemetry.Config{
 			Service:      "deposit-worker",
+			Logs:         "otlp",
 			SpanExporter: tracetest.NewInMemoryExporter(),
 			MetricReader: reader,
+			LogExporter:  &telemetrytest.LogExporter{},
 		}); err != nil {
 			t.Fatal(err)
 		}
