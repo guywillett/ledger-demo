@@ -1,5 +1,6 @@
 import { createPool } from '../shared/db.ts';
 import { createLogger } from '../shared/logger.ts';
+import { shutdownTelemetry } from '../shared/telemetry.ts';
 import { buildApp } from './app.ts';
 import { loadApiConfig } from './config.ts';
 
@@ -24,7 +25,12 @@ try {
     try {
       await app.close();
     } finally {
-      await pool.end();
+      try {
+        await pool.end();
+      } finally {
+        // Last, once the work has stopped, so its last spans are exported. Never throws.
+        await shutdownTelemetry();
+      }
     }
   };
 

@@ -16,6 +16,7 @@ import (
 	"github.com/guywillett/ledger-demo/go/internal/config"
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/logging"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 )
 
 // The process lifecycle shared by every consumer process (the deposit-worker, the submitter):
@@ -100,6 +101,9 @@ func Run[C interface{ Base() BaseConfig }](p Process[C]) error {
 	if err != nil {
 		logger, _ = logging.New(out, p.Service, "info")
 	}
+	// The process's logger is slog's default too, for code with no logger of its own (package db's
+	// after-commit hooks): its lines then come out as the process's JSON, not slog's plain text.
+	slog.SetDefault(logger)
 	// Nothing is running yet that a graceful shutdown would protect: log and return at once, as
 	// Node's "startup failed" exits.
 	fail := func(err error) error {
@@ -113,6 +117,19 @@ func Run[C interface{ Base() BaseConfig }](p Process[C]) error {
 	// Cancelled by SIGTERM (docker compose stop) or SIGINT (Ctrl-C), as in cmd/api.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	telemetryConfig := telemetry.Config{
+		Endpoint: base.TelemetryURL,
+		Service:  p.Service,
+		Logger:   logger,
+		Logs:     base.LogsExporter,
+	}
+	stopTelemetry, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		return fail(err)
+	}
+	// Deferred first, so it runs last: after the work has stopped, so its last spans are in.
+	defer stopTelemetry()
 
 	conn, err := broker.Connect(base.NATS.URL, "ledger-demo-"+p.Service, logger)
 	if err != nil {

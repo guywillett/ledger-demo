@@ -2,4 +2,11 @@
 // The relay, as the image's command: the Go binary's name too, so compose runs either
 // implementation with command: ["relay"]. No shell: the kernel runs this file with node (the
 // shebang), so node is the process compose starts, and gets SIGTERM itself.
-import '../src/relay/main.ts';
+//
+// Telemetry first, then the process: startTelemetry registers the instrumentations that patch pg and
+// node:http, so they must be in place before the process's modules load them. Hence a dynamic
+// import: a static one would be evaluated before this file's own code (src/shared/telemetry.ts).
+import { startTelemetry } from '../src/shared/telemetry.ts';
+
+startTelemetry({ service: 'relay' });
+await import('../src/relay/main.ts');

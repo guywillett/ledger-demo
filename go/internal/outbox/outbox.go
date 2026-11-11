@@ -19,6 +19,7 @@ import (
 
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/ids"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 )
 
 // Entity is what an event is about. Its fields are unexported, so an Entity comes only from
@@ -81,10 +82,11 @@ type NewEvent struct {
 	Payload any
 }
 
-// The payload goes in as JSON text cast to jsonb, explicitly, as in Node.
+// The payload goes in as JSON text cast to jsonb, explicitly, as in Node; the trace context too
+// (or NULL).
 const enqueueSQL = `
-INSERT INTO outbox (id, entity_type, entity_id, subject, msg_id, payload)
-VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+INSERT INTO outbox (id, entity_type, entity_id, subject, msg_id, payload, trace_context)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
 ON CONFLICT (msg_id) DO NOTHING
 `
 
@@ -94,6 +96,10 @@ ON CONFLICT (msg_id) DO NOTHING
 // A msg_id already stored means a second event for the same entity and status, which the
 // conditional transitions should make impossible: a bug, not a retry, so it is an error (and the
 // caller's transaction rolls back).
+//
+// With the trace context of ctx's span (the request's, in the API), so the relay's publish span can
+// link to it (slice 5 decision 81): null outside a traced context. Never in the payload: payloads
+// stay byte-identical across implementations.
 func Enqueue(ctx context.Context, tx db.Tx, e NewEvent) error {
 	if e.Entity.entityType == "" {
 		return fmt.Errorf("outbox event %s without an entity", e.MsgID)
@@ -102,8 +108,17 @@ func Enqueue(ctx context.Context, tx db.Tx, e NewEvent) error {
 	if err != nil {
 		return fmt.Errorf("outbox event %s: %w", e.MsgID, err)
 	}
+	var traceContext *string // NULL unless ctx has a span
+	if carrier := telemetry.Carrier(ctx); carrier != nil {
+		raw, err := json.Marshal(carrier)
+		if err != nil {
+			return fmt.Errorf("outbox event %s: trace context: %w", e.MsgID, err)
+		}
+		text := string(raw)
+		traceContext = &text
+	}
 	tag, err := tx.Exec(ctx, enqueueSQL,
-		e.ID, e.Entity.entityType, e.Entity.id(), e.Subject, e.MsgID, string(payload))
+		e.ID, e.Entity.entityType, e.Entity.id(), e.Subject, e.MsgID, string(payload), traceContext)
 	if err != nil {
 		return fmt.Errorf("outbox event %s: %w", e.MsgID, err)
 	}
@@ -123,6 +138,9 @@ type Event struct {
 	Payload []byte
 	// Including this claim: 1 on the first attempt.
 	Attempts int
+	// The trace context it was enqueued in, for the relay's publish span to link to; nil if none
+	// (slice 5 decision 81).
+	TraceContext map[string]string
 }
 
 // Claims up to $1 unpublished events whose lease has expired (or that were never claimed), oldest
@@ -149,7 +167,7 @@ WITH claimed AS (
     LIMIT $1
     FOR UPDATE SKIP LOCKED
   )
-  RETURNING id, entity_type, entity_id, subject, msg_id, payload, attempts
+  RETURNING id, entity_type, entity_id, subject, msg_id, payload, attempts, trace_context
 )
 SELECT * FROM claimed ORDER BY id
 `
@@ -181,7 +199,9 @@ func scanEvent(row pgx.CollectableRow) (Event, error) {
 	var entityType string
 	var entityID ids.DepositID // either kind: converted below once entity_type says which
 	var payload []byte         // pgx gives jsonb as its JSON text
-	err := row.Scan(&e.ID, &entityType, &entityID, &e.Subject, &e.MsgID, &payload, &e.Attempts)
+	var traceContext []byte    // the same; nil for NULL
+	err := row.Scan(&e.ID, &entityType, &entityID, &e.Subject, &e.MsgID, &payload, &e.Attempts,
+		&traceContext)
 	if err != nil {
 		return Event{}, err
 	}
@@ -198,7 +218,28 @@ func scanEvent(row pgx.CollectableRow) (Event, error) {
 		return Event{}, fmt.Errorf("outbox event %v: payload: %w", e.ID, err)
 	}
 	e.Payload = compact.Bytes()
+	e.TraceContext = traceCarrier(traceContext)
 	return e, nil
+}
+
+// traceCarrier is the stored carrier: a JSON object of strings, as written; anything else (NULL,
+// rows from before slice 5) is none. A malformed one is only a lost link (decision 83), never an
+// error, as in Node.
+func traceCarrier(raw []byte) map[string]string {
+	var values map[string]any
+	if json.Unmarshal(raw, &values) != nil {
+		return nil
+	}
+	carrier := map[string]string{}
+	for k, v := range values {
+		if s, ok := v.(string); ok {
+			carrier[k] = s
+		}
+	}
+	if len(carrier) == 0 {
+		return nil
+	}
+	return carrier
 }
 
 // Result is what a mark did: Applied, or Skipped (the event was already published).

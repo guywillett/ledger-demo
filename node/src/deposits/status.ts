@@ -1,5 +1,6 @@
 import type { Queryable, Tx } from '../shared/db.ts';
 import type { Uuid } from '../shared/ids.ts';
+import { countTransition } from '../shared/metrics.ts';
 
 // The deposit lifecycle, shared by the modules that own its transitions:
 //   created -> received -> under_review -> approved -> credited
@@ -91,6 +92,7 @@ export async function transitionStatus(
   const row = result.rows[0];
   if (row === undefined) return undefined;
   await tx.query(HISTORY_SQL, [t.depositId, t.from, t.to, t.reason ?? null]);
+  countTransition(tx, { entity: 'deposit', from: t.from, to: t.to });
   return { accountId: row.account_id as Uuid<'acct'>, amountMinor: row.amount_minor };
 }
 

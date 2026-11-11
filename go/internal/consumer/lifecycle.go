@@ -8,9 +8,17 @@ import (
 	"runtime/debug"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/guywillett/ledger-demo/go/internal/backoff"
 	"github.com/guywillett/ledger-demo/go/internal/db"
+	"github.com/guywillett/ledger-demo/go/internal/ids"
 	"github.com/guywillett/ledger-demo/go/internal/logging"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 )
 
 // The delivery lifecycle every consumer's handler shares, so each handler holds only its domain
@@ -196,22 +204,48 @@ var errNotSettled = fmt.Errorf("%w: it returned without settling the message", e
 
 // Deliver runs one message through the lifecycle and returns the outcome it was settled with.
 //
+// In a processing span of its own (slice 5 decision 80): a root span per message, linked to the
+// publish that sent it (the context in its headers; no link if there is none, or it is malformed),
+// started before anything the delivery does and ended once the message is settled and its outcome
+// recorded, so the delivery's statements and log lines are in it. Node: withDeliveryLog.
+//
 // A method on the generic type: it uses the type's E, so the handler's event is typed.
-func (l Lifecycle[E]) Deliver(ctx context.Context, m Message, handle Handler[E]) Outcome {
+func (l Lifecycle[E]) Deliver(ctx context.Context, m Message, handle Handler[E]) (outcome Outcome) {
 	// Log the delivery before anything else, with the event_id if it can be read at all.
-	peeked := peekEventID(m.Body())
+	eventID, depositID, withdrawalID := peekIDs(m.Body())
 	var msgID any // JSON null for a message without one, as Node logs
 	if id := m.NATSMsgID(); id != "" {
 		msgID = id
 	}
-	log := l.Logger.With("nats_msg_id", msgID, "delivery_attempt", m.DeliveryAttempt())
-	if peeked != nil {
-		log = log.With("event_id", *peeked)
+
+	// Set up the otel trace first, so the delivery's log lines
+	// and database spans are this span's children.
+	spanAttrs := spanAttributes(l.Consumer, m, eventID, depositID, withdrawalID)
+	ctx, span := tracer().Start(ctx, "process "+m.Subject(),
+		trace.WithNewRoot(),
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithLinks(telemetry.LinksTo(natsHeaderCarrier(m.Header()))...),
+		trace.WithAttributes(spanAttrs...))
+
+	// Deferred, reading the named result: outcome is whatever Deliver returns, from any path.
+	defer func() {
+		span.SetAttributes(attribute.String("delivery_outcome", string(outcome)))
+		if outcome == Failed || outcome == Invalid {
+			span.SetStatus(codes.Error, "delivery "+string(outcome))
+		}
+		span.End()
+	}()
+
+	// With the trace_id and span_id of the processing span, started above (slice 5 decision 86).
+	log := logging.WithTrace(ctx, l.Logger).
+		With("nats_msg_id", msgID, "delivery_attempt", m.DeliveryAttempt())
+	if eventID != nil {
+		log = log.With("event_id", *eventID)
 	}
 
 	id, err := StartDelivery(ctx, l.Pool, NewDelivery{
 		Consumer:        l.Consumer,
-		EventID:         peeked,
+		EventID:         eventID,
 		NATSMsgID:       m.NATSMsgID(),
 		DeliveryAttempt: m.DeliveryAttempt(),
 	})
@@ -293,4 +327,41 @@ func (d *Delivery) settleAgain(s Settled, err error) Outcome {
 		d.log.Error("unhandled error while handling a message", "err", err)
 	}
 	return s.outcome
+}
+
+// tracer is the consumer's instrumentation scope, from the global provider (a no-op until
+// telemetry.Setup registers one), looked up when used.
+func tracer() trace.Tracer {
+	return otel.Tracer("github.com/guywillett/ledger-demo/go/internal/consumer")
+}
+
+// spanAttributes are the attributes used by the Deliver method's trace.
+func spanAttributes(
+	consumerName Name,
+	m Message,
+	eventID *ids.EventID,
+	depositID *ids.DepositID,
+	withdrawalID *ids.WithdrawalID,
+) []attribute.KeyValue {
+	spanAttrs := []attribute.KeyValue{
+		semconv.MessagingSystemKey.String("nats"),
+		semconv.MessagingOperationName("process"),
+		semconv.MessagingOperationTypeProcess,
+		semconv.MessagingDestinationName(m.Subject()),
+		semconv.MessagingConsumerGroupName(string(consumerName)),
+		attribute.Int("delivery_attempt", m.DeliveryAttempt()),
+	}
+	if m.NATSMsgID() != "" {
+		spanAttrs = append(spanAttrs, semconv.MessagingMessageID(m.NATSMsgID()))
+	}
+	if eventID != nil {
+		spanAttrs = append(spanAttrs, attribute.String("event_id", eventID.TypeID()))
+	}
+	if depositID != nil {
+		spanAttrs = append(spanAttrs, attribute.String("deposit_id", depositID.TypeID()))
+	}
+	if withdrawalID != nil {
+		spanAttrs = append(spanAttrs, attribute.String("withdrawal_id", withdrawalID.TypeID()))
+	}
+	return spanAttrs
 }

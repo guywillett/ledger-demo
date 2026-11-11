@@ -222,6 +222,58 @@ Two scripts beside the demo, each against the running stack, with the demo's exi
 - **`scripts/shared-consumer.sh`:** starts `deposit-worker-other` (the opposite of `DEPOSIT_WORKER_IMPL`) on the same durable consumer, posts a burst of 30 deposits, and checks from the two workers' logs that both processed some and none was processed twice; then reconciles. Run it on any stack, after `up -d`; it adds its own deposits.
 - **`scripts/differential.sh`:** starts `api-other` (the opposite of `API_IMPL`, port `3001`) on the same database and sends the same requests to both APIs: the health check, the accounts, balances, every page of each demo account's deposits (each cursor used on the other implementation too, filtered and not), the query parameters' and filters' edge cases, single deposits (found, another account's, unknown, malformed IDs), each account's withdrawals (the list across implementations, the status filter, single withdrawals in each final status), every page of each account's transactions (deposits and withdrawals together, with cursors of both kinds), unknown and malformed IDs and routes, and replays of the demo's withdrawal requests. It compares the status, the headers (names case-insensitively; not `date`, `x-request-id` or transport headers) and the body byte for byte, and prints a diff for each difference. Run it right after `scripts/demo.sh`: it creates no data of its own and exits `3` if it finds too little (equivalence level 3, opt-in: slice 3 decision 61).
 
+## Telemetry
+
+The four application services export traces, metrics and a copy of their log lines over OTLP (OpenTelemetry), by the rules in [`contracts/telemetry.md`](../contracts/telemetry.md), which lists every span, attribute, metric and log field. The design and its decisions: the [slice 5 spec](slices/slice-5-observability.md). Locally the backend is `grafana/otel-lgtm` (a Collector, Tempo, Prometheus, Loki and Grafana in one container, development only), under its own compose profile:
+
+```sh
+docker compose --profile telemetry up -d --build   # the stack and the backend (about 0.5 GB of memory)
+scripts/demo.sh                                    # something to look at
+open http://localhost:3002                         # Grafana: admin / admin
+```
+
+The backend keeps nothing across a restart. Right after it starts it is busy for a minute or so, and the first demo run is slower.
+
+### Settings
+
+OpenTelemetry's standard variables, set for the four services in `docker-compose.yml` (`x-telemetry-env`), and read by both SDKs (in Node by `src/shared/telemetry.ts`, before the process loads; in Go by `internal/config` and the exporters):
+
+| Variable | Compose | What it does |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-lgtm:4318` | where to export; unset or empty, telemetry is off altogether (no SDK, nothing exported), as for the tests and for `npm run dev:api` |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `10000` | milliseconds between metric exports (the SDKs' default is 60 s), so the dashboard moves while the demo runs |
+| `OTEL_LOGS_EXPORTER` | `otlp` | the log lines' copy: `otlp` (the default) or `none` (stdout only, for an environment whose agent ships stdout); nothing else is accepted |
+| `UV_THREADPOOL_SIZE` | (the Node image: `16`) | libuv's thread pool, which runs Node's DNS lookups: the default 4 can be filled by failing lookups of an endpoint whose name doesn't resolve, and pg's lookups of the database then wait behind them (the spec's *Known gaps*, "Telemetry's DNS can starve Node's thread pool"). Set in `node/Dockerfile`; not a telemetry variable, and Go has no such pool |
+
+### Grafana and the dashboard
+
+http://localhost:3002, signed in as admin / admin. The **ledger-demo dashboard** (*Dashboards* → *ledger-demo*, or http://localhost:3002/d/ledger-demo):
+
+- **API requests** (`http.server.request.duration`): request rate, errors and p95 duration, by route.
+- **The pipeline** (`ledger_transitions_total`): transitions by step (`deposit created → received`, …; `none →` is a creation), by implementation, and by instance (each process, with its container's host name).
+
+Each series links to its traces in Tempo (click a line, then the link). Rates miss what a process counts before its first export, so they dip a little across a restart (the spec's *Known gaps*): they are for trends, and exact counts come from the database. The dashboard is provisioned from `grafana/dashboards/ledger-demo.json` (loaded through `grafana/provisioning.yaml`): edit the file, not the dashboard in Grafana, which is read-only and reloaded from it. *Explore* → *Prometheus* has the metrics themselves (`http_server_request_duration_seconds`, `ledger_transitions_total`); the `otelcol_*`, `traces_spanmetrics_*` and `traces_service_graph_*` series beside them are otel-lgtm's own, not ours.
+
+### Finding a trace
+
+A payment crosses processes through span links, not one trace (decision 80): the request's trace (the API), the relay's (its batch, with a publish span per event, linked to the request), and each consumer's processing (linked to the publish). In *Explore* → *Tempo*, a span's links open the trace before it.
+
+- **From a deposit or withdrawal ID:** TraceQL `{ span.deposit_id = "dep_…" }` (or `span.withdrawal_id`) finds the publish and the processing; the request is the publish span's link. The API's request spans carry no entity IDs (the IDs are in its log lines, below).
+- **From a log line:** in *Explore* → *Loki*, open the line, then its *Trace* link. From `docker compose logs`, the line's `trace_id` is a trace ID to open in Tempo.
+- **From a route:** TraceQL `{ name = "POST /accounts/{account_id}/withdrawals" }`: one trace per request, named after its route, with its database statements as child spans.
+
+### Logs
+
+Logs go to stdout as JSON, as always (what `docker compose logs` and the scripts read), and each line also to Loki, so Grafana shows a trace's log lines (decision 93). From a trace: open a span, *Logs for this span*: the lines of that span's service in that trace (`{service_name="api"} | trace_id = "…"`). By an ID: `{service_name=~".+"} | deposit_id = "dep_…"` (or `withdrawal_id`) lists a payment's lines from every service, each with its own trace link. Every field of a line is there to filter on, by its stdout name (`deposit_id`, `request_id`). The copy is telemetry like the rest: batched, and dropped when the backend is down, which stdout never is. With `OTEL_LOGS_EXPORTER=none` every line still carries its `trace_id` and `span_id`, for the backend an agent ships it to to link.
+
+### A mixed stack
+
+Each role is one service whatever runs it (`service.name` is `api`, `relay`, `deposit-worker` or `submitter`), and the `implementation` resource attribute (and log field) says which: the links cross implementations, so a Node API's request leads to a Go relay's publish and a Node worker's processing. In Tempo, `{ resource.implementation = "go" }`; in Loki, the `implementation` label; on the dashboard, *Transitions by implementation*.
+
+### Without the backend
+
+Without the profile (plain `docker compose up`) the services still export, to a backend that isn't there: each export fails and is dropped, with at most one `"telemetry export failed"` warning a minute per service, and the work goes on (decision 79; CI's demo runs this way). One exception was found: the name `otel-lgtm` doesn't resolve then, and Node's lookups of it run on its thread pool, where failing ones can hold the threads a new database connection needs; the Node image's larger pool (`UV_THREADPOOL_SIZE`, above) mitigates it, and a broken backend whose name does resolve never touches the pool (the spec's *Known gaps*, "Telemetry's DNS can starve Node's thread pool").
+
 ## Node
 
 The Node.js implementation lives in `node/`. The Node version is in `.nvmrc` (major version only); `package.json` `engines` and `engine-strict` in `node/.npmrc` make npm refuse other majors.
@@ -334,7 +386,7 @@ npm run lint                    # oxlint, including type-aware rules
 
 ## Go
 
-The Go implementation lives in `go/` (slice 3; the conventions are in `CLAUDE.md`). Install any Go 1.21 or later: `go.mod` pins the toolchain (`toolchain go1.27.3`), and with `GOTOOLCHAIN=auto`, the default, `go` downloads and uses that version by itself. Check with `go env GOTOOLCHAIN` (it should print `auto`) and, in `go/`, `go version` (it should print go1.27.3).
+The Go implementation lives in `go/` (slice 3; the conventions are in `CLAUDE.md`). Install any Go 1.21 or later: `go.mod` pins the toolchain (`toolchain go1.27.4`), and with `GOTOOLCHAIN=auto`, the default, `go` downloads and uses that version by itself. Check with `go env GOTOOLCHAIN` (it should print `auto`) and, in `go/`, `go version` (it should print go1.27.4).
 
 golangci-lint is installed as a release binary, at the version pinned in `go/.golangci-lint-version` (the same file CI reads); golangci-lint's docs advise against `go install` and the `tool` directive (see `go/.golangci.yml`):
 

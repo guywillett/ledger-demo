@@ -40,13 +40,33 @@ const relayTests = [
   'test/api/deposit-events.test.ts',
 ];
 
+// The telemetry tests (slice 5): each file starts the SDK with in-memory exporters before it loads
+// anything that imports pg or node:http, as bin/ does, since the instrumentations patch those when
+// they load. Each test file runs in a fresh module graph, so a file's SDK and patched modules are its
+// own; one file at a time, and after the relay tests (groupOrder 2): workers.telemetry.test.ts drains
+// the outbox to show an idle relay makes no spans.
+const telemetryTests = ['test/telemetry/**/*.test.ts'];
+
 export default defineConfig({
   test: {
     env: testEnv,
     projects: [
       {
         extends: true,
-        test: { name: 'main', include: ['test/**/*.test.ts'], exclude: relayTests },
+        test: {
+          name: 'main',
+          include: ['test/**/*.test.ts'],
+          exclude: [...relayTests, ...telemetryTests],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'telemetry',
+          include: telemetryTests,
+          fileParallelism: false,
+          sequence: { groupOrder: 2 },
+        },
       },
       {
         extends: true,

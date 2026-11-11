@@ -1,0 +1,14 @@
+# Grafana provisioning for otel-lgtm (docker-compose.yml mounts this into the image's
+# /otel-lgtm/grafana/conf/provisioning/dashboards/, beside its own): loads every dashboard in
+# grafana/dashboards/, mounted at /otel-lgtm/ledger-demo-dashboards. Edit the JSON here, not in
+# Grafana: a change made in the UI is lost on restart.
+apiVersion: 1
+
+providers:
+  - name: ledger-demo
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /otel-lgtm/ledger-demo-dashboards
+      foldersFromFilesStructure: false

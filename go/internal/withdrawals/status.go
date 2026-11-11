@@ -11,6 +11,7 @@ import (
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/ids"
 	"github.com/guywillett/ledger-demo/go/internal/money"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 )
 
 // unsettled are the statuses a settlement can start from: funds reserved, outcome not known yet.
@@ -167,6 +168,9 @@ func TransitionStatus(
 	if _, err := tx.Exec(ctx, historySQL, id, moved.From, t.to, reason); err != nil {
 		return Transitioned{}, false, fmt.Errorf("withdrawal %v -> %s history: %w", id, t.to, err)
 	}
+	tx.AfterCommit(
+		func() { telemetry.CountTransition("withdrawal", string(moved.From), string(t.to)) },
+	)
 	return moved, true, nil
 }
 

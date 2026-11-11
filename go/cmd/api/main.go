@@ -18,6 +18,7 @@ import (
 	"github.com/guywillett/ledger-demo/go/internal/config"
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/logging"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 )
 
 // apiConfig is the API's environment, with Node's names and defaults (node/src/api/config.ts).
@@ -57,6 +58,9 @@ func run() error {
 	if logErr != nil {
 		logger, _ = logging.New(os.Stdout, "api", "info")
 	}
+	// The process's logger is slog's default too, for code with no logger of its own (package db's
+	// after-commit hooks): its lines then come out as the process's JSON, not slog's plain text.
+	slog.SetDefault(logger)
 	// One structured line instead of a raw error or stack trace, then exit 1 (the container is
 	// restarted), as Node's "startup failed".
 	fail := func(err error) error {
@@ -72,6 +76,19 @@ func run() error {
 	// long-running work to stop (context.Context, first parameter of anything that does I/O).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	telemetryConfig := telemetry.Config{
+		Endpoint: cfg.TelemetryURL,
+		Service:  "api",
+		Logger:   logger,
+		Logs:     cfg.LogsExporter,
+	}
+	stopTelemetry, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		return fail(err)
+	}
+	// Deferred first, so it runs last: after the work has stopped, so its last spans are in.
+	defer stopTelemetry()
 
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -151,5 +168,5 @@ func run() error {
 		logger.Error("server failed", "err", err)
 		return err
 	}
-	return nil // the deferred pool.Close() runs now, after the last request
+	return nil // the deferred pool.Close() runs now, after the last request, then stopTelemetry
 }

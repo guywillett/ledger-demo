@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { jetstream, jetstreamManager } from '@nats-io/jetstream';
-import { connect, type NatsConnection, type Status } from '@nats-io/transport-node';
+import { connect, headers, type NatsConnection, type Status } from '@nats-io/transport-node';
 import type { Logger } from './logger.ts';
 
 export type { NatsConnection };
@@ -99,7 +99,15 @@ export type PublishResult = {
 export type EventPublisher = {
   // Publishes a JSON event and waits for the stream to acknowledge it. `msgId` becomes the
   // Nats-Msg-Id header, which the stream uses to drop repeats within its duplicate window.
-  publish(subject: string, event: object, msgId: string): Promise<PublishResult>;
+  // `traceHeaders` (the publish span's context: traceparent, …) go beside it, observation only
+  // (slice 5 decision 82): they never change Nats-Msg-Id (decision 83), so a republished event is
+  // dropped by the stream however its trace headers differ.
+  publish(
+    subject: string,
+    event: object,
+    msgId: string,
+    traceHeaders: Readonly<Record<string, string>>,
+  ): Promise<PublishResult>;
 };
 
 // Publishes each event to its subject's stream (streamForSubject).
@@ -109,10 +117,14 @@ export function jetStreamPublisher(
 ): EventPublisher {
   const js = jetstream(nc);
   return {
-    async publish(subject, event, msgId) {
+    async publish(subject, event, msgId, traceHeaders) {
       // Inside the async function, so an unknown subject rejects like any failed publish.
       const stream = streamForSubject(subject);
+      const h = headers();
+      for (const [name, value] of Object.entries(traceHeaders)) h.set(name, value);
       const ack = await js.publish(subject, JSON.stringify(event), {
+        // nats.js adds Nats-Msg-Id to these headers from msgID.
+        headers: h,
         msgID: msgId,
         timeout: options.timeoutMs,
         // The server rejects the message unless it lands in this stream, so a subject that

@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/guywillett/ledger-demo/go/internal/logging"
 )
 
@@ -20,6 +22,8 @@ import (
 // "redelivery" is handling it again. Safe for the handler's goroutine and the test's.
 type Message struct {
 	body    string
+	subject string
+	header  nats.Header
 	msgID   string
 	attempt int
 
@@ -37,12 +41,15 @@ func (m *Message) FailWorking(err error) {
 	m.workingErr = err
 }
 
-// NewMessage is a message with this body, Nats-Msg-Id ("" for none) and delivery attempt.
+// NewMessage is a message with this body, Nats-Msg-Id ("" for none) and delivery attempt, on the
+// subject test.event with no other headers.
 func NewMessage(body, msgID string, attempt int) *Message {
-	return &Message{body: body, msgID: msgID, attempt: attempt}
+	return &Message{body: body, subject: "test.event", header: nats.Header{}, msgID: msgID, attempt: attempt}
 }
 
 func (m *Message) Body() []byte         { return []byte(m.body) }
+func (m *Message) Subject() string      { return m.subject }
+func (m *Message) Header() nats.Header  { return m.header }
 func (m *Message) NATSMsgID() string    { return m.msgID }
 func (m *Message) DeliveryAttempt() int { return m.attempt }
 

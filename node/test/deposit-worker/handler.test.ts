@@ -49,6 +49,8 @@ function message(body: string, natsMsgId = 'msg-1', deliveryAttempt = 1): FakeMe
   const calls: string[] = [];
   return {
     body,
+    subject: 'deposit.created',
+    headers: {},
     natsMsgId,
     deliveryAttempt,
     calls,

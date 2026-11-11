@@ -10,8 +10,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // NewHandler returns the API as one http.Handler, for the server (cmd/api) and for tests, which
@@ -46,7 +51,22 @@ func newHandler(pool *pgxpool.Pool, logger *slog.Logger, webhooks webhookRoutes)
 	// 405 for a known path with another method: something always matches.
 	mux.HandleFunc("/", notFound)
 
-	return withRequestID(logger, withAccessLog(withDeadline(requestTimeout, onlyCleanPaths(mux))))
+	return traced(withRequestID(logger, withAccessLog(withDeadline(requestTimeout, onlyCleanPaths(mux)))))
+}
+
+// traced gives every request a server span (otelhttp), outermost, so the span covers the
+// middlewares too and their log lines carry its IDs (withRequestID). Named by the method until
+// handle names it by its route; a request no route matches keeps that name, as in Node. A no-op
+// until telemetry.Setup registers a provider (otelhttp uses the global one).
+//
+// With no propagators, so an incoming traceparent is never read: the API's callers are outside the
+// system, and every request starts a new trace (slice 5 decision 84). An empty composite extracts
+// nothing.
+func traced(next http.Handler) http.Handler {
+	return otelhttp.NewHandler(next, "",
+		otelhttp.WithPropagators(propagation.NewCompositeTextMapPropagator()),
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string { return r.Method }),
+	)
 }
 
 // handlerFunc is a handler that can fail: an error it returns is unexpected (a client error is
@@ -57,11 +77,30 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request) error
 // answered with a 500 problem, as Node's error handler does for anything thrown.
 func handle(h handlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nameByRoute(r)
 		if err := h(w, r); err != nil {
 			loggerFrom(r.Context()).Error("unexpected error", "err", err)
 			writeProblem(w, httpProblem(http.StatusInternalServerError, ""))
 		}
 	})
+}
+
+// nameByRoute names the request's server span after its route's template, never the raw path (GET
+// /accounts/{account_id}/deposits), and gives the template as http.route to the span and, through
+// otelhttp's labeler, to the duration metric. Every route goes through handle, so here: ServeMux
+// sets Pattern on the request it hands the route, which otelhttp, outside the middlewares' copies of
+// the request, never sees. The method is the request's (HEAD on a GET route is HEAD, as in Node).
+func nameByRoute(r *http.Request) {
+	_, route, found := strings.Cut(r.Pattern, " ")
+	if !found {
+		return
+	}
+	span := trace.SpanFromContext(r.Context())
+	span.SetName(r.Method + " " + route)
+	span.SetAttributes(semconv.HTTPRoute(route))
+	if labeler, ok := otelhttp.LabelerFromContext(r.Context()); ok {
+		labeler.Add(semconv.HTTPRoute(route))
+	}
 }
 
 // listResponse is every list's body, one shape for all (slice 4 decision 66): Data, the page's

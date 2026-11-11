@@ -40,6 +40,8 @@ describe('withDeliveryLog', () => {
     const fake: DeliveredMessage = {
       // An event_id: the delivery log records a null one only for invalid messages.
       body: JSON.stringify({ event_id: toTypeId('evt', newUuid('evt')), n: 1 }),
+      subject: 'test.event',
+      headers: {},
       natsMsgId: 'double',
       deliveryAttempt: 1,
       ack: () => calls.push('ack'),

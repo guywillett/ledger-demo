@@ -2,9 +2,13 @@ package consumer
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/guywillett/ledger-demo/go/internal/ids"
 )
@@ -32,6 +36,11 @@ import (
 type Message interface {
 	// Body is the message's data.
 	Body() []byte
+	// Subject is the subject it was published on (deposit.created, …).
+	Subject() string
+	// Header is its headers: Nats-Msg-Id, and the publish's trace context (traceparent, …) for the
+	// processing span's link (slice 5 decision 82). Observation only (decision 83). Never nil.
+	Header() nats.Header
 	// NATSMsgID is the Nats-Msg-Id header (transport only), "" if there is none.
 	NATSMsgID() string
 	// DeliveryAttempt is 1 for the first delivery, then 2, 3, ... for redeliveries.
@@ -63,7 +72,14 @@ func Delivered(m jetstream.Msg) Message {
 	return jetStreamMessage{msg: m, attempt: attempt}
 }
 
-func (m jetStreamMessage) Body() []byte { return m.msg.Data() }
+func (m jetStreamMessage) Body() []byte    { return m.msg.Data() }
+func (m jetStreamMessage) Subject() string { return m.msg.Subject() }
+func (m jetStreamMessage) Header() nats.Header {
+	if h := m.msg.Headers(); h != nil {
+		return h
+	}
+	return nats.Header{}
+}
 func (m jetStreamMessage) NATSMsgID() string {
 	return m.msg.Headers().Get(jetstream.MsgIDHeader)
 }
@@ -73,21 +89,67 @@ func (m jetStreamMessage) Term(reason string) error      { return m.msg.TermWith
 func (m jetStreamMessage) Nak(delay time.Duration) error { return m.msg.NakWithDelay(delay) }
 func (m jetStreamMessage) Working() error                { return m.msg.InProgress() }
 
-// peekEventID is the event_id of a message that may be invalid, for the delivery log: nil if there
-// is none to read (not JSON, not an object, no event_id string, or not an evt TypeID holding a
-// UUIDv7). Full validation comes after the delivery is recorded. Node: peekEventId.
-func peekEventID(body []byte) *ids.EventID {
-	var object map[string]json.RawMessage
-	if json.Unmarshal(body, &object) != nil {
+// peekID is called by peekIDs and is the ID under idKey (event_id, deposit_id, …) of a message that may be invalid:
+// nil if there is none to read (not JSON, not an object, no
+// such string, or not a TypeID of kind K holding a UUIDv7).
+func peekID[K ids.Kind](object map[string]json.RawMessage, idKey string) *ids.ID[K] {
+	if object == nil {
 		return nil
 	}
 	var s string
-	if json.Unmarshal(object["event_id"], &s) != nil {
+	if json.Unmarshal(object[idKey], &s) != nil {
 		return nil
 	}
-	id, err := ids.FromTypeID[ids.Event](s)
+	id, err := ids.FromTypeID[K](s)
 	if err != nil {
 		return nil
 	}
 	return &id
+}
+
+// peekIDs are the IDs under their JSON key (event_id, deposit_id, withdrawal_id) of a message that
+// may be invalid, for the delivery log and the processing span: nil if there is none to read
+// (not JSON, not an object, no such string, or not a TypeID of kind K holding a UUIDv7).
+// Full validation comes after the delivery is recorded. Node: peekEventId and peekEntityIds.
+func peekIDs(body []byte) (*ids.EventID, *ids.DepositID, *ids.WithdrawalID) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(body, &object) != nil {
+		return nil, nil, nil
+	}
+	eventID := peekID[ids.Event](object, "event_id")
+	depositID := peekID[ids.Deposit](object, "deposit_id")
+	withdrawalID := peekID[ids.Withdrawal](object, "withdrawal_id")
+	return eventID, depositID, withdrawalID
+}
+
+// natsHeaderCarrier adapts nats.Header to the propagators' carrier (propagation.TextMapCarrier, and
+// ValuesGetter for a header sent more than once). Not propagation.HeaderCarrier: that is an
+// http.Header, which canonicalises keys ("Traceparent"), while nats.Header is case-sensitive and
+// both implementations write "traceparent".
+type natsHeaderCarrier nats.Header
+
+// Compile-time checks that natsHeaderCarrier is a TextMapCarrier and a ValuesGetter.
+var (
+	_ propagation.TextMapCarrier = natsHeaderCarrier{}
+	_ propagation.ValuesGetter   = natsHeaderCarrier{}
+)
+
+// Get returns the first value associated with the passed key.
+func (hc natsHeaderCarrier) Get(key string) string {
+	return nats.Header(hc).Get(key)
+}
+
+// Values returns all values associated with the passed key.
+func (hc natsHeaderCarrier) Values(key string) []string {
+	return nats.Header(hc).Values(key)
+}
+
+// Set stores the key-value pair.
+func (hc natsHeaderCarrier) Set(key, value string) {
+	nats.Header(hc).Set(key, value)
+}
+
+// Keys lists the keys stored in this carrier.
+func (hc natsHeaderCarrier) Keys() []string {
+	return slices.Collect(maps.Keys(hc))
 }

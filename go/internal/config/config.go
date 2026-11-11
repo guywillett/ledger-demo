@@ -23,11 +23,18 @@ import (
 // LogLevels are the accepted values of LOG_LEVEL: pino's level names, as in Node.
 var LogLevels = []string{"fatal", "error", "warn", "info", "debug", "trace", "silent"}
 
+// LogsExporters are the accepted values of OTEL_LOGS_EXPORTER (slice 5 decision 93): otlp, the
+// specification's default (stdout and a copy to the telemetry backend), or none (stdout only). The
+// specification's others (console) have no use here, as in Node.
+var LogsExporters = []string{"otlp", "none"}
+
 // Shared is the configuration of every long-running process that uses the database (the API,
 // the relay, the deposit-worker and the submitter).
 type Shared struct {
-	DatabaseURL string
-	LogLevel    string
+	DatabaseURL  string
+	LogLevel     string
+	TelemetryURL string
+	LogsExporter string
 }
 
 // NATS is the configuration of every process that connects to NATS (the relay, the
@@ -36,11 +43,16 @@ type NATS struct {
 	URL string
 }
 
-// ParseShared reads DATABASE_URL (required) and LOG_LEVEL (default info).
+// ParseShared reads DATABASE_URL (required), LOG_LEVEL (default info),
+// OTEL_EXPORTER_OTLP_ENDPOINT (optional: telemetry is off without it; slice 5) and
+// OTEL_LOGS_EXPORTER (default otlp). Go's SDK doesn't read OTEL_LOGS_EXPORTER itself (only the
+// contrib autoexport package does), so it is read here, checked like any other variable.
 func ParseShared(p *Parser) Shared {
 	return Shared{
-		DatabaseURL: p.URL("DATABASE_URL"),
-		LogLevel:    p.OneOf("LOG_LEVEL", "info", LogLevels),
+		DatabaseURL:  p.URL("DATABASE_URL"),
+		LogLevel:     p.OneOf("LOG_LEVEL", "info", LogLevels),
+		TelemetryURL: p.OptionalURL("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		LogsExporter: p.OneOf("OTEL_LOGS_EXPORTER", "otlp", LogsExporters),
 	}
 }
 
@@ -64,6 +76,22 @@ type Parser struct {
 // NewParser returns a Parser reading from lookup (usually os.LookupEnv).
 func NewParser(lookup Lookup) *Parser {
 	return &Parser{lookup: lookup}
+}
+
+// OptionalURL reads an optional absolute URL (it must have a scheme): "" if unset or set but
+// empty, so OTEL_EXPORTER_OTLP_ENDPOINT= turns telemetry off, as in Node. (URL, for a required
+// variable, checks an empty value instead.)
+func (p *Parser) OptionalURL(name string) string {
+	value, ok := p.lookup(name)
+	if !ok || value == "" {
+		return ""
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" {
+		p.Fail(name, "must be an absolute URL")
+		return ""
+	}
+	return value
 }
 
 // URL reads a required absolute URL (it must have a scheme, e.g. postgres:// or nats://).

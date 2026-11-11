@@ -4,7 +4,7 @@ Portfolio project: a small payment event-processing system (deposits with a pseu
 
 ## Specs
 
-- Work is done in slices. The current slice spec is the source of truth: `docs/slices/slice-4-api.md`.
+- Work is done in slices. The current slice spec is the source of truth: `docs/slices/slice-5-observability.md`.
 - Design decisions live in the spec's *Decisions* section and in `docs/decisions/`. Don't contradict them silently: if something in a spec looks wrong or unworkable, stop and raise it.
 
 ## How we work
@@ -33,7 +33,8 @@ Portfolio project: a small payment event-processing system (deposits with a pseu
 - **Status codes follow the caller** (slice 2 decision 38): the client API (top of `src/api/`) uses conventional REST codes; provider webhooks live under `src/api/webhooks/` at `/provider/…` and follow the webhook contract (`204` for anything recorded or deliberately handled, `400` only for an unusable body, `500` when a retry can help).
 - **Migrations:** plain SQL in `db/migrations/`, run by dbmate. Language-neutral: shared by the Node and Go implementations, neither of which migrates.
 - **Versions:** pin Docker image tags and dependency versions; commit lockfiles.
-- **Logging:** structured JSON with `request_id`, `deposit_id`, `event_id` where relevant. Never use `time`, `level` or `msg` as field names: they would duplicate the built-in fields (readers keep the last), and Go renames them to `attr.*`.
+- **Logging:** structured JSON with `request_id`, `deposit_id`, `event_id` where relevant. Never use `time`, `level` or `msg` as field names: they would duplicate the built-in fields (readers keep the last), and Go renames them to `attr.*`. In a traced context a line also carries `trace_id` and `span_id`.
+- **Telemetry** (slice 5): OpenTelemetry in both implementations, by `contracts/telemetry.md`, which lists every span, attribute, metric and log field both emit; change it with the code. Its rules: bounded cardinality (IDs in span attributes and logs, never in span names or metric labels), no personal data (statements without values, no client addresses, IBANs or names), and telemetry never touches idempotency or blocks the work (decisions 79 and 83). Metrics are an allow-list (the metric views, `METRIC_VIEWS` and `telemetry.ContractMetrics`): a new metric is added there, or it's dropped, with a test through the real views. Stdout's log lines are the source of truth; the OTLP copy is droppable.
 
 ## Go (`go/`)
 
@@ -41,7 +42,7 @@ The Go implementation (slice 3) follows the conventions above (SQL, no check-the
 
 - **Explain Go idioms on first use,** and where a Go idiom answers the same need as a Node one in this repo, name it (e.g. `defer` for `finally`, an interface satisfied implicitly for a TypeScript structural type, `errors.Is` for `instanceof`).
 - **Layout:** module `github.com/guywillett/ledger-demo/go` in `go/`; one binary per process in `cmd/<process>/`; packages by concern in `internal/`, layered (decision 57): foundations (`config`, `db`, `ids`, `money`, `sepa`, `logging`, …) ← entities (`deposits`, `withdrawals`, `outbox`) ← `ledger` ← orchestration (`ingestion`, `compliance`, `requests`, `consumer`) ← processes and `api`. No `shared`, `util` or `common` packages.
-- **Standard library first:** `net/http` (method and path patterns, no framework), `encoding/json`, `log/slog`, `context`, `testing`. Third-party only where the standard library has no equivalent (`pgx` v5, nats.go's `jetstream`, `google/uuid`, `typeid-go`), each pinned in `go.mod`.
+- **Standard library first:** `net/http` (method and path patterns, no framework), `encoding/json`, `log/slog`, `context`, `testing`. Third-party only where the standard library has no equivalent (`pgx` v5, nats.go's `jetstream`, `google/uuid`, `typeid-go`, OpenTelemetry's SDK, `otelhttp` and `otelslog`), each pinned in `go.mod`.
 - **Errors are values:** return `error`, wrap with `fmt.Errorf("…: %w", err)`, match with `errors.Is` / `errors.As`. Panic only for programmer errors at start-up.
 - **`context.Context` first** in anything that does I/O; cancellation drives shutdown.
 - **SQL:** raw, parameterised, hand-mapped with `pgx`, in data-access functions; no ORM, query builder or code generation. `db.InTx` is `withTransaction`; a `db.Tx` (only `InTx` creates one) or a `db.Querier` (pool or `Tx`) as in Node.

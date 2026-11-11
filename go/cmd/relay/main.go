@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/logging"
 	"github.com/guywillett/ledger-demo/go/internal/relay"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 )
 
 // relayConfig is the relay's environment, with Node's names, defaults and bounds.
@@ -81,6 +83,9 @@ func run() error {
 	if logErr != nil {
 		logger, _ = logging.New(os.Stdout, "relay", "info")
 	}
+	// The process's logger is slog's default too, for code with no logger of its own (package db's
+	// after-commit hooks): its lines then come out as the process's JSON, not slog's plain text.
+	slog.SetDefault(logger)
 	fail := func(err error) error {
 		logging.Fatal(context.Background(), logger, "startup failed", "err", err)
 		return err
@@ -92,6 +97,19 @@ func run() error {
 	// Cancelled by SIGTERM (docker compose stop) or SIGINT (Ctrl-C), as in cmd/api.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	telemetryConfig := telemetry.Config{
+		Endpoint: cfg.TelemetryURL,
+		Service:  "relay",
+		Logger:   logger,
+		Logs:     cfg.LogsExporter,
+	}
+	stopTelemetry, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		return fail(err)
+	}
+	// Deferred first, so it runs last: after the work has stopped, so its last spans are in.
+	defer stopTelemetry()
 
 	conn, err := broker.Connect(cfg.NATS.URL, "ledger-demo-relay", logger)
 	if err != nil {

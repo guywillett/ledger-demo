@@ -23,6 +23,7 @@ import (
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/ids"
 	"github.com/guywillett/ledger-demo/go/internal/money"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 )
 
 // Status is a deposit's status. A defined string type: a plain string can't be passed where a
@@ -166,5 +167,8 @@ func TransitionStatus(
 	if _, err := tx.Exec(ctx, historySQL, id, pair.from, pair.to, reasonArg); err != nil {
 		return Transitioned{}, false, fmt.Errorf("deposit %v %v history: %w", id, t, err)
 	}
+	tx.AfterCommit(
+		func() { telemetry.CountTransition("deposit", string(pair.from), string(pair.to)) },
+	)
 	return moved, true, nil
 }

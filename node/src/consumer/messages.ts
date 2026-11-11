@@ -16,6 +16,11 @@ import { fromTypeId, type Uuid } from '../shared/ids.ts';
 //   help. A missed write leaves a stale in_progress row instead, which reconciliation reports.
 export type DeliveredMessage = {
   readonly body: string;
+  // The subject it was published on (deposit.created, …).
+  readonly subject: string;
+  // Its headers (Nats-Msg-Id, and the publish's trace context: traceparent, …), as strings, for
+  // the processing span's link (slice 5 decision 82). Observation only (decision 83).
+  readonly headers: Readonly<Record<string, string>>;
   // The Nats-Msg-Id header (transport only).
   readonly natsMsgId: string | null;
   // 1 for the first delivery, then 2, 3, ... for redeliveries.
@@ -34,6 +39,10 @@ export type DeliveredMessage = {
 export function delivered(m: JsMsg): DeliveredMessage {
   return {
     body: m.string(),
+    subject: m.subject,
+    headers: Object.fromEntries(
+      m.headers?.keys().map((name) => [name, m.headers?.get(name) ?? '']) ?? [],
+    ),
     natsMsgId: m.headers?.get('Nats-Msg-Id') || null,
     deliveryAttempt: m.info.deliveryCount,
     ack: () => m.ack(),
@@ -53,6 +62,35 @@ export function parseEvent<S extends z.ZodType>(schema: S, body: string): z.outp
   }
   const result = schema.safeParse(json);
   return result.success ? result.data : undefined;
+}
+
+// The deposit_id or withdrawal_id of a message that may be invalid, as in its body (a TypeID), for
+// the processing span's attributes: each only if it is a valid TypeID of its kind, {} if there is
+// none to read. As peekEventId: no other validation. Go: peekID.
+export function peekEntityIds(body: string): Record<string, string> {
+  let json: unknown;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    return {};
+  }
+  if (typeof json !== 'object' || json === null) return {};
+  const fields = json as Record<string, unknown>;
+  const ids: Record<string, string> = {};
+  for (const [key, prefix] of [
+    ['deposit_id', 'dep'],
+    ['withdrawal_id', 'wd'],
+  ] as const) {
+    const value = fields[key];
+    if (typeof value !== 'string') continue;
+    try {
+      fromTypeId(prefix, value); // throws unless a TypeID of this kind holding a UUIDv7
+      ids[key] = value;
+    } catch {
+      // Not one: left out, as Go leaves it out.
+    }
+  }
+  return ids;
 }
 
 // The event_id of a message that may be invalid, for the delivery log: null if there is none

@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -25,6 +27,8 @@ import (
 // so a test can look at the delivery log at that moment.
 type fakeMessage struct {
 	body     string
+	subject  string
+	header   nats.Header // the trace context's headers, if a test sets them
 	msgID    string
 	attempt  int
 	failSend error // returned by every signal, as a closed connection would
@@ -37,10 +41,18 @@ type fakeMessage struct {
 }
 
 func message(body string) *fakeMessage {
-	return &fakeMessage{body: body, msgID: "msg-" + ids.New[ids.Event]().TypeID(), attempt: 1}
+	return &fakeMessage{
+		body:    body,
+		subject: "test.event",
+		header:  nats.Header{},
+		msgID:   "msg-" + ids.New[ids.Event]().TypeID(),
+		attempt: 1,
+	}
 }
 
 func (m *fakeMessage) Body() []byte         { return []byte(m.body) }
+func (m *fakeMessage) Subject() string      { return m.subject }
+func (m *fakeMessage) Header() nats.Header  { return m.header }
 func (m *fakeMessage) NATSMsgID() string    { return m.msgID }
 func (m *fakeMessage) DeliveryAttempt() int { return m.attempt }
 

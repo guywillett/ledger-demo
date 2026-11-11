@@ -92,6 +92,7 @@ provider ──POST /provider/transfer-updates (webhook)──► API ──► 
 | Exact money | integer minor units, digit strings in JSON, never floats ([ADR 0001](docs/decisions/0001-money-representation.md)) | [`vectors.test.ts`](node/test/vectors.test.ts) · [`money_test.go`](go/internal/money/money_test.go) |
 | The books agree | reconciliation: balances against the journal and the statuses | [`reconcile.test.ts`](node/test/reconciliation/reconcile.test.ts) · Node's reconciliation, after the demo on every stack |
 | One contract for every implementation | every test response and published event checked against `contracts/` | [`contract.ts`](node/test/contract.ts) · [`contracttest.go`](go/internal/contracttest/contracttest.go) |
+| A payment can be followed across processes and implementations | each event keeps its request's trace context in the outbox and carries the publish's in NATS headers; each step is a trace, linked to the one before | [`propagation.telemetry.test.ts`](node/test/telemetry/propagation.telemetry.test.ts) · [`relay/telemetry_test.go`](go/internal/relay/telemetry_test.go), [`consumer/propagation_test.go`](go/internal/consumer/propagation_test.go) |
 
 Each row in full, with its test cases: [`docs/guarantees.md`](docs/guarantees.md).
 
@@ -158,33 +159,29 @@ With ten minutes to spare, start with these. Each concept is in both implementat
 | [`node/src/reconciliation/`](node/src/reconciliation/) (Node only) | Do the books agree? Balances against the movement journal against deposit and withdrawal statuses, whichever implementation wrote them. |
 | [`docs/slices/`](docs/slices/) | The specs: what each slice builds, its numbered decisions and why, and the known gaps. |
 
-### Repository layout
+## Observability
 
-```text
-node/             the Node.js/TypeScript implementation (the reference): API, relay, deposit-worker, submitter,
-                  and the Node-only provider-sim and reconciliation
-  src/            one folder per concern (api, ledger, outbox, relay, consumer, deposit-worker, submitter, …)
-  test/           integration tests against the compose services; e2e tests kill real processes
-go/               the Go implementation: API, relay, deposit-worker, submitter
-  cmd/            one binary per process
-  internal/       packages by concern, layered (ledger, outbox, consumer, …), each with its tests
-db/migrations/    plain SQL run by dbmate, shared by both implementations
-contracts/        OpenAPI and event schemas, and the shared test vectors (vectors/)
-nats/             JetStream stream and consumer definitions
-scripts/          the end-to-end demo (HTTP and compose only, so it runs against any stack), the
-                  shared-consumer and differential checks
-docs/             slice specs with their decisions; decisions/ for cross-cutting ones
+A payment crosses the API, the outbox, the relay, a NATS stream and a consumer, in either implementation or any mix of the two. OpenTelemetry follows it: each step is a trace of its own, span-linked to the one that caused it (the consumer's processing to the relay's publish, the publish to the API request). A request's trace ends with the request; it doesn't stay open while the event waits in the outbox or the stream. The trace stops at the provider: no trace context is taken from or sent to outside parties ([decision 84](docs/slices/slice-5-observability.md#decisions)), so a settlement webhook starts a new trace, and the payment's ID in the logs connects the two.
+
+What the services emit is a contract, like the API and the events ([`contracts/telemetry.md`](contracts/telemetry.md)). IDs go in span attributes and logs, never in span names or metric labels, so the number of series stays bounded. There's no personal data: spans carry SQL text without its values, no client addresses, IBANs or names. The trace context travels in NATS headers beside the message ID, never in its place, so telemetry can't affect deduplication. Telemetry is exported in the background and dropped rather than allowed to block, and once built, alerting will read database state, never telemetry that can be dropped. CI runs the demo with the telemetry backend absent, and it found one way telemetry can still hurt the work: an unresolvable endpoint can tie up Node's DNS threads (see the [slice 5 spec's Known gaps](docs/slices/slice-5-observability.md#known-gaps-deliberate)). Logs stay on stdout, the source of truth, with a copy sent to the telemetry backend.
+
+```sh
+docker compose --profile telemetry up -d --build   # adds grafana/otel-lgtm: Grafana with Tempo, Loki and Prometheus in one container (development only)
+scripts/demo.sh
+# Grafana: http://localhost:3002/d/ledger-demo (admin / admin), request rates and the pipeline's transitions
 ```
+
+To follow a deposit, in Grafana's *Explore*: Tempo, `{ span.deposit_id = "dep_…" }`, finds its publish and its processing, each linked to the step before; Loki, `{service_name=~".+"} | deposit_id = "dep_…"`, lists its log lines from every service, each with a link to its trace. More in [`docs/development.md`](docs/development.md#telemetry); the design in the [slice 5 spec](docs/slices/slice-5-observability.md).
 
 ## Known gaps
 
-A selection, all deliberate. The full lists, each gap with its evolution path, are under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md), [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md), [slice 3](docs/slices/slice-3-go.md) and [slice 4](docs/slices/slice-4-api.md) specs. Where the project could go next: [`docs/next-steps.md`](docs/next-steps.md).
+A selection, all deliberate. The full lists, each gap with its evolution path, are under *Known gaps* in the [slice 1](docs/slices/slice-1-incoming-payments.md), [slice 2](docs/slices/slice-2-outbox-and-withdrawals.md), [slice 3](docs/slices/slice-3-go.md), [slice 4](docs/slices/slice-4-api.md) and [slice 5](docs/slices/slice-5-observability.md) specs. Where the project could go next: [`docs/next-steps.md`](docs/next-steps.md).
 
 - **Security:** no webhook signatures, client authentication, rate limiting, NATS credentials, per-service database roles or encryption. By design, events carry no personal data, and consumers act only on rows already in the database through conditional transitions, so a forged event can't create a deposit or move money.
 - **A customer ledger, not a general ledger:** the books explain customer balances, not the bank's; there are no company-side accounts. In production: cash at the bank = customer balances + suspense + treasury.
 - **Webhooks are the fast path, not the guarantee:** a real integration also polls the provider and reconciles against the daily statement.
 - **No dead-letter handling:** a message that exhausts `max_deliver` or is terminated is only logged; reconciliation shows it as stuck.
-- **Observability:** structured JSON logs only, with `alert: true` where alerting would hook in; no metrics or tracing.
+- **Observability:** traces, metrics and logs over OTLP (OpenTelemetry's protocol), into a development backend (one container); one pipeline metric (the transition counter) and one dashboard. The time-in-status metrics and the alerts on stuck items are designed, not built; logs mark with `alert: true` where alerting would hook in.
 - **One provider, one scheme, one currency:** SEPA in EUR only; the SEPA country list isn't yet verified against the EPC's.
 - **Housekeeping:** published outbox rows and idempotency keys are kept for ever; the relay polls (up to 1 s).
 - **Simplifications:** random approve/reject; one IBAN per account; no compliance checks on withdrawals.
@@ -200,3 +197,22 @@ where needed, and commit. [`CLAUDE.md`](CLAUDE.md) holds the conventions. Learni
 Node/TypeScript and Go was half the point, so no step was accepted until I understood it.
 
 For running it locally, the tests and the tooling, see [`docs/development.md`](docs/development.md).
+
+## Repository layout
+
+```text
+node/             the Node.js/TypeScript implementation (the reference): API, relay, deposit-worker, submitter,
+                  and the Node-only provider-sim and reconciliation
+  src/            one folder per concern (api, ledger, outbox, relay, consumer, deposit-worker, submitter, …)
+  test/           integration tests against the compose services; e2e tests kill real processes
+go/               the Go implementation: API, relay, deposit-worker, submitter
+  cmd/            one binary per process
+  internal/       packages by concern, layered (ledger, outbox, consumer, …), each with its tests
+db/migrations/    plain SQL run by dbmate, shared by both implementations
+contracts/        OpenAPI and event schemas, the telemetry contract, and the shared test vectors (vectors/)
+nats/             JetStream stream and consumer definitions
+grafana/          the Grafana dashboard provisioned into otel-lgtm (compose profile `telemetry`)
+scripts/          the end-to-end demo (HTTP and compose only, so it runs against any stack), the
+                  shared-consumer and differential checks
+docs/             slice specs with their decisions; decisions/ for cross-cutting ones
+```

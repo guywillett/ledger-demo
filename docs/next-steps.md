@@ -1,8 +1,8 @@
 # Next steps
 
-Where the project could go after `v0.4-api`. Not a plan: a map of the directions that would add
-the most, each tied to what the system already has. The deliberate gaps they'd close are argued
-under *Known gaps* in the slice specs; this page groups them by what the work would show.
+Where the project could go after `v0.5-observability`. Not a plan: a map of the directions that
+would add the most, each tied to what the system already has. The deliberate gaps they'd close are
+argued under *Known gaps* in the slice specs; this page groups them by what the work would show.
 
 ## Production behaviour
 
@@ -15,9 +15,17 @@ How the system behaves under load and failure, beyond what the demo and CI exerc
 - **Concurrency and fault testing:** random interleavings of duplicates, retries and kills, with
   reconciliation as the oracle (a property-based test of the whole system); network faults with
   Toxiproxy (NATS dropping, the database slowing).
-- **Observability:** metrics (Prometheus); tracing with OpenTelemetry carried through the API, the
-  outbox, NATS (the trace context in message headers) and the workers; alerts on the log lines
-  that already carry `alert: true`.
+- **Observability:** built in [slice 5](slices/slice-5-observability.md) (traces through the
+  outbox and NATS, the telemetry contract, logs to the backend, the transition counter, a
+  dashboard); next, from its *Next*:
+  - time in each status and end to end, as histograms per step;
+  - the database-derived gauges (how many in each status, the oldest's age) and alerts on age, not
+    count: a stuck item, a stalled pipeline, a slowing step, and the log lines that already carry
+    `alert: true`;
+  - exemplars, so a metric point links to a sample trace;
+  - the infrastructure exporters (`postgres_exporter` with `pg_stat_statements`, NATS's);
+  - message latency by stage;
+  - sampling, and a real Collector or a per-node agent in production.
 - **Operator tooling:** dead-letter handling and re-driving terminated messages; resolving
   deposits in suspense; housekeeping of published outbox rows (pruning or partitioning).
 
@@ -61,8 +69,10 @@ What a real payment ledger needs that this one simplifies.
 
 ## Suggested order
 
-1. Load testing and observability: quick, visible, and the first questions about any system like
-   this.
+1. Load testing, with observability's remaining metrics alongside (time in status, the gauges and
+   their alerts): slice 5's traces and dashboard are what a load test reads, and the pipeline's
+   metrics are best shaped against real load, where a step's p95 and an item's age mean
+   something. Quick, visible, and the first questions about any system like this.
 2. Authentication at the account prefix and webhook signatures.
 3. The double-entry ledger: the largest step, and the one that makes this a full ledger.
 4. Deployment, whenever a real environment is useful.

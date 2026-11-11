@@ -10,6 +10,7 @@ import (
 	"github.com/guywillett/ledger-demo/go/internal/db"
 	"github.com/guywillett/ledger-demo/go/internal/ids"
 	"github.com/guywillett/ledger-demo/go/internal/money"
+	"github.com/guywillett/ledger-demo/go/internal/telemetry"
 	"github.com/guywillett/ledger-demo/go/internal/withdrawals"
 )
 
@@ -135,6 +136,9 @@ func CreateWithdrawal(
 	if err != nil {
 		return withdrawals.Withdrawal{}, false, err
 	}
+	tx.AfterCommit(
+		func() { telemetry.CountTransition("withdrawal", "none", "held") },
+	)
 	return created, true, nil
 }
 

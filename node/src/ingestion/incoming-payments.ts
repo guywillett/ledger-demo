@@ -9,6 +9,7 @@ import {
   type UnmatchedDeposit,
 } from '../deposits/deposits.ts';
 import { enqueueDepositCreated } from './events.ts';
+import { countTransition } from '../shared/metrics.ts';
 
 // Ingestion: records provider notifications as deposits, and a new deposit's deposit.created
 // event in the outbox. This is the edge where provider identifiers (IBANs, provider account IDs)
@@ -127,6 +128,8 @@ export async function recordNotification(
   ]);
   const row = result.rows[0];
   if (row !== undefined) {
+    // A deposit is created (matched or not): the pipeline's entry, counted from "none".
+    if (row.inserted) countTransition(tx, { entity: 'deposit', from: null, to: row.status });
     if (row.status === 'unmatched') {
       const deposit = unmatchedDepositFromRow(row);
       return row.inserted ? { kind: 'unmatched', deposit } : { kind: 'duplicate', deposit };

@@ -307,7 +307,9 @@ describe('POST /provider/incoming-payments: suspense', () => {
       body.network_transaction_id,
     );
     expect(report.depositMismatches.map((m) => m.depositId)).not.toContain(deposit?.id);
-  });
+    // A longer timeout than Vitest's 5 s: the whole-database reconciliation covers every row the
+    // test database has ever held (it's never reset between runs), so it slows as that grows.
+  }, 30_000);
 
   it.each([
     ['an unmatched deposit with an account', 'unmatched', fromTypeId('acct', ALICE.id)],

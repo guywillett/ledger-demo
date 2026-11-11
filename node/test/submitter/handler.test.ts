@@ -68,6 +68,8 @@ function message(body: string, deliveryAttempt = 1): FakeMessage {
   const naks: number[] = [];
   return {
     body,
+    subject: 'withdrawal.held',
+    headers: {},
     natsMsgId: 'wd.held',
     deliveryAttempt,
     calls,

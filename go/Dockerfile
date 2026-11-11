@@ -1,8 +1,8 @@
 # One image for every Go process (slice 3 decision 53): each binary under cmd/ is built and named by
 # its process (api, relay, deposit-worker, submitter), and compose picks the command (decision 51).
 
-# Build stage: the Go toolchain go.mod pins (go1.27.3), on the same Alpine as the Node image.
-FROM golang:1.27.3-alpine3.24 AS build
+# Build stage: the Go toolchain go.mod pins (go1.27.4), on the same Alpine as the Node image.
+FROM golang:1.27.4-alpine3.24 AS build
 # Use this image's Go, never download another: a go.mod asking for a newer toolchain should fail
 # the build, not fetch one.
 ENV GOTOOLCHAIN=local
